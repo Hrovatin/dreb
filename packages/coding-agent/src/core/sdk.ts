@@ -270,6 +270,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const defaultActiveToolNames: ToolName[] = [
 		"read",
 		"bash",
+		"chdir",
 		"edit",
 		"write",
 		"grep",
