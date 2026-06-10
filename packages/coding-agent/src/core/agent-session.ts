@@ -104,6 +104,7 @@ import {
 } from "./tools/index.js";
 import { expandSkillContent } from "./tools/skill.js";
 import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.js";
+import { isWorktreeConflictCommand } from "./worktree-guard.js";
 
 // ============================================================================
 // Constants
@@ -508,6 +509,15 @@ export class AgentSession {
 						return {
 							block: true as const,
 							reason: `Command blocked by forbidden-commands guard: "${pattern}" matched "${command}".\n\n${FORBIDDEN_COMMAND_GUIDANCE}`,
+						};
+					}
+
+					// Check worktree conflicts — prevents checking out a branch that has an active worktree
+					const worktreeConflict = isWorktreeConflictCommand(command, this._cwd);
+					if (worktreeConflict.blocked) {
+						return {
+							block: true as const,
+							reason: worktreeConflict.reason ?? "Command blocked by worktree guard.",
 						};
 					}
 
@@ -3133,6 +3143,7 @@ export class AgentSession {
 			: createAllToolDefinitions(this._cwd, {
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix },
+					chdir: { onChdir: (newCwd: string) => this._changeCwd(newCwd) },
 					skill: {
 						getSkills: () => this._getFilteredSkills(),
 						getSessionId: () => this.sessionId,
@@ -3225,6 +3236,7 @@ export class AgentSession {
 			: [
 					"read",
 					"bash",
+					"chdir",
 					"edit",
 					"write",
 					"grep",
@@ -3245,6 +3257,21 @@ export class AgentSession {
 			activeToolNames: baseActiveToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,
 		});
+	}
+
+	/**
+	 * Change the session's working directory. Rebuilds all tool bindings and system prompt
+	 * to use the new cwd. Called by the `chdir` tool via the `onChdir` callback.
+	 */
+	private _changeCwd(newCwd: string): void {
+		this._cwd = newCwd;
+		this._gitRepoState = getGitRepoState(this._cwd) ?? undefined;
+		this._buildRuntime({
+			activeToolNames: this.getActiveToolNames(),
+			includeAllExtensionTools: true,
+		});
+		// The system prompt and footer will reflect the new cwd after _buildRuntime completes.
+		// No explicit event needed — the rebuilt system prompt is set on the agent immediately.
 	}
 
 	async reload(): Promise<void> {
