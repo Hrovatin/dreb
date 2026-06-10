@@ -583,7 +583,10 @@ describe("skills", () => {
 		it("mach6-review should enforce durable work and scope-aware assessment", () => {
 			const body = readBuiltInSkill("mach6-review");
 			const prepare = body.slice(body.indexOf("## Step 3"), body.indexOf("## Step 4"));
-			const preCheckout = prepare.slice(0, prepare.indexOf("Check out and update the PR branch"));
+			const preCheckout = prepare.slice(
+				0,
+				prepare.indexOf("Instead of switching branches in the current directory, use a git worktree"),
+			);
 			const reviewHandoff = body.slice(body.indexOf("## Step 4"), body.indexOf("## Step 5"));
 			const assessorHandoff = body.slice(body.indexOf("## Step 6"), body.indexOf("## Step 7"));
 
@@ -591,8 +594,8 @@ describe("skills", () => {
 			expect(preCheckout).toContain("Before switching branches, run `git status --porcelain`");
 			expect(preCheckout).toContain("If it returns anything, stop");
 			expect(preCheckout).toContain("use `suggest_next` to offer `/skill:mach6-push`");
-			expect(preCheckout).not.toContain("gh pr checkout <pr-number>");
-			expect(prepare.indexOf("gh pr checkout <pr-number>")).toBeGreaterThan(preCheckout.length);
+			expect(preCheckout).not.toContain("git worktree add");
+			expect(prepare.indexOf("git worktree add")).toBeGreaterThan(preCheckout.length);
 			expect(prepare.match(/^git status --porcelain$/gm)).toHaveLength(1);
 			expect(prepare).toContain('LOCAL_HEAD="$(git rev-parse HEAD)"');
 			expect(prepare).toContain("PR_HEAD=\"$(gh pr view <pr-number> --json headRefOid --jq '.headRefOid')\"");

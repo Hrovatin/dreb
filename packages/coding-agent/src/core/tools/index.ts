@@ -18,6 +18,14 @@ export {
 	createLocalBashOperations,
 } from "./bash.js";
 export {
+	type ChdirToolInput,
+	type ChdirToolOptions,
+	chdirTool,
+	chdirToolDefinition,
+	createChdirTool,
+	createChdirToolDefinition,
+} from "./chdir.js";
+export {
 	createEditTool,
 	createEditToolDefinition,
 	type EditOperations,
@@ -184,6 +192,13 @@ import {
 	createBashTool,
 	createBashToolDefinition,
 } from "./bash.js";
+import {
+	type ChdirToolOptions,
+	chdirTool,
+	chdirToolDefinition,
+	createChdirTool,
+	createChdirToolDefinition,
+} from "./chdir.js";
 import { createEditTool, createEditToolDefinition, editTool, editToolDefinition } from "./edit.js";
 import { createFindTool, createFindToolDefinition, findTool, findToolDefinition } from "./find.js";
 import { createGrepTool, createGrepToolDefinition, grepTool, grepToolDefinition } from "./grep.js";
@@ -243,6 +258,7 @@ const askUserTool = wrapToolDefinition(askUserToolDefinition);
 export const allTools = {
 	read: readTool,
 	bash: bashTool,
+	chdir: chdirTool,
 	edit: editTool,
 	write: writeTool,
 	grep: grepTool,
@@ -261,6 +277,7 @@ export const allTools = {
 export const allToolDefinitions = {
 	read: readToolDefinition,
 	bash: bashToolDefinition,
+	chdir: chdirToolDefinition,
 	edit: editToolDefinition,
 	write: writeToolDefinition,
 	grep: grepToolDefinition,
@@ -281,6 +298,7 @@ export type ToolName = keyof typeof allTools;
 export interface ToolsOptions {
 	read?: ReadToolOptions;
 	bash?: BashToolOptions;
+	chdir?: ChdirToolOptions;
 	subagent?: SubagentToolOptions;
 	skill?: SkillToolOptions;
 	tasks?: { onUpdate: TasksUpdateCallback };
@@ -309,6 +327,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 	const tools: Record<string, ToolDef> = {
 		read: createReadToolDefinition(cwd, options?.read),
 		bash: createBashToolDefinition(cwd, options?.bash),
+		chdir: createChdirToolDefinition(cwd, options?.chdir),
 		edit: createEditToolDefinition(cwd),
 		write: createWriteToolDefinition(cwd),
 		grep: createGrepToolDefinition(cwd),
@@ -352,6 +371,7 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 	const tools: Record<string, Tool> = {
 		read: createReadTool(cwd, options?.read),
 		bash: createBashTool(cwd, options?.bash),
+		chdir: createChdirTool(cwd, options?.chdir),
 		edit: createEditTool(cwd),
 		write: createWriteTool(cwd),
 		grep: createGrepTool(cwd),
