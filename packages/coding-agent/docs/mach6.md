@@ -63,7 +63,7 @@ Commit changes, push to remote, and post a progress comment.
 - Stages files by name (never `git add -A`)
 - Matches the repository's existing commit style
 - Auto-detects the associated PR from the current branch
-- Posts a `<!-- mach6-progress -->` comment with a summary of changes
+- Posts a `<!-- mach6-progress -->` comment with an **Architecture section** (generated from the diff) describing how touched files and functions relate, plus a summary of new and modified files
 - Establishes the durable accountability and recovery checkpoint before formal review
 - Stops after pushing and suggests the review command; it never starts review itself
 
