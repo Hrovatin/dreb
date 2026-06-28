@@ -109,6 +109,70 @@ describe("AgentSession chdir integration", () => {
 		expect(session.systemPrompt).toContain(subDir);
 	});
 
+	it("after chdir, rebuilt tools resolve paths against new cwd", async () => {
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const sessionManager = SessionManager.inMemory();
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: repoDir,
+			agentDir,
+			settingsManager,
+			extensionFactories: [],
+		});
+		await resourceLoader.reload();
+
+		const { session } = await createAgentSession({
+			cwd: repoDir,
+			agentDir,
+			model: findModel("anthropic", "sonnet")!,
+			settingsManager,
+			sessionManager,
+			resourceLoader,
+		});
+
+		// Verify initial cwd
+		expect((session as any)._cwd).toBe(repoDir);
+
+		// Get edit tool before chdir — it should resolve relative paths against repoDir
+		const editBefore = session.getToolDefinition("edit");
+		expect(editBefore).toBeDefined();
+
+		// Execute chdir to subDir
+		const chdirDef = session.getToolDefinition("chdir");
+		await chdirDef!.execute("test-call-id", { path: subDir }, undefined, undefined, undefined as any);
+
+		// Verify cwd was updated
+		expect((session as any)._cwd).toBe(subDir);
+
+		// Get edit tool AFTER chdir — it should be a new instance with the new cwd
+		const editAfter = session.getToolDefinition("edit");
+		expect(editAfter).toBeDefined();
+
+		// The tool instances should be different (rebuilt)
+		expect(editAfter).not.toBe(editBefore);
+
+		// Verify the new edit tool resolves paths against the new cwd by executing
+		// an edit on a file in subDir. Create a file in subDir first.
+		writeFileSync(join(subDir, "test-file.txt"), "old content\n");
+
+		const editResult = await editAfter!.execute(
+			"edit-call-id",
+			{ path: "test-file.txt", oldText: "old content\n", newText: "new content\n" },
+			undefined,
+			undefined,
+			undefined as any,
+		);
+
+		// Should succeed — resolves "test-file.txt" against subDir (new cwd)
+		expect(editResult.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("test-file.txt"),
+		});
+
+		// Verify the file was actually edited in subDir
+		const { readFileSync } = await import("node:fs");
+		expect(readFileSync(join(subDir, "test-file.txt"), "utf-8")).toBe("new content\n");
+	});
+
 	it("_changeCwd rolls back on _buildRuntime failure", async () => {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
 		const sessionManager = SessionManager.inMemory();
