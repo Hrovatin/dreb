@@ -8,6 +8,14 @@ import { DefaultResourceLoader } from "../src/core/resource-loader.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { createChdirTool } from "../src/core/tools/chdir.js";
+
+// Verify that the production-wrapped chdir tool carries requiresSerialExecution: true so
+// that executeToolCallsParallel's pass 1 correctly identifies it as a serial tool.
+it("createChdirTool carries requiresSerialExecution: true", () => {
+	const tool = createChdirTool(process.cwd());
+	expect(tool.requiresSerialExecution).toBe(true);
+});
 
 // Remove GIT_* env vars that leak from git hooks
 const { GIT_DIR: _, GIT_INDEX_FILE: __, GIT_WORK_TREE: ___, ...cleanEnv } = process.env;
