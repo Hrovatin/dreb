@@ -1202,8 +1202,6 @@ describe("parallel mode tool refresh after chdir", () => {
 	it("refreshes tools via getLatestTools after a parallel batch completes (cross-turn)", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 
-		// Track which tool instances are used across turns
-		let _toolVersion = 1;
 		let secondToolVersion: number | undefined;
 
 		const makeTool = (version: number): AgentTool<typeof toolSchema, { value: string }> => ({
@@ -1228,9 +1226,9 @@ describe("parallel mode tool refresh after chdir", () => {
 			label: "Change Directory",
 			description: "Change working directory",
 			parameters: chdirSchema,
+			requiresSerialExecution: true,
 			async execute() {
 				// Simulate what chdir does: rebuild tool bindings
-				_toolVersion = 2;
 				latestTools = [chdirTool, makeTool(2)];
 				return {
 					content: [{ type: "text", text: "Changed directory" }],
@@ -1290,10 +1288,9 @@ describe("parallel mode tool refresh after chdir", () => {
 		expect(secondToolVersion).toBe(2);
 	});
 
-	it("executes chdir eagerly before other tools in a parallel batch (intra-turn)", async () => {
+	it("executes chdir eagerly before other tools in a parallel batch — chdir listed first", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 
-		let _toolVersion = 1;
 		let echoToolVersion: number | undefined;
 		const executionOrder: string[] = [];
 
@@ -1318,9 +1315,9 @@ describe("parallel mode tool refresh after chdir", () => {
 			label: "Change Directory",
 			description: "Change working directory",
 			parameters: chdirSchema,
+			requiresSerialExecution: true,
 			async execute() {
 				executionOrder.push("chdir");
-				_toolVersion = 2;
 				latestTools = [chdirTool, makeTool(2)];
 				return {
 					content: [{ type: "text", text: "Changed directory" }],
@@ -1350,7 +1347,7 @@ describe("parallel mode tool refresh after chdir", () => {
 			const mockStream = new MockAssistantStream();
 			queueMicrotask(() => {
 				if (callIndex === 0) {
-					// Single response with both chdir and echo as parallel calls
+					// chdir listed first, echo second
 					const message = createAssistantMessage(
 						[
 							{ type: "toolCall", id: "tool-1", name: "chdir", arguments: { path: "/new" } },
@@ -1372,9 +1369,99 @@ describe("parallel mode tool refresh after chdir", () => {
 			// consume
 		}
 
-		// chdir should execute before echo (eagerly during preparation)
+		// chdir should execute before echo (pass 1 runs serial tools first)
 		expect(executionOrder).toEqual(["chdir", "echo"]);
 		// echo should use the refreshed tool (version 2) since chdir ran first
+		expect(echoToolVersion).toBe(2);
+	});
+
+	it("executes chdir eagerly before other tools in a parallel batch — chdir listed last", async () => {
+		// This is the order-dependency case: even when echo appears before chdir in the LLM
+		// response, the two-pass approach ensures echo is prepared AFTER chdir has run and
+		// refreshed tool bindings.
+		const toolSchema = Type.Object({ value: Type.String() });
+
+		let echoToolVersion: number | undefined;
+		const executionOrder: string[] = [];
+
+		const makeTool = (version: number): AgentTool<typeof toolSchema, { value: string }> => ({
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executionOrder.push("echo");
+				echoToolVersion = version;
+				return {
+					content: [{ type: "text", text: `v${version}: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		});
+
+		const chdirSchema = Type.Object({ path: Type.String() });
+		const chdirTool: AgentTool<typeof chdirSchema, { path: string }> = {
+			name: "chdir",
+			label: "Change Directory",
+			description: "Change working directory",
+			parameters: chdirSchema,
+			requiresSerialExecution: true,
+			async execute() {
+				executionOrder.push("chdir");
+				latestTools = [chdirTool, makeTool(2)];
+				return {
+					content: [{ type: "text", text: "Changed directory" }],
+					details: { path: "/new" },
+				};
+			},
+		};
+
+		let latestTools: AgentTool<any>[] = [chdirTool, makeTool(1)];
+
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [chdirTool, makeTool(1)],
+		};
+
+		const userPrompt: AgentMessage = createUserMessage("echo and chdir together");
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			toolExecution: "parallel",
+			getLatestTools: () => latestTools,
+		};
+
+		let callIndex = 0;
+		const stream = agentLoop([userPrompt], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					// echo listed first, chdir listed last
+					const message = createAssistantMessage(
+						[
+							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } },
+							{ type: "toolCall", id: "tool-2", name: "chdir", arguments: { path: "/new" } },
+						],
+						"toolUse",
+					);
+					mockStream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage([{ type: "text", text: "done" }]);
+					mockStream.push({ type: "done", reason: "stop", message });
+				}
+				callIndex++;
+			});
+			return mockStream;
+		});
+
+		for await (const _ of stream) {
+			// consume
+		}
+
+		// chdir should STILL execute before echo (pass 1 runs all serial tools first)
+		expect(executionOrder).toEqual(["chdir", "echo"]);
+		// echo should use the refreshed tool (version 2) even though it was listed first
 		expect(echoToolVersion).toBe(2);
 	});
 });
