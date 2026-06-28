@@ -9,12 +9,26 @@ import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createChdirTool } from "../src/core/tools/chdir.js";
+import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.js";
 
 // Verify that the production-wrapped chdir tool carries requiresSerialExecution: true so
 // that executeToolCallsParallel's pass 1 correctly identifies it as a serial tool.
 it("createChdirTool carries requiresSerialExecution: true", () => {
 	const tool = createChdirTool(process.cwd());
 	expect(tool.requiresSerialExecution).toBe(true);
+});
+
+// Verify that the AgentTool → ToolDefinition → AgentTool round-trip (used by
+// _buildRuntime when baseToolsOverride is provided) preserves requiresSerialExecution.
+it("createToolDefinitionFromAgentTool preserves requiresSerialExecution through round-trip", () => {
+	const original = createChdirTool(process.cwd());
+	expect(original.requiresSerialExecution).toBe(true);
+
+	const def = createToolDefinitionFromAgentTool(original);
+	expect(def.requiresSerialExecution).toBe(true);
+
+	const rewrapped = wrapToolDefinition(def);
+	expect(rewrapped.requiresSerialExecution).toBe(true);
 });
 
 // Remove GIT_* env vars that leak from git hooks
