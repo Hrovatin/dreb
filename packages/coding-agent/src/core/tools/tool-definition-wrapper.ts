@@ -11,6 +11,7 @@ export function wrapToolDefinition<TDetails = unknown>(
 		label: definition.label,
 		description: definition.description,
 		parameters: definition.parameters,
+		requiresSerialExecution: definition.requiresSerialExecution,
 		execute: (toolCallId, params, signal, onUpdate) =>
 			definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.() as ExtensionContext),
 	};
