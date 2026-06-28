@@ -28,6 +28,7 @@ export function createChdirToolDefinition(
 		description:
 			"Change the working directory. Validates that the target exists and is inside a git repository. All subsequent tool operations will use the new directory.",
 		parameters: chdirSchema,
+		requiresSerialExecution: true,
 		async execute(_toolCallId, { path }: { path: string }, _signal?, _onUpdate?, _ctx?) {
 			const resolvedPath = resolveToCwd(path, cwd);
 

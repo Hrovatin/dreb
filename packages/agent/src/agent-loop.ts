@@ -652,11 +652,20 @@ async function executeToolCallsParallel(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ToolExecutionResult> {
-	const results: ToolResultMessage[] = [];
-	const runnableCalls: PreparedToolCall[] = [];
+	// Use an indexed slots array to preserve source ordering across two passes.
+	const resultSlots: (ToolResultMessage | undefined)[] = new Array(toolCalls.length);
+	const runnableCalls: Array<{ prepared: PreparedToolCall; index: number }> = [];
 	let endTurn = false;
 
-	for (const toolCall of toolCalls) {
+	// Pass 1: Execute tools marked requiresSerialExecution (e.g. chdir) eagerly and in
+	// order, refreshing currentContext.tools after each. This ensures all subsequent
+	// tool preparations — in Pass 2 — use up-to-date bindings regardless of where in
+	// the LLM response the serial tools appear.
+	for (let i = 0; i < toolCalls.length; i++) {
+		const toolCall = toolCalls[i];
+		const lookedUpTool = currentContext.tools?.find((t) => t.name === toolCall.name);
+		if (!lookedUpTool?.requiresSerialExecution) continue;
+
 		await emit({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
@@ -667,59 +676,77 @@ async function executeToolCallsParallel(
 		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
 		if (preparation.kind === "immediate") {
 			if (preparation.result.endTurn) endTurn = true;
-			results.push(await emitToolCallOutcome(toolCall, preparation.result, preparation.isError, emit));
-		} else if (preparation.tool.name === "chdir") {
-			// Execute chdir eagerly before other tools so that subsequent tool
-			// preparations use refreshed bindings (e.g. updated cwd).
+			resultSlots[i] = await emitToolCallOutcome(toolCall, preparation.result, preparation.isError, emit);
+		} else {
 			const executed = await executePreparedToolCall(preparation, signal, emit);
 			if (executed.result.endTurn) endTurn = true;
-			results.push(
-				await finalizeExecutedToolCall(
-					currentContext,
-					assistantMessage,
-					preparation,
-					executed,
-					config,
-					signal,
-					emit,
-				),
+			resultSlots[i] = await finalizeExecutedToolCall(
+				currentContext,
+				assistantMessage,
+				preparation,
+				executed,
+				config,
+				signal,
+				emit,
 			);
 			if (config.getLatestTools) {
 				currentContext.tools = config.getLatestTools();
 			}
-		} else {
-			runnableCalls.push(preparation);
 		}
 	}
 
-	const runningCalls = runnableCalls.map((prepared) => ({
+	// Pass 2: Prepare and launch remaining tools in parallel. Because Pass 1 has
+	// already run and refreshed tool bindings, preparations here use the latest cwd.
+	for (let i = 0; i < toolCalls.length; i++) {
+		if (resultSlots[i] !== undefined) continue; // handled in Pass 1
+
+		const toolCall = toolCalls[i];
+		await emit({
+			type: "tool_execution_start",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			args: toolCall.arguments,
+		});
+
+		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+		if (preparation.kind === "immediate") {
+			if (preparation.result.endTurn) endTurn = true;
+			resultSlots[i] = await emitToolCallOutcome(toolCall, preparation.result, preparation.isError, emit);
+		} else {
+			runnableCalls.push({ prepared: preparation, index: i });
+		}
+	}
+
+	const runningCalls = runnableCalls.map(({ prepared, index }) => ({
 		prepared,
+		index,
 		execution: executePreparedToolCall(prepared, signal, emit),
 	}));
 
 	for (const running of runningCalls) {
 		const executed = await running.execution;
 		if (executed.result.endTurn) endTurn = true;
-		results.push(
-			await finalizeExecutedToolCall(
-				currentContext,
-				assistantMessage,
-				running.prepared,
-				executed,
-				config,
-				signal,
-				emit,
-			),
+		resultSlots[running.index] = await finalizeExecutedToolCall(
+			currentContext,
+			assistantMessage,
+			running.prepared,
+			executed,
+			config,
+			signal,
+			emit,
 		);
 	}
 
-	// Refresh tools from live state after the batch — allows tools like chdir
-	// to rebuild tool bindings so subsequent turns use the updated cwd.
+	// Refresh tools from live state after the batch so subsequent turns use the
+	// updated bindings (e.g. new cwd after chdir).
 	if (config.getLatestTools) {
 		currentContext.tools = config.getLatestTools();
 	}
 
-	return { results, endTurn };
+	return {
+		results: resultSlots.filter((r): r is ToolResultMessage => r !== undefined),
+		endTurn,
+	};
 }
 
 type PreparedToolCall = {
