@@ -668,6 +668,25 @@ async function executeToolCallsParallel(
 		if (preparation.kind === "immediate") {
 			if (preparation.result.endTurn) endTurn = true;
 			results.push(await emitToolCallOutcome(toolCall, preparation.result, preparation.isError, emit));
+		} else if (preparation.tool.name === "chdir") {
+			// Execute chdir eagerly before other tools so that subsequent tool
+			// preparations use refreshed bindings (e.g. updated cwd).
+			const executed = await executePreparedToolCall(preparation, signal, emit);
+			if (executed.result.endTurn) endTurn = true;
+			results.push(
+				await finalizeExecutedToolCall(
+					currentContext,
+					assistantMessage,
+					preparation,
+					executed,
+					config,
+					signal,
+					emit,
+				),
+			);
+			if (config.getLatestTools) {
+				currentContext.tools = config.getLatestTools();
+			}
 		} else {
 			runnableCalls.push(preparation);
 		}
@@ -692,6 +711,12 @@ async function executeToolCallsParallel(
 				emit,
 			),
 		);
+	}
+
+	// Refresh tools from live state after the batch — allows tools like chdir
+	// to rebuild tool bindings so subsequent turns use the updated cwd.
+	if (config.getLatestTools) {
+		currentContext.tools = config.getLatestTools();
 	}
 
 	return { results, endTurn };
