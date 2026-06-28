@@ -429,6 +429,12 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	promptGuidelines?: string[];
 	/** Parameter schema (TypeBox) */
 	parameters: TParams;
+	/**
+	 * When true, this tool is executed eagerly and serially in `executeToolCallsParallel`,
+	 * before any other tools in the same response are prepared. Use for tools that mutate
+	 * shared state (e.g. cwd) so that subsequent tool preparations use the updated state.
+	 */
+	requiresSerialExecution?: boolean;
 
 	/** Execute the tool. */
 	execute(
