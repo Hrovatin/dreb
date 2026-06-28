@@ -10,10 +10,10 @@ describe.skipIf(!process.env.OPENCODE_API_KEY)("OpenCode Models Smoke Test", () 
 	] as const;
 
 	providers.forEach(({ key, label }) => {
-		const providerModels = Object.values(MODELS[key]);
+		const providerModels = Object.values(MODELS[key]) as Model<any>[];
 		providerModels.forEach((model) => {
 			it(`${label}: ${model.id}`, async () => {
-				const response = await complete(model as Model<any>, {
+				const response = await complete(model, {
 					messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
 				});
 

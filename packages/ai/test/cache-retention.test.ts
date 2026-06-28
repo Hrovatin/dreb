@@ -244,7 +244,7 @@ describe("Cache Retention (DREB_CACHE_RETENTION)", () => {
 			process.env.DREB_CACHE_RETENTION = "long";
 
 			// Create a model with a different baseUrl (simulating a proxy)
-			const baseModel = getModel("openai", "gpt-4o-mini");
+			const baseModel = getModel("openai", "gpt-4o-mini") as Model<"openai-responses">;
 			const proxyModel = {
 				...baseModel,
 				baseUrl: "https://my-proxy.example.com/v1",
@@ -277,7 +277,7 @@ describe("Cache Retention (DREB_CACHE_RETENTION)", () => {
 		});
 
 		it("should omit prompt_cache_key when cacheRetention is none", async () => {
-			const model = getModel("openai", "gpt-4o-mini");
+			const model = getModel("openai", "gpt-4o-mini") as Model<"openai-responses">;
 			let capturedPayload: any = null;
 
 			const { streamOpenAIResponses } = await import("../src/providers/openai-responses.js");
@@ -305,7 +305,7 @@ describe("Cache Retention (DREB_CACHE_RETENTION)", () => {
 		});
 
 		it("should set prompt_cache_retention when cacheRetention is long", async () => {
-			const model = getModel("openai", "gpt-4o-mini");
+			const model = getModel("openai", "gpt-4o-mini") as Model<"openai-responses">;
 			let capturedPayload: any = null;
 
 			const { streamOpenAIResponses } = await import("../src/providers/openai-responses.js");
