@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Model } from "../src/types.js";
 
 const mockState = vi.hoisted(() => ({
 	constructorOpts: undefined as Record<string, unknown> | undefined,
@@ -55,7 +56,7 @@ describe("Third-party Anthropic-compatible endpoints", () => {
 		expect(model?.api).toBe("anthropic-messages");
 		expect(model?.baseUrl).not.toContain("anthropic.com");
 
-		const s = streamAnthropic(model!, context, { apiKey: "test-kimi-key" });
+		const s = streamAnthropic(model as Model<"anthropic-messages">, context, { apiKey: "test-kimi-key" });
 		for await (const event of s) {
 			if (event.type === "error") break;
 		}
@@ -84,7 +85,7 @@ describe("Third-party Anthropic-compatible endpoints", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		expect(model).toBeDefined();
 
-		const s = streamAnthropic(model!, context, { apiKey: "sk-test-key" });
+		const s = streamAnthropic(model as Model<"anthropic-messages">, context, { apiKey: "sk-test-key" });
 		for await (const event of s) {
 			if (event.type === "error") break;
 		}
