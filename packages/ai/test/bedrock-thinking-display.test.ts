@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { type BedrockOptions, buildAdditionalModelRequestFields } from "../src/providers/amazon-bedrock.js";
+import type { Model } from "../src/types.js";
 
 // Adaptive thinking model (Opus 4.8) — honors thinkingDisplay.
-const adaptiveModel = getModel("amazon-bedrock", "anthropic.claude-opus-4-8");
+const adaptiveModel = getModel("amazon-bedrock", "anthropic.claude-opus-4-8") as Model<"bedrock-converse-stream">;
 // Budget-based reasoning model (Sonnet 4.5) — thinkingDisplay must be gated out.
-const budgetModel = getModel("amazon-bedrock", "anthropic.claude-sonnet-4-5-20250929-v1:0");
+const budgetModel = getModel(
+	"amazon-bedrock",
+	"anthropic.claude-sonnet-4-5-20250929-v1:0",
+) as Model<"bedrock-converse-stream">;
 
 describe("Bedrock buildAdditionalModelRequestFields thinking display", () => {
 	it("sets thinking.display=summarized for adaptive models when requested", () => {

@@ -12,10 +12,10 @@ describe.skipIf(process.env.DREB_SKIP_LIVE_API === "1" || !process.env.OPENCODE_
 		] as const;
 
 		providers.forEach(({ key, label }) => {
-			const providerModels = Object.values(MODELS[key]);
+			const providerModels = Object.values(MODELS[key]) as Model<any>[];
 			providerModels.forEach((model) => {
 				it(`${label}: ${model.id}`, async () => {
-					const response = await complete(model as Model<any>, {
+					const response = await complete(model, {
 						messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
 					});
 
