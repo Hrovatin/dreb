@@ -259,9 +259,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 
 	/**
-	 * Called after each tool execution in sequential mode to get the current live tool list.
+	 * Called after tool execution to get the current live tool list.
+	 * In sequential mode: called after each tool call.
+	 * In parallel mode: called after the batch completes (and eagerly after chdir).
 	 * Allows tools like `chdir` to rebuild the tool set mid-turn so that subsequent tool
-	 * calls in the same model response use updated bindings (e.g. new bash cwd).
+	 * calls use updated bindings (e.g. new cwd).
 	 */
 	getLatestTools?: () => AgentTool<any>[];
 }
