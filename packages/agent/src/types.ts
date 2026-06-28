@@ -261,9 +261,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Called after tool execution to get the current live tool list.
 	 * In sequential mode: called after each tool call.
-	 * In parallel mode: called after the batch completes (and eagerly after chdir).
-	 * Allows tools like `chdir` to rebuild the tool set mid-turn so that subsequent tool
-	 * calls use updated bindings (e.g. new cwd).
+	 * In parallel mode: called after each `requiresSerialExecution` tool and after the batch.
+	 * Allows tools that mutate shared state (e.g. cwd) to rebuild tool bindings so that
+	 * subsequent tool calls use updated state.
 	 */
 	getLatestTools?: () => AgentTool<any>[];
 }
@@ -336,6 +336,12 @@ export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
 	// A human-readable label for the tool to be displayed in UI
 	label: string;
+	/**
+	 * When true, this tool is executed eagerly and serially in `executeToolCallsParallel`,
+	 * before any other tools in the same response are prepared. Use for tools that mutate
+	 * shared state (e.g. cwd) so that subsequent tool preparations use the updated state.
+	 */
+	requiresSerialExecution?: boolean;
 	execute: (
 		toolCallId: string,
 		params: Static<TParameters>,
