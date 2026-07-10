@@ -38,6 +38,17 @@ describe("getGitRepoState", () => {
 		test("has openPRs as an array", () => {
 			expect(Array.isArray(state!.openPRs)).toBe(true);
 		});
+
+		test("has worktrees as an array with path and branch for each entry", () => {
+			expect(Array.isArray(state!.worktrees)).toBe(true);
+			// Each worktree entry should have path and branch properties
+			for (const wt of state!.worktrees) {
+				expect(wt).toHaveProperty("path");
+				expect(wt).toHaveProperty("branch");
+				expect(typeof wt.path).toBe("string");
+				expect(typeof wt.branch).toBe("string");
+			}
+		});
 	});
 
 	describe("non-repo test", () => {
