@@ -19,6 +19,7 @@ This skill has two modes:
 3. **Safe git** — Never use `git add -A` or `git add .`. Stage files by name. Never stage secrets.
 4. **Task tracking** — Use the `tasks_update` tool to show progress.
 5. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
+6. **Comment priority** — If PR discussion modifies or contradicts the original plan, **the latest comments are the source of truth**. Parse comment timestamps and apply modifications chronologically. When in doubt, follow the most recent user instructions.
 
 ## Step 1: Parse input
 
@@ -61,16 +62,28 @@ git pull
 
 ## Implement Mode (PR number only)
 
-### Step 3i: Read the plan and full PR context
+### Step 3i: Read the plan and build effective requirements
 
 Read ALL PR comments and the PR body to get complete context:
 ```bash
-gh pr view <pr-number> --json title,body,comments
+gh pr view <pr-number> --json title,body,comments,createdAt
 ```
 
 Find the plan comment (contains `<!-- mach6-plan -->` marker) from the comments. If no plan comment exists, tell the user and suggest running `/skill:mach6-plan` first.
 
-Also read any progress updates, prior review findings, assessments, and discussion — all of this context informs implementation.
+**Build effective requirements:**
+
+1. **Start with the plan** — The `<!-- mach6-plan -->` comment is the baseline.
+
+2. **Scan subsequent comments chronologically** — For each comment after the plan:
+   - If it modifies scope (adds/removes deliverables), update requirements
+   - If it changes acceptance criteria, use the new criteria
+   - If it provides implementation guidance, incorporate it
+   - If it contradicts the plan, **follow the later comment**
+
+3. **Identify the effective requirements** — The plan as modified by all subsequent discussion. This is what you will actually implement.
+
+Also read any progress updates, prior review findings, assessments — all of this context informs implementation. But when the plan and later comments conflict, **the latest comments win**.
 
 ### Step 4i: Set up task tracking
 
@@ -93,9 +106,9 @@ Read all files mentioned in the plan. Understand the existing code before making
 
 Use the `feature-dev` subagent to implement each deliverable. `feature-dev` is a **pre-existing agent definition** shipped with dreb — it has full tool access (read, write, edit, grep, find, ls, bash, search) and uses a strong-tier model with a provider fallback list. Do not override its model unless there's a specific reason.
 
-**For each deliverable in the plan**, launch a `feature-dev` subagent via the `subagent` tool. Provide each agent with:
-- The specific deliverable to implement (files to modify, what to change, expected behavior)
-- The full plan context and any relevant PR discussion
+**For each deliverable in the effective requirements**, launch a `feature-dev` subagent via the `subagent` tool. Provide each agent with:
+- The specific deliverable to implement (from effective requirements, not stale plan if it was modified)
+- The full plan context and any PR discussion that modified the requirements
 - The list of files to read for understanding existing patterns
 - Instructions to run tests and linting after making changes
 - **If the plan includes tests for this deliverable, tests MUST be written as part of the implementation — not deferred**

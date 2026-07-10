@@ -275,7 +275,7 @@ cd ${DREB_SKILL_DIR} && npm install
 
 ## Built-in Skills
 
-dreb ships with **mach6**, a development workflow that orchestrates the full issue-to-merge lifecycle using GitHub as shared memory. Six skills cover each stage:
+dreb ships with **mach6**, a development workflow that orchestrates the full issue-to-merge lifecycle using GitHub as shared memory. Eight skills cover each stage:
 
 | Skill | What it does |
 |---|---|
@@ -285,6 +285,8 @@ dreb ships with **mach6**, a development workflow that orchestrates the full iss
 | `mach6-review` | Multi-agent code review with independent assessment |
 | `mach6-implement` | Implement plans, fix review findings, or fix CI failures |
 | `mach6-publish` | Pre-merge checks, docs update, merge, tag, release |
+| `mach6mini-plan` | Streamlined planning — discuss, plan, open PR (no issue) |
+| `mach6mini-implement` | Streamlined implementation — implement and push in one step |
 
 Built-in skills are always available and can be overridden by placing a skill with the same name in any [user or project location](#locations).
 
