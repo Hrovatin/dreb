@@ -1465,3 +1465,94 @@ describe("parallel mode tool refresh after chdir", () => {
 		expect(echoToolVersion).toBe(2);
 	});
 });
+
+describe("sequential mode tool refresh after chdir", () => {
+	it("refreshes tools via getLatestTools after each tool in sequential mode", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+
+		let secondToolVersion: number | undefined;
+		const executionOrder: string[] = [];
+
+		const makeTool = (version: number): AgentTool<typeof toolSchema, { value: string }> => ({
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executionOrder.push(`echo-v${version}`);
+				if (params.value === "second") {
+					secondToolVersion = version;
+				}
+				return {
+					content: [{ type: "text", text: `v${version}: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		});
+
+		const chdirSchema = Type.Object({ path: Type.String() });
+		const chdirTool: AgentTool<typeof chdirSchema, { path: string }> = {
+			name: "chdir",
+			label: "Change Directory",
+			description: "Change working directory",
+			parameters: chdirSchema,
+			async execute() {
+				executionOrder.push("chdir");
+				// Simulate what chdir does: rebuild tool bindings
+				latestTools = [chdirTool, makeTool(2)];
+				return {
+					content: [{ type: "text", text: "Changed directory" }],
+					details: { path: "/new" },
+				};
+			},
+		};
+
+		let latestTools: AgentTool<any>[] = [chdirTool, makeTool(1)];
+
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [chdirTool, makeTool(1)],
+		};
+
+		const userPrompt: AgentMessage = createUserMessage("chdir then echo twice");
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			toolExecution: "sequential",
+			getLatestTools: () => latestTools,
+		};
+
+		let callIndex = 0;
+		const stream = agentLoop([userPrompt], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					// Turn 1: call chdir, then echo twice in same turn (sequential)
+					const message = createAssistantMessage(
+						[
+							{ type: "toolCall", id: "tool-1", name: "chdir", arguments: { path: "/new" } },
+							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+						],
+						"toolUse",
+					);
+					mockStream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage([{ type: "text", text: "done" }]);
+					mockStream.push({ type: "done", reason: "stop", message });
+				}
+				callIndex++;
+			});
+			return mockStream;
+		});
+
+		for await (const _ of stream) {
+			// consume
+		}
+
+		// In sequential mode, chdir runs first, then getLatestTools is called,
+		// then echo runs with the refreshed tool (version 2)
+		expect(executionOrder).toEqual(["chdir", "echo-v2"]);
+		expect(secondToolVersion).toBe(2);
+	});
+});
