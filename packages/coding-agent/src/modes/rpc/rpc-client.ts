@@ -5,13 +5,28 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import type { AgentEvent, AgentMessage, ThinkingLevel } from "@dreb/agent-core";
+import type { AgentMessage, ThinkingLevel } from "@dreb/agent-core";
 import type { ImageContent } from "@dreb/ai";
-import type { SessionStats } from "../../core/agent-session.js";
+import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
-import type { RpcCommand, RpcResponse, RpcSessionInfo, RpcSessionState, RpcSlashCommand } from "./rpc-types.js";
+import type {
+	RpcAgentTypeInfo,
+	RpcBackgroundAgentInfo,
+	RpcCommand,
+	RpcExtensionUIResponse,
+	RpcPendingMessages,
+	RpcResources,
+	RpcResponse,
+	RpcSessionInfo,
+	RpcSessionState,
+	RpcSettingsSetResult,
+	RpcSettingsSnapshot,
+	RpcSettingsUpdate,
+	RpcSlashCommand,
+	RpcTreeNode,
+} from "./rpc-types.js";
 
 // ============================================================================
 // Types
@@ -65,7 +80,18 @@ export interface ModelInfo {
 	reasoning: boolean;
 }
 
-export type RpcEventListener = (event: AgentEvent) => void;
+/**
+ * Listener for events streamed by the RPC server. The wire carries the full
+ * {@link AgentSessionEvent} union (core AgentEvents plus session-level events like
+ * background_agent_start/end/event, tasks_update, suggest_next).
+ */
+export type RpcEventListener = (event: AgentSessionEvent) => void;
+
+export type RpcExitInfo =
+	| { code: number | null; signal: NodeJS.Signals | null; error?: undefined }
+	| { code?: undefined; signal?: undefined; error: Error };
+
+export type RpcExitListener = (info: RpcExitInfo) => void;
 
 // ============================================================================
 // RPC Client
@@ -75,6 +101,7 @@ export class RpcClient {
 	private process: ChildProcess | null = null;
 	private stopReadingStdout: (() => void) | null = null;
 	private eventListeners: RpcEventListener[] = [];
+	private exitListeners = new Set<RpcExitListener>();
 	private pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	private requestId = 0;
@@ -130,6 +157,7 @@ export class RpcClient {
 			// Guard: skip if this handler belongs to an old, already-stopped process
 			if (this.process !== procRef) return;
 			this.failPendingRequests(`RPC process exited with code ${code}, signal ${signal}`);
+			this.notifyExitListeners({ code, signal });
 		});
 
 		// Spawn failures surface asynchronously as an 'error' event rather than a
@@ -143,6 +171,7 @@ export class RpcClient {
 			if (this.process !== procRef) return;
 			this.spawnError = err;
 			this.failPendingRequests(`RPC process failed to spawn: ${err.message}`);
+			this.notifyExitListeners({ error: err });
 		});
 
 		// Set up strict JSONL reader for stdout.
@@ -231,6 +260,16 @@ export class RpcClient {
 	}
 
 	/**
+	 * Subscribe to child process death/spawn-failure notifications.
+	 */
+	onExit(listener: RpcExitListener): () => void {
+		this.exitListeners.add(listener);
+		return () => {
+			this.exitListeners.delete(listener);
+		};
+	}
+
+	/**
 	 * Get collected stderr output (useful for debugging).
 	 */
 	getStderr(): string {
@@ -287,6 +326,30 @@ export class RpcClient {
 	async getState(): Promise<RpcSessionState> {
 		const response = await this.send({ type: "get_state" });
 		return this.getData(response);
+	}
+
+	/**
+	 * Get loaded context/resources metadata (paths/names only, no file contents).
+	 */
+	async getResources(): Promise<RpcResources> {
+		const response = await this.send({ type: "get_resources" });
+		return this.getData(response);
+	}
+
+	/**
+	 * Get current git branch for the agent cwd.
+	 */
+	async getGitBranch(): Promise<string | null> {
+		const response = await this.send({ type: "get_git_branch" });
+		return this.getData<{ branch: string | null }>(response).branch;
+	}
+
+	/**
+	 * Get cached same-day cost across all sessions, primed by the server on first call.
+	 */
+	async getDailyCost(): Promise<number> {
+		const response = await this.send({ type: "get_daily_cost" });
+		return this.getData<{ cost: number }>(response).cost;
 	}
 
 	/**
@@ -375,6 +438,22 @@ export class RpcClient {
 	}
 
 	/**
+	 * Get pending steering and follow-up messages without clearing them.
+	 */
+	async getPendingMessages(): Promise<RpcPendingMessages> {
+		const response = await this.send({ type: "get_pending_messages" });
+		return this.getData<RpcPendingMessages>(response);
+	}
+
+	/**
+	 * Clear pending steering and follow-up messages, returning the cleared text.
+	 */
+	async clearPendingMessages(): Promise<RpcPendingMessages> {
+		const response = await this.send({ type: "clear_pending_messages" });
+		return this.getData<RpcPendingMessages>(response);
+	}
+
+	/**
 	 * Compact session context.
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
@@ -387,6 +466,13 @@ export class RpcClient {
 	 */
 	async setAutoCompaction(enabled: boolean): Promise<void> {
 		await this.send({ type: "set_auto_compaction", enabled });
+	}
+
+	/**
+	 * Abort in-progress compaction.
+	 */
+	async abortCompaction(): Promise<void> {
+		await this.send({ type: "abort_compaction" });
 	}
 
 	/**
@@ -454,6 +540,15 @@ export class RpcClient {
 	}
 
 	/**
+	 * Delete a session file, trying trash first and falling back to unlink.
+	 * Throws on failure, including when attempting to delete the active session.
+	 */
+	async deleteSession(sessionPath: string): Promise<{ method: "trash" | "unlink" }> {
+		const response = await this.send({ type: "delete_session", sessionPath });
+		return this.getData(response);
+	}
+
+	/**
 	 * Fork from a specific message.
 	 * @returns Object with `text` (the message text) and `cancelled` (if extension cancelled)
 	 */
@@ -468,6 +563,35 @@ export class RpcClient {
 	async getForkMessages(): Promise<Array<{ entryId: string; text: string }>> {
 		const response = await this.send({ type: "get_fork_messages" });
 		return this.getData<{ messages: Array<{ entryId: string; text: string }> }>(response).messages;
+	}
+
+	/**
+	 * Get the session tree and current leaf.
+	 */
+	async getTree(): Promise<{ roots: RpcTreeNode[]; leafId: string | null }> {
+		const response = await this.send({ type: "get_tree" });
+		return this.getData(response);
+	}
+
+	/**
+	 * Navigate to a session tree entry.
+	 * @param targetId Entry ID to navigate to
+	 * @param options Navigation options; timeoutMs is client-side only and is not sent over RPC
+	 * @returns Object with `cancelled: true` if navigation was cancelled, and `editorText` when re-editing a message
+	 */
+	async navigateTree(
+		targetId: string,
+		options?: {
+			summarize?: boolean;
+			customInstructions?: string;
+			replaceInstructions?: boolean;
+			label?: string;
+			timeoutMs?: number;
+		},
+	): Promise<{ cancelled: boolean; editorText?: string }> {
+		const { timeoutMs = 300000, ...commandOptions } = options ?? {};
+		const response = await this.send({ type: "navigate_tree", targetId, ...commandOptions }, timeoutMs);
+		return this.getData(response);
 	}
 
 	/**
@@ -511,11 +635,71 @@ export class RpcClient {
 	}
 
 	/**
+	 * List sessions across all projects.
+	 * Returns sessions sorted by most recently modified first. May be slow with many sessions.
+	 */
+	async listAllSessions(): Promise<RpcSessionInfo[]> {
+		const response = await this.send({ type: "list_all_sessions" });
+		return this.getData<{ sessions: RpcSessionInfo[] }>(response).sessions;
+	}
+
+	/**
+	 * List background subagents tracked by the server's registry (running and
+	 * recently completed), including session dir/file paths where known.
+	 */
+	async listBackgroundAgents(): Promise<RpcBackgroundAgentInfo[]> {
+		const response = await this.send({ type: "list_background_agents" });
+		return this.getData<{ agents: RpcBackgroundAgentInfo[] }>(response).agents;
+	}
+
+	/**
+	 * List discoverable subagent types for the server's current working directory.
+	 */
+	async listAgentTypes(): Promise<RpcAgentTypeInfo[]> {
+		const response = await this.send({ type: "list_agent_types" });
+		return this.getData<{ agentTypes: RpcAgentTypeInfo[] }>(response).agentTypes;
+	}
+
+	/**
+	 * Answer an extension UI request (select/confirm/input/editor) previously
+	 * received as an `extension_ui_request` event. Fire-and-forget: the server
+	 * does not send a response to this message.
+	 */
+	sendExtensionUIResponse(response: RpcExtensionUIResponse): void {
+		if (this._dead || !this.process?.stdin) {
+			const cause = this.spawnError ? ` Spawn error: ${this.spawnError.message}.` : "";
+			throw new Error(`RPC process is not running.${cause} Stderr: ${this.stderr}`);
+		}
+		this.process.stdin.write(serializeJsonLine(response));
+	}
+
+	/**
 	 * Get the dreb version.
 	 */
 	async getVersion(): Promise<string> {
 		const response = await this.send({ type: "get_version" });
 		return this.getData<{ version: string }>(response).version;
+	}
+
+	/**
+	 * Get the persistent default settings (SettingsManager-backed).
+	 * These seed fresh runtimes — for live session state use getState().
+	 */
+	async getSettings(): Promise<RpcSettingsSnapshot> {
+		const response = await this.send({ type: "get_settings" });
+		return this.getData<RpcSettingsSnapshot>(response);
+	}
+
+	/**
+	 * Update persistent default settings. Validates the whole payload before applying
+	 * anything (atomic: on any invalid field, nothing changes). Does NOT touch live
+	 * session state — use setModel/setThinkingLevel/etc. for that.
+	 * Returns the full settings snapshot after the write, plus any loud warnings
+	 * (for example project-level agent model overrides shadowing global writes).
+	 */
+	async setSettings(settings: RpcSettingsUpdate): Promise<RpcSettingsSetResult> {
+		const response = await this.send({ type: "set_settings", settings });
+		return this.getData<RpcSettingsSetResult>(response);
 	}
 
 	// =========================================================================
@@ -546,9 +730,9 @@ export class RpcClient {
 	/**
 	 * Collect events until agent becomes idle.
 	 */
-	collectEvents(timeout = 60000): Promise<AgentEvent[]> {
+	collectEvents(timeout = 60000): Promise<AgentSessionEvent[]> {
 		return new Promise((resolve, reject) => {
-			const events: AgentEvent[] = [];
+			const events: AgentSessionEvent[] = [];
 			const timer = setTimeout(() => {
 				unsubscribe();
 				reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
@@ -568,7 +752,7 @@ export class RpcClient {
 	/**
 	 * Send prompt and wait for completion, returning all events.
 	 */
-	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentEvent[]> {
+	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentSessionEvent[]> {
 		const eventsPromise = this.collectEvents(timeout);
 		await this.prompt(message, images);
 		return eventsPromise;
@@ -591,6 +775,12 @@ export class RpcClient {
 		this.pendingRequests.clear();
 	}
 
+	private notifyExitListeners(info: RpcExitInfo): void {
+		for (const listener of this.exitListeners) {
+			listener(info);
+		}
+	}
+
 	private handleLine(line: string): void {
 		try {
 			const data = JSON.parse(line);
@@ -605,14 +795,14 @@ export class RpcClient {
 
 			// Otherwise it's an event
 			for (const listener of this.eventListeners) {
-				listener(data as AgentEvent);
+				listener(data as AgentSessionEvent);
 			}
 		} catch {
 			// Ignore non-JSON lines
 		}
 	}
 
-	private async send(command: RpcCommandBody): Promise<RpcResponse> {
+	private async send(command: RpcCommandBody, timeoutMs = 30000): Promise<RpcResponse> {
 		if (this._dead || !this.process?.stdin) {
 			// Surface the real spawn cause (e.g. uid/gid EPERM) if one was captured,
 			// rather than a generic message that hides why the process is gone.
@@ -628,7 +818,7 @@ export class RpcClient {
 			const timeout = setTimeout(() => {
 				this.pendingRequests.delete(id);
 				reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
-			}, 30000);
+			}, timeoutMs);
 
 			this.pendingRequests.set(id, {
 				resolve: (response) => {

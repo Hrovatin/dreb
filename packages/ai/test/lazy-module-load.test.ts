@@ -75,8 +75,8 @@ describe.skipIf(skip)("lazy provider module loading", () => {
 	it("loads only the Anthropic SDK when calling the root lazy wrapper", () => {
 		const result = runProbe(`
 			const model = {
-				id: "claude-sonnet-4-20250514",
-				name: "Claude Sonnet 4",
+				id: "claude-sonnet-5",
+				name: "Claude Sonnet 5",
 				api: "anthropic-messages",
 				provider: "anthropic",
 				baseUrl: "https://api.anthropic.com",
@@ -95,7 +95,7 @@ describe.skipIf(skip)("lazy provider module loading", () => {
 
 	it("loads only the Anthropic SDK when dispatching through streamSimple", () => {
 		const result = runProbe(`
-			const model = mod.getModel("anthropic", "claude-sonnet-4-20250514");
+			const model = mod.getModel("anthropic", "claude-sonnet-5");
 			const context = { messages: [{ role: "user", content: "hi" }] };
 			await mod.streamSimple(model, context).result();
 		`);

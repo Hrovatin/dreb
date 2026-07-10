@@ -26,7 +26,7 @@ import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
 import { DefaultPackageManager } from "./core/package-manager.js";
 import { DefaultResourceLoader } from "./core/resource-loader.js";
 import { type CreateAgentSessionOptions, createAgentSession } from "./core/sdk.js";
-import { SessionManager } from "./core/session-manager.js";
+import { type SessionInfo, SessionManager } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { allTools } from "./core/tools/index.js";
@@ -357,8 +357,17 @@ async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: 
 		return { type: "local", path: localMatches[0].path };
 	}
 
-	// Try global search across all projects
-	const allSessions = await SessionManager.listAll();
+	// Try global search across all projects. listAll fails loud on real I/O errors —
+	// convert a rejection into a clean, actionable exit instead of a raw stack dump,
+	// matching the RPC (success:false) and TUI ("Failed to load sessions") consumers.
+	let allSessions: SessionInfo[];
+	try {
+		allSessions = await SessionManager.listAll();
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		log.error(chalk.red(`Failed to list sessions while resolving '${sessionArg}': ${message}`));
+		process.exit(1);
+	}
 	const globalMatches = allSessions.filter((s) => s.id.startsWith(sessionArg));
 
 	if (globalMatches.length >= 1) {
@@ -501,7 +510,7 @@ async function createSessionManager(
 	return undefined;
 }
 
-function buildSessionOptions(
+export function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
 	sessionManager: SessionManager | undefined,
@@ -542,7 +551,7 @@ function buildSessionOptions(
 		}
 	}
 
-	if (!options.model && scopedModels.length > 0 && !parsed.continue && !parsed.resume) {
+	if (!options.model && scopedModels.length > 0 && !parsed.continue && !parsed.resume && !parsed.session) {
 		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
 		const savedProvider = settingsManager.getDefaultProvider();
 		const savedModelId = settingsManager.getDefaultModel();
@@ -598,6 +607,45 @@ function buildSessionOptions(
 	return { options, cliThinkingFromModel };
 }
 
+/**
+ * Handle `dreb dashboard [...args]` — delegate to the @dreb/dashboard package.
+ *
+ * The dashboard is a separate workspace package; coding-agent must not depend
+ * on it (the dashboard depends on coding-agent — a hard dependency here would
+ * be a cycle). Resolution is dynamic: installed → hand over argv; missing →
+ * fail loudly with install instructions.
+ */
+async function handleDashboardCommand(args: string[]): Promise<boolean> {
+	if (args[0] !== "dashboard") {
+		return false;
+	}
+	let entryHref: string;
+	try {
+		entryHref = import.meta.resolve("@dreb/dashboard");
+	} catch {
+		console.error(
+			"The dashboard package is not installed.\n\n" +
+				"Install it with:\n" +
+				"  npm install -g @dreb/dashboard\n\n" +
+				"Then run `dreb dashboard` again, or run `dreb-dashboard` directly.",
+		);
+		process.exit(1);
+	}
+	// Re-exec the dashboard bin with the remaining args so its own arg parser
+	// and process lifecycle (SIGINT shutdown of pooled runtimes) apply.
+	const { spawn } = await import("node:child_process");
+	const { fileURLToPath } = await import("node:url");
+	const child = spawn(process.execPath, [fileURLToPath(entryHref), ...args.slice(1)], {
+		stdio: "inherit",
+	});
+	child.on("exit", (code) => process.exit(code ?? 0));
+	child.on("error", (err) => {
+		console.error(`Failed to launch dashboard: ${err.message}`);
+		process.exit(1);
+	});
+	return true;
+}
+
 async function handleConfigCommand(args: string[]): Promise<boolean> {
 	if (args[0] !== "config") {
 		return false;
@@ -634,6 +682,10 @@ export async function main(args: string[]) {
 	}
 
 	if (await handlePackageCommand(args)) {
+		return;
+	}
+
+	if (await handleDashboardCommand(args)) {
 		return;
 	}
 

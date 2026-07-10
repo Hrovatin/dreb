@@ -142,9 +142,16 @@ export type AgentSessionEvent =
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	| { type: "background_agent_start"; agentId: string; agentType: string; taskSummary: string }
-	| { type: "background_agent_end"; agentId: string; agentType: string; success: boolean }
+	| { type: "background_agent_start"; agentId: string; agentType: string; taskSummary: string; sessionDir?: string }
+	| { type: "background_agent_end"; agentId: string; agentType: string; success: boolean; sessionFile?: string }
+	| {
+			type: "background_agent_event";
+			agentId: string;
+			/** A single AgentSessionEvent (or session header) emitted by the background child process, relayed verbatim. */
+			event: Record<string, unknown>;
+	  }
 	| { type: "parent_paused_for_background_agents"; runningAgentCount: number; turnsUsed: number; turnLimit: number }
+	| { type: "session_name_changed"; name: string }
 	| { type: "tasks_update"; tasks: readonly SessionTask[] }
 	| { type: "suggest_next"; command: string };
 
@@ -265,9 +272,9 @@ export class AgentSession {
 	private _agentEventQueue: Promise<void> = Promise.resolve();
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
-	private _steeringMessages: string[] = [];
+	private _steeringMessages: Array<{ text: string; images?: ImageContent[] }> = [];
 	/** Tracks pending follow-up messages for UI display. Removed when delivered. */
-	private _followUpMessages: string[] = [];
+	private _followUpMessages: Array<{ text: string; images?: ImageContent[] }> = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 
@@ -815,6 +822,7 @@ export class AgentSession {
 				agentId,
 				agentType: result.agent,
 				success: result.exitCode === 0,
+				sessionFile: result.sessionFile,
 			});
 		} catch (emitErr) {
 			log.warn(
@@ -969,12 +977,12 @@ export class AgentSession {
 			const messageText = this._getUserMessageText(event.message);
 			if (messageText) {
 				// Check steering queue first
-				const steeringIndex = this._steeringMessages.indexOf(messageText);
+				const steeringIndex = this._steeringMessages.findIndex((message) => message.text === messageText);
 				if (steeringIndex !== -1) {
 					this._steeringMessages.splice(steeringIndex, 1);
 				} else {
 					// Check follow-up queue
-					const followUpIndex = this._followUpMessages.indexOf(messageText);
+					const followUpIndex = this._followUpMessages.findIndex((message) => message.text === messageText);
 					if (followUpIndex !== -1) {
 						this._followUpMessages.splice(followUpIndex, 1);
 					}
@@ -1726,7 +1734,7 @@ export class AgentSession {
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
-		this._steeringMessages.push(text);
+		this._steeringMessages.push({ text, images: images ? [...images] : undefined });
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
@@ -1742,7 +1750,7 @@ export class AgentSession {
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
-		this._followUpMessages.push(text);
+		this._followUpMessages.push({ text, images: images ? [...images] : undefined });
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
@@ -1863,13 +1871,26 @@ export class AgentSession {
 	 * Useful for restoring to editor when user aborts.
 	 * @returns Object with steering and followUp arrays
 	 */
-	clearQueue(): { steering: string[]; followUp: string[] } {
-		const steering = [...this._steeringMessages];
-		const followUp = [...this._followUpMessages];
+	clearQueue(): {
+		steering: string[];
+		followUp: string[];
+		steeringMessages: Array<{ text: string; images?: ImageContent[] }>;
+		followUpMessages: Array<{ text: string; images?: ImageContent[] }>;
+	} {
+		const steeringMessages = this._steeringMessages.map((message) => ({
+			text: message.text,
+			images: message.images ? [...message.images] : undefined,
+		}));
+		const followUpMessages = this._followUpMessages.map((message) => ({
+			text: message.text,
+			images: message.images ? [...message.images] : undefined,
+		}));
+		const steering = steeringMessages.map((message) => message.text);
+		const followUp = followUpMessages.map((message) => message.text);
 		this._steeringMessages = [];
 		this._followUpMessages = [];
 		this.agent.clearAllQueues();
-		return { steering, followUp };
+		return { steering, followUp, steeringMessages, followUpMessages };
 	}
 
 	/** Number of pending messages (includes both steering and follow-up) */
@@ -1877,13 +1898,23 @@ export class AgentSession {
 		return this._steeringMessages.length + this._followUpMessages.length;
 	}
 
-	/** Get pending steering messages (read-only) */
+	/** Get pending steering message text (read-only compatibility view). */
 	getSteeringMessages(): readonly string[] {
+		return this._steeringMessages.map((message) => message.text);
+	}
+
+	/** Get pending follow-up message text (read-only compatibility view). */
+	getFollowUpMessages(): readonly string[] {
+		return this._followUpMessages.map((message) => message.text);
+	}
+
+	/** Get full pending steering payloads, including inline image attachments. */
+	getSteeringMessagePayloads(): readonly { text: string; images?: ImageContent[] }[] {
 		return this._steeringMessages;
 	}
 
-	/** Get pending follow-up messages (read-only) */
-	getFollowUpMessages(): readonly string[] {
+	/** Get full pending follow-up payloads, including inline image attachments. */
+	getFollowUpMessagePayloads(): readonly { text: string; images?: ImageContent[] }[] {
 		return this._followUpMessages;
 	}
 
@@ -2771,7 +2802,7 @@ export class AgentSession {
 					this.sessionManager.appendCustomEntry(customType, data);
 				},
 				setSessionName: (name) => {
-					this.sessionManager.appendSessionInfo(name);
+					this.setSessionName(name);
 				},
 				getSessionName: () => {
 					return this.sessionManager.getSessionName();
@@ -2963,11 +2994,14 @@ export class AgentSession {
 						parentSessionFile: () => this.sessionFile,
 						modelRegistry: this._modelRegistry,
 						getAgentModelsForAgent: (name: string) => this.settingsManager?.getAgentModelsForAgent(name),
-						onBackgroundStart: (agentId, agentType, taskSummary) => {
-							this._emit({ type: "background_agent_start", agentId, agentType, taskSummary });
+						onBackgroundStart: (agentId, agentType, taskSummary, sessionDir) => {
+							this._emit({ type: "background_agent_start", agentId, agentType, taskSummary, sessionDir });
 						},
 						onBackgroundComplete: (agentId, result, cancelled) => {
 							this._handleBackgroundComplete(agentId, result, cancelled);
+						},
+						onBackgroundEvent: (agentId, event) => {
+							this._emit({ type: "background_agent_event", agentId, event });
 						},
 					},
 				});
@@ -3425,6 +3459,7 @@ export class AgentSession {
 	 */
 	setSessionName(name: string): void {
 		this.sessionManager.appendSessionInfo(name);
+		this._emit({ type: "session_name_changed", name: this.sessionName ?? "" });
 	}
 
 	/**
@@ -3510,6 +3545,22 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+		// Navigating mid-stream would replace agent messages during an active run,
+		// corrupting the conversation state. Fail loudly instead.
+		if (this.isStreaming) {
+			throw new Error(
+				"Cannot navigate the session tree while the agent is streaming. Abort or wait for idle first.",
+			);
+		}
+
+		// A second concurrent navigation (or a compaction) would clobber the shared branch-summary
+		// abort controller and interleave tree mutations. Fail loudly instead.
+		if (this.isCompacting) {
+			throw new Error(
+				"Cannot navigate the session tree while summarization or compaction is in progress. Wait for idle first.",
+			);
+		}
+
 		const oldLeafId = this.sessionManager.getLeafId();
 
 		// No-op if already at target
@@ -3550,142 +3601,160 @@ export class AgentSession {
 			label,
 		};
 
-		// Set up abort controller for summarization
+		// Set up abort controller for summarization. Cleared in the finally below on every
+		// exit path (throws, cancel returns, summary abort, success) so isCompacting cannot
+		// be left wedged true after an early exit.
 		this._branchSummaryAbortController = new AbortController();
-		let extensionSummary: { summary: string; details?: unknown } | undefined;
-		let fromExtension = false;
+		try {
+			let extensionSummary: { summary: string; details?: unknown } | undefined;
+			let fromExtension = false;
 
-		// Emit session_before_tree event
-		if (this._extensionRunner?.hasHandlers("session_before_tree")) {
-			const result = (await this._extensionRunner.emit({
-				type: "session_before_tree",
-				preparation,
-				signal: this._branchSummaryAbortController.signal,
-			})) as SessionBeforeTreeResult | undefined;
+			// Emit session_before_tree event
+			if (this._extensionRunner?.hasHandlers("session_before_tree")) {
+				const result = (await this._extensionRunner.emit({
+					type: "session_before_tree",
+					preparation,
+					signal: this._branchSummaryAbortController.signal,
+				})) as SessionBeforeTreeResult | undefined;
 
-			if (result?.cancel) {
-				return { cancelled: true };
+				if (result?.cancel) {
+					return { cancelled: true };
+				}
+
+				if (result?.summary && options.summarize) {
+					extensionSummary = result.summary;
+					fromExtension = true;
+				}
+
+				// Allow extensions to override instructions and label
+				if (result?.customInstructions !== undefined) {
+					customInstructions = result.customInstructions;
+				}
+				if (result?.replaceInstructions !== undefined) {
+					replaceInstructions = result.replaceInstructions;
+				}
+				if (result?.label !== undefined) {
+					label = result.label;
+				}
 			}
 
-			if (result?.summary && options.summarize) {
-				extensionSummary = result.summary;
-				fromExtension = true;
+			// Run default summarizer if needed
+			let summaryText: string | undefined;
+			let summaryDetails: unknown;
+			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
+				const model = this.model!;
+				const apiKey = await this._modelRegistry.getApiKey(model);
+				if (!apiKey) {
+					throw new Error(`No API key for ${model.provider}`);
+				}
+				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
+				const result = await generateBranchSummary(entriesToSummarize, {
+					model,
+					apiKey,
+					signal: this._branchSummaryAbortController.signal,
+					customInstructions,
+					replaceInstructions,
+					reserveTokens: branchSummarySettings.reserveTokens,
+				});
+				if (result.aborted) {
+					return { cancelled: true, aborted: true };
+				}
+				if (result.error) {
+					throw new Error(result.error);
+				}
+				summaryText = result.summary;
+				summaryDetails = {
+					readFiles: result.readFiles || [],
+					modifiedFiles: result.modifiedFiles || [],
+				};
+			} else if (extensionSummary) {
+				summaryText = extensionSummary.summary;
+				summaryDetails = extensionSummary.details;
 			}
 
-			// Allow extensions to override instructions and label
-			if (result?.customInstructions !== undefined) {
-				customInstructions = result.customInstructions;
+			// Re-check after extension/summarization awaits: prompt dispatch can start streaming
+			// while we yielded (same race class guarded in the prompt path), and the mutation
+			// block below must not replace messages during an active run.
+			if (this.isStreaming) {
+				throw new Error(
+					"Cannot navigate the session tree while the agent is streaming. Abort or wait for idle first.",
+				);
 			}
-			if (result?.replaceInstructions !== undefined) {
-				replaceInstructions = result.replaceInstructions;
-			}
-			if (result?.label !== undefined) {
-				label = result.label;
-			}
-		}
 
-		// Run default summarizer if needed
-		let summaryText: string | undefined;
-		let summaryDetails: unknown;
-		if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
-			const model = this.model!;
-			const apiKey = await this._modelRegistry.getApiKey(model);
-			if (!apiKey) {
-				throw new Error(`No API key for ${model.provider}`);
+			// Determine the new leaf position based on target type
+			let newLeafId: string | null;
+			let editorText: string | undefined;
+
+			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
+				// User message: leaf = parent (null if root), text goes to editor
+				newLeafId = targetEntry.parentId;
+				editorText = this._extractUserMessageText(targetEntry.message.content);
+			} else if (targetEntry.type === "custom_message") {
+				// Custom message: leaf = parent (null if root), text goes to editor
+				newLeafId = targetEntry.parentId;
+				editorText =
+					typeof targetEntry.content === "string"
+						? targetEntry.content
+						: targetEntry.content
+								.filter((c): c is { type: "text"; text: string } => c.type === "text")
+								.map((c) => c.text)
+								.join("");
+			} else {
+				// Non-user message: leaf = selected node
+				newLeafId = targetId;
 			}
-			const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
-			const result = await generateBranchSummary(entriesToSummarize, {
-				model,
-				apiKey,
-				signal: this._branchSummaryAbortController.signal,
-				customInstructions,
-				replaceInstructions,
-				reserveTokens: branchSummarySettings.reserveTokens,
-			});
+
+			// Switch leaf (with or without summary)
+			// Summary is attached at the navigation target position (newLeafId), not the old branch
+			let summaryEntry: BranchSummaryEntry | undefined;
+			if (summaryText) {
+				// Create summary at target position (can be null for root)
+				const summaryId = this.sessionManager.branchWithSummary(
+					newLeafId,
+					summaryText,
+					summaryDetails,
+					fromExtension,
+				);
+				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
+
+				// Attach label to the summary entry
+				if (label) {
+					this.sessionManager.appendLabelChange(summaryId, label);
+				}
+			} else if (newLeafId === null) {
+				// No summary, navigating to root - reset leaf
+				this.sessionManager.resetLeaf();
+			} else {
+				// No summary, navigating to non-root
+				this.sessionManager.branch(newLeafId);
+			}
+
+			// Attach label to target entry when not summarizing (no summary entry to label)
+			if (label && !summaryText) {
+				this.sessionManager.appendLabelChange(targetId, label);
+			}
+
+			// Update agent state
+			const sessionContext = this.sessionManager.buildSessionContext();
+			this.agent.replaceMessages(sessionContext.messages);
+
+			// Emit session_tree event
+			if (this._extensionRunner) {
+				await this._extensionRunner.emit({
+					type: "session_tree",
+					newLeafId: this.sessionManager.getLeafId(),
+					oldLeafId,
+					summaryEntry,
+					fromExtension: summaryText ? fromExtension : undefined,
+				});
+			}
+
+			// Emit to custom tools
+
+			return { editorText, cancelled: false, summaryEntry };
+		} finally {
 			this._branchSummaryAbortController = undefined;
-			if (result.aborted) {
-				return { cancelled: true, aborted: true };
-			}
-			if (result.error) {
-				throw new Error(result.error);
-			}
-			summaryText = result.summary;
-			summaryDetails = {
-				readFiles: result.readFiles || [],
-				modifiedFiles: result.modifiedFiles || [],
-			};
-		} else if (extensionSummary) {
-			summaryText = extensionSummary.summary;
-			summaryDetails = extensionSummary.details;
 		}
-
-		// Determine the new leaf position based on target type
-		let newLeafId: string | null;
-		let editorText: string | undefined;
-
-		if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-			// User message: leaf = parent (null if root), text goes to editor
-			newLeafId = targetEntry.parentId;
-			editorText = this._extractUserMessageText(targetEntry.message.content);
-		} else if (targetEntry.type === "custom_message") {
-			// Custom message: leaf = parent (null if root), text goes to editor
-			newLeafId = targetEntry.parentId;
-			editorText =
-				typeof targetEntry.content === "string"
-					? targetEntry.content
-					: targetEntry.content
-							.filter((c): c is { type: "text"; text: string } => c.type === "text")
-							.map((c) => c.text)
-							.join("");
-		} else {
-			// Non-user message: leaf = selected node
-			newLeafId = targetId;
-		}
-
-		// Switch leaf (with or without summary)
-		// Summary is attached at the navigation target position (newLeafId), not the old branch
-		let summaryEntry: BranchSummaryEntry | undefined;
-		if (summaryText) {
-			// Create summary at target position (can be null for root)
-			const summaryId = this.sessionManager.branchWithSummary(newLeafId, summaryText, summaryDetails, fromExtension);
-			summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
-
-			// Attach label to the summary entry
-			if (label) {
-				this.sessionManager.appendLabelChange(summaryId, label);
-			}
-		} else if (newLeafId === null) {
-			// No summary, navigating to root - reset leaf
-			this.sessionManager.resetLeaf();
-		} else {
-			// No summary, navigating to non-root
-			this.sessionManager.branch(newLeafId);
-		}
-
-		// Attach label to target entry when not summarizing (no summary entry to label)
-		if (label && !summaryText) {
-			this.sessionManager.appendLabelChange(targetId, label);
-		}
-
-		// Update agent state
-		const sessionContext = this.sessionManager.buildSessionContext();
-		this.agent.replaceMessages(sessionContext.messages);
-
-		// Emit session_tree event
-		if (this._extensionRunner) {
-			await this._extensionRunner.emit({
-				type: "session_tree",
-				newLeafId: this.sessionManager.getLeafId(),
-				oldLeafId,
-				summaryEntry,
-				fromExtension: summaryText ? fromExtension : undefined,
-			});
-		}
-
-		// Emit to custom tools
-
-		this._branchSummaryAbortController = undefined;
-		return { editorText, cancelled: false, summaryEntry };
 	}
 
 	/**
