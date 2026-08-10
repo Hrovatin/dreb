@@ -186,7 +186,7 @@ function extractQuotedContent(text: string): string[] {
  * operators inside quoted strings don't cause false splits.
  * Each segment is trimmed of leading whitespace.
  */
-function splitCommandSegments(command: string): string[] {
+export function splitCommandSegments(command: string): string[] {
 	// Mask quoted content to avoid splitting on operators inside strings
 	const masked = maskQuotedContent(command);
 
@@ -229,7 +229,7 @@ function splitCommandSegments(command: string): string[] {
  *
  * Strips iteratively to handle stacking (e.g., `env command sudo`).
  */
-function stripShellPrefixes(segment: string): string {
+export function stripShellPrefixes(segment: string): string {
 	let result = segment;
 
 	// Strip leading backslash (alias escape)
@@ -278,7 +278,7 @@ function stripShellPrefixes(segment: string): string {
  * Handles both full-segment wrappers ($(cmd)) and inline substitutions
  * (result=$(cmd)) by extracting inner commands.
  */
-function stripSubshellWrapper(segment: string): string {
+export function stripSubshellWrapper(segment: string): string {
 	// Strip $(...) wrapper when it's the whole segment
 	if (/^\$\(/.test(segment) && segment.endsWith(")")) {
 		return segment.slice(2, -1).trim();

@@ -150,6 +150,42 @@ describe("AgentSession._expandSkillCommand", () => {
 		}
 	});
 
+	it("auto-disables read-only Ask mode when explicitly expanding a requires-write skill", () => {
+		const writeSkill = makeSkill({
+			name: "valid-skill",
+			description: "A write-capable skill.",
+			filePath: resolve(fixturesDir, "valid-skill/SKILL.md"),
+			baseDir: resolve(fixturesDir, "valid-skill"),
+			requiresWrite: true,
+		});
+		const session = createSession([writeSkill]);
+		try {
+			session.enableAskMode();
+			expect(session.askModeEnabled).toBe(true);
+			const warnSpy = vi.spyOn(session, "warnInSession").mockImplementation(() => {});
+			const result = expandSkillCommand(session, "/skill:valid-skill");
+			// Skill still expands…
+			expect(result).toContain('<skill name="valid-skill"');
+			// …but Ask mode was turned off because the skill requires write access.
+			expect(session.askModeEnabled).toBe(false);
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Ask mode turned OFF"), expect.anything());
+			warnSpy.mockRestore();
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("keeps Ask mode ON when expanding a skill that does not require write", () => {
+		const session = createSession([validSkill]);
+		try {
+			session.enableAskMode();
+			expandSkillCommand(session, "/skill:valid-skill");
+			expect(session.askModeEnabled).toBe(true);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("returns original text for unknown skill with args", () => {
 		const session = createSession([validSkill]);
 		try {

@@ -2,6 +2,7 @@
 name: mach6-implement
 description: "Implement a plan from a PR, or fix review findings / CI failures. Usage: mach6-implement 42 [finding-numbers] or mach6-implement 42 ci"
 argument-hint: "<pr-number> [finding-numbers | ci]"
+requires-write: true
 ---
 
 # mach6-implement — Implement Plans, Fix Findings, or Fix CI

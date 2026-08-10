@@ -2,6 +2,7 @@
 name: simplifier
 description: Identifies opportunities to simplify code without changing behavior
 tools: read, grep, find, ls, bash, search
+readonly: true
 model: zai/glm-5-turbo, anthropic/sonnet
 ---
 

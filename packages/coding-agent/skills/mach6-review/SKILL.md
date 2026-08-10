@@ -2,6 +2,7 @@
 name: mach6-review
 description: "Run round-aware specialist review, post unverified candidates, then assess practical merge blockers with adversarial counter-pressure. Usage: mach6-review 42 [aspects]"
 argument-hint: "<pr-number> [code|errors|tests|completeness|simplify]"
+requires-write: true
 ---
 
 # mach6-review — Round-Aware Multi-Agent PR Review

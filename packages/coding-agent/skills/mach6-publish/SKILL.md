@@ -2,6 +2,7 @@
 name: mach6-publish
 description: "Pre-merge checks, version bump, merge PR, git tag, GitHub release. Version bump happens BEFORE merge (on the feature branch) because master requires PRs. Usage: mach6-publish 42"
 argument-hint: "<pr-number>"
+requires-write: true
 ---
 
 # mach6-publish — Version Bump, Merge, Tag, and Release
