@@ -32,6 +32,7 @@ function formatTokens(count: number): string {
  */
 export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
+	private askModeEnabled = false;
 
 	constructor(
 		private session: AgentSession,
@@ -40,6 +41,10 @@ export class FooterComponent implements Component {
 
 	setAutoCompactEnabled(enabled: boolean): void {
 		this.autoCompactEnabled = enabled;
+	}
+
+	setAskModeEnabled(enabled: boolean): void {
+		this.askModeEnabled = enabled;
 	}
 
 	/**
@@ -140,6 +145,7 @@ export class FooterComponent implements Component {
 
 		// Join sections with · separator
 		const sections: string[] = [];
+		if (this.askModeEnabled) sections.push("ASK");
 		if (tokenParts.length > 0) sections.push(tokenParts.join(" "));
 		if (costStr) sections.push(costStr);
 		sections.push(contextPercentStr);

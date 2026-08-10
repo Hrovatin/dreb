@@ -2,6 +2,7 @@
 name: mach6-plan
 description: "Explore codebase, create implementation plan, create feature branch with dummy commit, open draft PR, post plan as PR comment. Everything lives on the PR from this point forward. Usage: mach6-plan 42"
 argument-hint: "<issue-number>"
+requires-write: true
 ---
 
 # mach6-plan — Plan, Branch, and Open PR
