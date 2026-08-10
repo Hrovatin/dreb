@@ -2,6 +2,7 @@
 name: Explore
 description: Concrete evidence retrieval — locate files, symbols, documentation, call sites, and exact snippets. No implementation work.
 tools: read, grep, find, ls, bash, search, web_search, web_fetch
+readonly: true
 model: zai/glm-5-turbo, anthropic/sonnet
 ---
 

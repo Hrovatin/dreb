@@ -2,6 +2,7 @@
 name: mach6-push
 description: "Commit changes, push to remote, and post a progress comment on the associated PR or issue. Stages files by name (never git add -A), matches existing commit style, auto-detects PR from branch. Usage: mach6-push [optional commit message]"
 argument-hint: "[commit message]"
+requires-write: true
 ---
 
 # mach6-push — Commit, Push, Progress Comment

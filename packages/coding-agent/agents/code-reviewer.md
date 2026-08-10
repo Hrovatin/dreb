@@ -2,6 +2,7 @@
 name: code-reviewer
 description: Reviews code changes for correctness, idiomatic patterns, and maintainability
 tools: read, grep, find, ls, bash, search
+readonly: true
 model: zai/glm-5-turbo, anthropic/sonnet
 ---
 

@@ -154,6 +154,32 @@ describe("model fallback lists", () => {
 		});
 	});
 
+	describe("parseAgentFrontmatter — readonly flag", () => {
+		test("readonly: true parses to readonly === true", () => {
+			const result = parseAgentFrontmatter("---\nname: test\ntools: read\nreadonly: true\n---\nprompt");
+			expect(result.ok).toBe(true);
+			if (result.ok) expect(result.config.readonly).toBe(true);
+		});
+
+		test("readonly: TRUE (case-insensitive) parses to true", () => {
+			const result = parseAgentFrontmatter("---\nname: test\nreadonly: TRUE\n---\nprompt");
+			expect(result.ok).toBe(true);
+			if (result.ok) expect(result.config.readonly).toBe(true);
+		});
+
+		test("readonly: false parses to false", () => {
+			const result = parseAgentFrontmatter("---\nname: test\nreadonly: false\n---\nprompt");
+			expect(result.ok).toBe(true);
+			if (result.ok) expect(result.config.readonly).toBe(false);
+		});
+
+		test("absence of readonly is falsy (undefined)", () => {
+			const result = parseAgentFrontmatter("---\nname: test\ntools: read\n---\nprompt");
+			expect(result.ok).toBe(true);
+			if (result.ok) expect(result.config.readonly).toBeFalsy();
+		});
+	});
+
 	describe("resolveModelWithFallbacks — without registry", () => {
 		// Without a registry, resolveModelWithFallbacks returns the model as-is
 		test("single model resolves without registry", () => {

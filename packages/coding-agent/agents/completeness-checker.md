@@ -2,6 +2,7 @@
 name: completeness-checker
 description: Verifies a PR fully implements what the linked issue requires
 tools: read, grep, find, ls, bash, search
+readonly: true
 model: zai/glm-5-turbo, anthropic/sonnet
 ---
 

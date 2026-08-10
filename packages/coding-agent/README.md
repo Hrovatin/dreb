@@ -177,6 +177,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from the current branch |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
+| `/ask [on\|off]` | Toggle read-only Ask mode — no edits/writes, `bash` limited to an allowlist of read-only commands, `subagent` limited to read-only agent types. Bare `/ask` shows current state. See [Read-only Ask mode](#read-only-ask-mode) |
 | `/copy` | Open multi-select message picker to copy any messages to clipboard. Assistant reasoning is excluded by default and offered as a separate, selectable `Thinking` row. |
 | `/dream` | Consolidate and prune memories — backs up, merges duplicates, scans sessions for patterns |
 | `/export [file]` | Export session to HTML file |
@@ -256,6 +257,21 @@ Long sessions can exhaust context windows. Compaction summarizes older messages 
 **Automatic:** Enabled by default. Triggers on context overflow (recovers and retries) or when approaching the limit (proactive). Configure via `/settings` or `settings.json`.
 
 Compaction is lossy. The full history remains in the JSONL file; use `/tree` to revisit. Customize compaction behavior via [extensions](#extensions). See [docs/compaction.md](docs/compaction.md) for internals.
+
+### Read-only Ask mode
+
+`/ask on` puts the current session into a **read-only Ask mode** for questions, code understanding, and brainstorming — without any risk of modifying your project. `/ask off` returns to normal. A bare `/ask` reports the current state, and the footer status line shows an `ASK` indicator while it's active. The mode is per-session and defaults to off.
+
+While Ask mode is on:
+
+- **`edit` and `write` are disabled** — the agent cannot modify files. If a change is needed it will describe it, not apply it.
+- **`bash` is restricted to an allowlist** of read-only commands (e.g. `git log`/`diff`/`status`, `ls`, `cat`, `rg`, `grep`, `find`). Mutating commands and output redirection are blocked. Customize the allowlist with `askModeAllowedCommands` in [settings](docs/settings.md).
+- **`subagent` may only delegate to read-only agent types** — agent definitions marked `readonly: true` (e.g. the built-in `Explore`). Spawning a writing agent is rejected, and read-only children are additionally scoped to read-only tools.
+- Read-only research tools (`read`, `grep`, `find`, `ls`, `web_search`, `web_fetch`, `ask_user`) and the always-active `search`/`skill`/`tasks_update` remain available.
+
+Explicitly invoking a write-capable skill (one whose frontmatter sets `requires-write: true`, such as the `mach6-*` skills) via a `/skill:` command **automatically turns Ask mode off** so the skill can do its work. If the model reaches for such a skill on its own (via the `skill` tool) while Ask mode is on, dreb warns you instead of switching — write actions stay blocked until you run `/ask off`.
+
+> Note: the read-only bash allowlist is a safety guardrail, not a sandbox — it constrains which commands run, it does not sandbox their effects.
 
 ### Tab Title
 
