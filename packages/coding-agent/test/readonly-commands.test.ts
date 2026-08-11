@@ -178,6 +178,27 @@ describe("isAllowedReadOnlyCommand", () => {
 			expect(isAllowedReadOnlyCommand("date -Iseconds")).toBe(true);
 			expect(isAllowedReadOnlyCommand("date -u")).toBe(true);
 		});
+
+		// Finding 3: `-s` bundled behind a no-argument flag (`-u`, `-R`) is
+		// still the clock-setting `--set`, e.g. getopt parses `-us` as `-u -s`.
+		it("blocks date -s bundled behind no-arg short flags", () => {
+			expect(isAllowedReadOnlyCommand("date -us2020-01-01")).toBe(false);
+			expect(isAllowedReadOnlyCommand("date -us '2020-01-01'")).toBe(false);
+			expect(isAllowedReadOnlyCommand("date -Rs2020-01-01")).toBe(false);
+			// Read-only clusters/flags without -s remain allowed.
+			expect(isAllowedReadOnlyCommand("date -R")).toBe(true);
+			expect(isAllowedReadOnlyCommand("date -Iseconds")).toBe(true);
+		});
+
+		// Finding 4: getopt_long accepts any unambiguous abbreviation of a long
+		// option, so `--o`/`--out` == `--output` and `--s`/`--se` == `--set`.
+		it("blocks unambiguous long-option abbreviations of --output / --set", () => {
+			expect(isAllowedReadOnlyCommand("sort --o=/tmp/pwn.txt in.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("sort --out=/tmp/pwn.txt in.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("sort --outp=/tmp/pwn.txt in.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("date --se=2020-01-01")).toBe(false);
+			expect(isAllowedReadOnlyCommand("date --s=2020-01-01")).toBe(false);
+		});
 	});
 
 	// Regression tests for process-substitution bypass (finding C1): `<(...)`
@@ -201,9 +222,42 @@ describe("isAllowedReadOnlyCommand", () => {
 			expect(isAllowedReadOnlyCommand('cat "$(diff <(rm x) y)"')).toBe(false);
 		});
 
+		// Finding 5: output process substitution `>(cmd)` must be blocked too —
+		// the previous tests only exercised the `<(...)` direction.
+		it("blocks output process substitution >(cmd)", () => {
+			expect(isAllowedReadOnlyCommand("cat foo >(tee /tmp/pwned)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("diff <(git log) >(touch /tmp/pwned)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo hi >(bash -c 'rm -rf /')")).toBe(false);
+		});
+
 		it("does not flag a quoted literal <( ) as process substitution", () => {
 			expect(isAllowedReadOnlyCommand('grep "<(" file')).toBe(true);
 			expect(isAllowedReadOnlyCommand("cat < in.txt")).toBe(true); // input redirection stays allowed
+		});
+	});
+
+	// Regression tests for finding 1: the quote-tracking scanners must be
+	// escape-aware. A backslash-escaped `\"`/`\'` is a LITERAL character in
+	// bash, not a quote delimiter — treating it as one flips the scanner
+	// "inside quotes" and hides a real, live `<(...)` or `>` that follows,
+	// which previously let arbitrary commands execute / write files.
+	describe("escaped quotes do not desync the quote scanner", () => {
+		it("blocks process substitution after an escaped double quote", () => {
+			expect(isAllowedReadOnlyCommand('echo \\"hi <(touch /tmp/pwn) bye\\"')).toBe(false);
+			// A single unpaired escaped quote must not mask the rest of the line.
+			expect(isAllowedReadOnlyCommand('cat \\" <(rm -rf /)')).toBe(false);
+		});
+
+		it("blocks output redirection after an escaped quote", () => {
+			expect(isAllowedReadOnlyCommand('echo \\"hi > /tmp/pwn\\"')).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo \\'hi > /tmp/pwn\\'")).toBe(false);
+			expect(isAllowedReadOnlyCommand('echo \\" > /tmp/pwn')).toBe(false);
+		});
+
+		it("still treats genuinely quoted redirection metacharacters as inert", () => {
+			expect(isAllowedReadOnlyCommand('echo "a > b"')).toBe(true);
+			expect(isAllowedReadOnlyCommand("echo 'a > b'")).toBe(true);
+			expect(isAllowedReadOnlyCommand('grep "<(" file')).toBe(true);
 		});
 	});
 
