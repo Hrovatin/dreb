@@ -108,9 +108,16 @@ function maskQuotedContent(command: string): string {
 		const ch = command[i];
 
 		if (ch === "'" && !inDouble) {
-			// In bash, single-quoted strings are completely literal — backslashes
-			// have no escape function inside single quotes. Always toggle.
-			inSingle = !inSingle;
+			// In bash, backslash cannot escape anything INSIDE a single-quoted
+			// string, so a `'` there always closes. OUTSIDE any quote, however,
+			// a backslash-escaped `\'` is a literal character and must NOT open a
+			// single-quoted region — otherwise a real operator after it (`;`,
+			// `&&`) would be masked and hidden from segment splitting.
+			if (inSingle) {
+				inSingle = false;
+			} else if (!isEscaped(command, i)) {
+				inSingle = true;
+			}
 			result += ch;
 		} else if (ch === '"' && !inSingle) {
 			if (!isEscaped(command, i)) {
@@ -137,7 +144,7 @@ function maskQuotedContent(command: string): string {
  * e.g. `\\"` → 2 backslashes → even → `"` is NOT escaped (real quote)
  *      `\\\"` → 3 backslashes → odd → `"` IS escaped (literal quote)
  */
-function isEscaped(str: string, i: number): boolean {
+export function isEscaped(str: string, i: number): boolean {
 	let count = 0;
 	let j = i - 1;
 	while (j >= 0 && str[j] === "\\") {

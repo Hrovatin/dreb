@@ -37,7 +37,7 @@
  * of the guard.
  */
 
-import { splitCommandSegments, stripShellPrefixes } from "./forbidden-commands.js";
+import { isEscaped, splitCommandSegments, stripShellPrefixes } from "./forbidden-commands.js";
 
 /**
  * The base set of allowed command "heads". Entries are space-separated
@@ -111,13 +111,55 @@ const DANGEROUS_ARG_PATTERNS: Record<string, RegExp[]> = {
 	// cluster (`-o`, `-ro`) and in attached-value form (`-oFILE`) — a plain
 	// `/(?:^|\s)-o(?:\s|$)/` would miss `sort -ro out.txt` / `sort -oout.txt`.
 	// Only `-o` among sort's short flags takes/writes a file, so matching any
-	// short cluster containing `o` is precise here.
-	sort: [/(?:^|\s)-[a-zA-Z]*o/, /(?:^|\s)--output(?:=|\s|$)/],
-	// `-s`/`--set` change the system clock. Match standalone (`-s '...'`) and
-	// attached (`-s2020-01-01`) forms. Deliberately NOT `-[a-zA-Z]*s`, which
-	// would false-positive on the read-only `date -Iseconds`.
-	date: [/(?:^|\s)-s(?:\s|$)/, /(?:^|\s)-s\S/, /(?:^|\s)--set(?:=|\s|$)/],
+	// short cluster containing `o` is precise here. The long form matches any
+	// unambiguous getopt_long abbreviation of `--output` (`--o`, `--out`, …),
+	// since `output` is sort's only long option beginning with `o`.
+	sort: [/(?:^|\s)-[a-zA-Z]*o/, /(?:^|\s)--o(?:u(?:t(?:p(?:u(?:t)?)?)?)?)?(?:=|\s|$)/],
+	// `-s`/`--set` change the system clock. `-s` takes an argument, so in a
+	// short-flag cluster it can only follow no-argument flags (`-u` utc, `-R`
+	// rfc-email); match `-[uR]*s` to catch `-s`, `-us`, `-Rs`, and attached
+	// `-s2020`/`-us2020` forms. This deliberately excludes `-I` (which absorbs
+	// the rest of the token as its optional TIMESPEC), so read-only
+	// `date -Iseconds` is NOT matched. The long form matches any unambiguous
+	// abbreviation of `--set` (`--s`, `--se`), `set` being date's only long
+	// option beginning with `s`.
+	date: [/(?:^|\s)-[uR]*s/, /(?:^|\s)--s(?:e(?:t)?)?(?:=|\s|$)/],
 };
+
+/**
+ * Walk `command` maintaining bash-accurate, escape-aware quote state and
+ * return true as soon as `detect` fires at a position OUTSIDE any active
+ * quote. Shared by the redirection and process-substitution scanners so both
+ * agree on exactly which characters are quoted.
+ *
+ * Escape handling mirrors `maskQuotedContent`/`isEscaped` in
+ * forbidden-commands.ts: a backslash-escaped `\"`/`\'` is a literal character,
+ * NOT a quote delimiter. Getting this wrong fails OPEN — a single stray `\"`
+ * would otherwise flip the scanner "inside quotes" for the rest of the string
+ * and hide a real, live `>` or `<(` from detection.
+ */
+function scanOutsideQuotes(command: string, detect: (ch: string, i: number, cmd: string) => boolean): boolean {
+	let inSingle = false;
+	let inDouble = false;
+
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (ch === "'" && !inDouble) {
+			// Bash performs no escaping inside single quotes, so a `'` always
+			// closes. Outside any quote, a backslash-escaped `\'` is literal and
+			// must NOT open a single-quoted region.
+			if (inSingle) inSingle = false;
+			else if (!isEscaped(command, i)) inSingle = true;
+		} else if (ch === '"' && !inSingle) {
+			// A backslash-escaped `\"` is a literal quote, not a delimiter.
+			if (!isEscaped(command, i)) inDouble = !inDouble;
+		} else if (!inSingle && !inDouble && detect(ch, i, command)) {
+			return true;
+		}
+	}
+
+	return false;
+}
 
 /**
  * Detect output redirection (`>` or `>>`) outside of quoted strings.
@@ -125,7 +167,7 @@ const DANGEROUS_ARG_PATTERNS: Record<string, RegExp[]> = {
  * A read-only mode must never write files, so any output redirect
  * disqualifies the command. Input redirection (`<`) is fine because it
  * only reads. Quoted content is ignored so `echo "a > b"` is not treated
- * as a redirect.
+ * as a redirect, and escaped quotes are honored (see `scanOutsideQuotes`).
  *
  * This is applied per-segment AND to each extracted command substitution
  * (see `isSegmentAllowed`), so a `>` hidden inside a double-quoted
@@ -134,21 +176,7 @@ const DANGEROUS_ARG_PATTERNS: Record<string, RegExp[]> = {
  * `echo hi > f` is checked on its own (the surrounding quote is gone there).
  */
 function hasOutputRedirection(command: string): boolean {
-	let inSingle = false;
-	let inDouble = false;
-
-	for (let i = 0; i < command.length; i++) {
-		const ch = command[i];
-		if (ch === "'" && !inDouble) {
-			inSingle = !inSingle;
-		} else if (ch === '"' && !inSingle) {
-			inDouble = !inDouble;
-		} else if (ch === ">" && !inSingle && !inDouble) {
-			return true;
-		}
-	}
-
-	return false;
+	return scanOutsideQuotes(command, (ch) => ch === ">");
 }
 
 /**
@@ -160,27 +188,14 @@ function hasOutputRedirection(command: string): boolean {
  * the outer head (`diff`) is allowlisted. A read-only mode has no legitimate
  * use for process substitution, so any occurrence is rejected outright.
  *
- * The scan is quote-aware: a literal `"<(x)"` / `'<(x)'` is inert text and is
- * NOT flagged. Applied per-segment and to each extracted substitution (via
- * `isSegmentAllowed`), so process substitution nested inside a quoted
- * `$(...)` — which bash still executes — is caught when the inner is checked.
+ * The scan is quote-aware (including escaped quotes): a literal `"<(x)"` /
+ * `'<(x)'` is inert text and is NOT flagged. Applied per-segment and to each
+ * extracted substitution (via `isSegmentAllowed`), so process substitution
+ * nested inside a quoted `$(...)` — which bash still executes — is caught when
+ * the inner is checked.
  */
 function hasProcessSubstitution(command: string): boolean {
-	let inSingle = false;
-	let inDouble = false;
-
-	for (let i = 0; i < command.length; i++) {
-		const ch = command[i];
-		if (ch === "'" && !inDouble) {
-			inSingle = !inSingle;
-		} else if (ch === '"' && !inSingle) {
-			inDouble = !inDouble;
-		} else if ((ch === "<" || ch === ">") && command[i + 1] === "(" && !inSingle && !inDouble) {
-			return true;
-		}
-	}
-
-	return false;
+	return scanOutsideQuotes(command, (ch, i, cmd) => (ch === "<" || ch === ">") && cmd[i + 1] === "(");
 }
 
 /**

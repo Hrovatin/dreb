@@ -405,6 +405,20 @@ describe("isForbiddenCommand", () => {
 		it("allows safe commands chained with ;", () => {
 			expect(isForbiddenCommand("echo hello; echo world")).toBeUndefined();
 		});
+
+		// Finding 2: a backslash-escaped `\'` OUTSIDE any quote is a literal
+		// character in bash, not a single-quote opener. It must not mask a real
+		// operator that follows — otherwise a dangerous command chained after it
+		// would be hidden from segment splitting and slip past the denylist.
+		it("splits on an operator following an escaped single quote", () => {
+			expect(isForbiddenCommand("git log \\'x ; git push --force\\'")).toBe("^git push.*(-f\\b|--force)");
+			expect(isForbiddenCommand("echo \\'a && git push --force\\'")).toBe("^git push.*(-f\\b|--force)");
+		});
+
+		it("still masks operators inside genuine single quotes", () => {
+			// A real single-quoted string keeps `;`/`&&` literal — no false split.
+			expect(isForbiddenCommand("git log 'a ; git push --force'")).toBeUndefined();
+		});
 	});
 
 	describe("does not false-positive on embedded patterns", () => {
