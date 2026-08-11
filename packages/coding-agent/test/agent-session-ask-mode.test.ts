@@ -75,6 +75,96 @@ describe("AgentSession — read-only Ask mode", () => {
 		expect(session.setAskMode(false)).toBe(false);
 		expect(session.getActiveToolNames()).toContain("write");
 	});
+
+	it("injects the Ask-mode persona into the system prompt and removes it on disable", async () => {
+		const session = await makeSession(tempDir, agentDir);
+		const marker = "Read-only Ask mode is ACTIVE";
+		expect(session.state.systemPrompt).not.toContain(marker);
+
+		session.enableAskMode();
+		expect(session.state.systemPrompt).toContain(marker);
+
+		session.disableAskMode();
+		expect(session.state.systemPrompt).not.toContain(marker);
+	});
+});
+
+/**
+ * End-to-end tests for the `beforeToolCall` guard while Ask mode is active.
+ * These exercise the actual installed hook (not just the pure allowlist
+ * function or the tool-name set), so a regression in the wiring is caught.
+ */
+describe("AgentSession — Ask mode beforeToolCall guard", () => {
+	let tempDir: string;
+	let agentDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `dreb-ask-guard-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		agentDir = join(tempDir, "agent");
+		mkdirSync(agentDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	// Retrieve the installed beforeToolCall hook from the underlying agent.
+	function getGuard(session: Awaited<ReturnType<typeof makeSession>>) {
+		const hook = (session as unknown as { agent: { _beforeToolCall?: unknown } }).agent._beforeToolCall as
+			| ((ctx: unknown) => Promise<{ block?: boolean; reason?: string } | undefined>)
+			| undefined;
+		if (!hook) throw new Error("beforeToolCall hook not installed");
+		return (name: string, args: unknown) => hook({ toolCall: { name }, args });
+	}
+
+	it("blocks a non-allowlisted bash command only when Ask mode is on", async () => {
+		const session = await makeSession(tempDir, agentDir);
+		const guard = getGuard(session);
+
+		// Off: a benign non-allowlisted command is not blocked by Ask mode.
+		expect(await guard("bash", { command: "npm install" })).toBeUndefined();
+
+		session.enableAskMode();
+		const blocked = await guard("bash", { command: "npm install" });
+		expect(blocked?.block).toBe(true);
+		expect(blocked?.reason).toContain("read-only allowlist");
+
+		// An allowlisted read-only command still passes while Ask mode is on.
+		expect(await guard("bash", { command: "git log --oneline" })).toBeUndefined();
+	});
+
+	it("hard-blocks edit and write while Ask mode is on, even if invoked directly", async () => {
+		const session = await makeSession(tempDir, agentDir);
+		const guard = getGuard(session);
+
+		expect(await guard("edit", { path: "x", oldText: "a", newText: "b" })).toBeUndefined();
+
+		session.enableAskMode();
+		const editBlocked = await guard("edit", { path: "x", oldText: "a", newText: "b" });
+		expect(editBlocked?.block).toBe(true);
+		expect(editBlocked?.reason).toContain('"edit" tool is disabled');
+
+		const writeBlocked = await guard("write", { path: "x", content: "y" });
+		expect(writeBlocked?.block).toBe(true);
+		expect(writeBlocked?.reason).toContain('"write" tool is disabled');
+	});
+
+	it("warns but does NOT auto-off or block on an implicit model-invoked skill tool call", async () => {
+		const session = await makeSession(tempDir, agentDir);
+		const guard = getGuard(session);
+		const warnings: string[] = [];
+		session.warnInSession = ((message: string) => {
+			warnings.push(message);
+		}) as typeof session.warnInSession;
+
+		session.enableAskMode();
+		const result = await guard("skill", { skill: "mach6-push" });
+
+		// Not blocked, mode stays ON, and a read-only warning was surfaced.
+		expect(result).toBeUndefined();
+		expect(session.askModeEnabled).toBe(true);
+		expect(warnings.some((w) => w.includes("Ask mode is ON") && w.includes("read-only"))).toBe(true);
+	});
 });
 
 describe("scopeAgentsReadOnly", () => {

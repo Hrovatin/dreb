@@ -63,3 +63,28 @@ export function parseBuiltinSlashCommand(text: string): { command: BuiltinSlashC
 	if (!command) return undefined;
 	return { command, args: (match[2] ?? "").trim() };
 }
+
+/** A single autocomplete suggestion for a slash-command argument. */
+export interface SlashCommandArgumentCompletion {
+	value: string;
+	label: string;
+	description: string;
+}
+
+/**
+ * Argument completions for `/ask` — the `on` / `off` subcommands.
+ *
+ * Returns the subcommands matching `prefix` (case-insensitive prefix match),
+ * or `null` when nothing matches so the autocomplete UI shows no menu. Shared
+ * between interactive-mode wiring and tests so the behavior is verifiable
+ * without constructing the full TUI.
+ */
+export function askArgumentCompletions(prefix: string): SlashCommandArgumentCompletion[] | null {
+	const subcommands: SlashCommandArgumentCompletion[] = [
+		{ value: "on", label: "on", description: "Enable read-only Ask mode" },
+		{ value: "off", label: "off", description: "Disable read-only Ask mode" },
+	];
+	const normalized = prefix.toLowerCase();
+	const filtered = normalized ? subcommands.filter((s) => s.value.startsWith(normalized)) : subcommands;
+	return filtered.length > 0 ? filtered : null;
+}

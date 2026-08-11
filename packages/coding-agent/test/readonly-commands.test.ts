@@ -85,6 +85,79 @@ describe("isAllowedReadOnlyCommand", () => {
 		it("disallows env-prefixed mutating command", () => {
 			expect(isAllowedReadOnlyCommand("env rm x")).toBe(false);
 		});
+
+		it("allows a whole-segment read-only command substitution", () => {
+			expect(isAllowedReadOnlyCommand("$(git log)")).toBe(true);
+			expect(isAllowedReadOnlyCommand("`git status`")).toBe(true);
+		});
+
+		it("allows a read-only outer command with a read-only substitution argument", () => {
+			expect(isAllowedReadOnlyCommand("cat $(git rev-parse HEAD)")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git log $(cat file)")).toBe(true);
+		});
+
+		it("rejects a substitution whose inner command mutates", () => {
+			expect(isAllowedReadOnlyCommand("cat $(rm x)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo $(git push)")).toBe(false);
+		});
+	});
+
+	// Regression tests for the command-substitution allowlist bypass (finding 1):
+	// the OUTER command head is authoritative, so a mutating command suffixed
+	// with an allowlisted substitution must NOT be approved.
+	describe("command-substitution bypass (outer head authoritative)", () => {
+		it("blocks a mutating outer command with a trailing $() substitution", () => {
+			expect(isAllowedReadOnlyCommand("rm -rf ./build $(git log)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("chmod 777 secret.key $(ls)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("mv $(cat a) $(cat b)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("npm publish $(pwd)")).toBe(false);
+		});
+
+		it("blocks a mutating outer command with a trailing backtick substitution", () => {
+			expect(isAllowedReadOnlyCommand("rm `cat foobar`")).toBe(false);
+		});
+
+		it("blocks a git push variant hidden behind a substitution", () => {
+			// Not caught by the forbidden-commands force-push denylist, so the
+			// allowlist itself must reject it.
+			expect(isAllowedReadOnlyCommand("git push origin +main $(ls)")).toBe(false);
+		});
+
+		it("fails closed on unbalanced command substitutions", () => {
+			expect(isAllowedReadOnlyCommand("cat $(git log")).toBe(false);
+			expect(isAllowedReadOnlyCommand("cat `git log")).toBe(false);
+		});
+	});
+
+	// Regression tests for mutation-capable allowlist heads (finding 2).
+	describe("mutation-capable heads and flags", () => {
+		it("does not allow sed or awk at all (write/exec escape hatches)", () => {
+			expect(isAllowedReadOnlyCommand("sed -i s/a/b/ file.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("sed s/a/b/ file.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("awk 'BEGIN{system(\"rm -rf /tmp/x\")}'")).toBe(false);
+			expect(isAllowedReadOnlyCommand("awk '{print > \"out\"}' file")).toBe(false);
+		});
+
+		it("blocks find with mutating action flags but allows plain find", () => {
+			expect(isAllowedReadOnlyCommand("find . -name '*.ts'")).toBe(true);
+			expect(isAllowedReadOnlyCommand("find . -delete")).toBe(false);
+			expect(isAllowedReadOnlyCommand("find . -name '*.tmp' -delete")).toBe(false);
+			expect(isAllowedReadOnlyCommand("find . -exec rm {} ;")).toBe(false);
+			expect(isAllowedReadOnlyCommand("find . -execdir touch {} ;")).toBe(false);
+			expect(isAllowedReadOnlyCommand("find . -fprintf out.txt '%p'")).toBe(false);
+		});
+
+		it("blocks sort -o / --output but allows plain sort", () => {
+			expect(isAllowedReadOnlyCommand("sort file")).toBe(true);
+			expect(isAllowedReadOnlyCommand("sort -o out.txt in.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("sort --output=out.txt in.txt")).toBe(false);
+		});
+
+		it("blocks date -s / --set but allows plain date", () => {
+			expect(isAllowedReadOnlyCommand("date")).toBe(true);
+			expect(isAllowedReadOnlyCommand("date -s '2020-01-01'")).toBe(false);
+			expect(isAllowedReadOnlyCommand("date --set='2020-01-01'")).toBe(false);
+		});
 	});
 
 	describe("custom allowlist override", () => {
