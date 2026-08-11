@@ -73,7 +73,7 @@ import { DefaultPackageManager } from "../../core/package-manager.js";
 import type { ResourceDiagnostic } from "../../core/resource-loader.js";
 import { type SessionContext, SessionManager } from "../../core/session-manager.js";
 import type { SubagentArbiterSettings } from "../../core/settings-manager.js";
-import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
+import { askArgumentCompletions, BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
 import type { SourceInfo } from "../../core/source-info.js";
 import { restoreStderr, type StderrCallback, takeOverStderr } from "../../core/stderr-guard.js";
 import { TabTitleGenerator } from "../../core/tab-title.js";
@@ -483,14 +483,8 @@ export class InteractiveMode {
 
 		const askCommand = slashCommands.find((command) => command.name === "ask");
 		if (askCommand) {
-			askCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
-				const subcommands = [
-					{ value: "on", label: "on", description: "Enable read-only Ask mode" },
-					{ value: "off", label: "off", description: "Disable read-only Ask mode" },
-				];
-				const filtered = prefix ? subcommands.filter((s) => s.value.startsWith(prefix.toLowerCase())) : subcommands;
-				return filtered.length > 0 ? filtered : null;
-			};
+			askCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
+				askArgumentCompletions(prefix);
 		}
 
 		// Convert prompt templates to SlashCommand format for autocomplete
