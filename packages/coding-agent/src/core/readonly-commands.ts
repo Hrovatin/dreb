@@ -107,8 +107,16 @@ const DANGEROUS_ARG_PATTERNS: Record<string, RegExp[]> = {
 		/(?:^|\s)-ok(?:dir)?(?:\s|$)/,
 		/(?:^|\s)-f(?:print|printf|print0|ls)(?:\s|$)/,
 	],
-	sort: [/(?:^|\s)-o(?:\s|$)/, /(?:^|\s)--output(?:=|\s|$)/],
-	date: [/(?:^|\s)-s(?:\s|$)/, /(?:^|\s)--set(?:=|\s|$)/],
+	// `-o`/`--output` write to a file. Match `-o` anywhere in a short-flag
+	// cluster (`-o`, `-ro`) and in attached-value form (`-oFILE`) — a plain
+	// `/(?:^|\s)-o(?:\s|$)/` would miss `sort -ro out.txt` / `sort -oout.txt`.
+	// Only `-o` among sort's short flags takes/writes a file, so matching any
+	// short cluster containing `o` is precise here.
+	sort: [/(?:^|\s)-[a-zA-Z]*o/, /(?:^|\s)--output(?:=|\s|$)/],
+	// `-s`/`--set` change the system clock. Match standalone (`-s '...'`) and
+	// attached (`-s2020-01-01`) forms. Deliberately NOT `-[a-zA-Z]*s`, which
+	// would false-positive on the read-only `date -Iseconds`.
+	date: [/(?:^|\s)-s(?:\s|$)/, /(?:^|\s)-s\S/, /(?:^|\s)--set(?:=|\s|$)/],
 };
 
 /**
@@ -117,9 +125,13 @@ const DANGEROUS_ARG_PATTERNS: Record<string, RegExp[]> = {
  * A read-only mode must never write files, so any output redirect
  * disqualifies the command. Input redirection (`<`) is fine because it
  * only reads. Quoted content is ignored so `echo "a > b"` is not treated
- * as a redirect. (Interpreters that re-parse a quoted program with its own
- * redirection — `awk '{print > f}'` — are not on the allowlist, so their
- * in-quote `>` cannot slip through here.)
+ * as a redirect.
+ *
+ * This is applied per-segment AND to each extracted command substitution
+ * (see `isSegmentAllowed`), so a `>` hidden inside a double-quoted
+ * substitution — `cat "$(echo hi > f)"`, where the outer `"` would otherwise
+ * mask the `>` from a single top-level scan — is still caught once the inner
+ * `echo hi > f` is checked on its own (the surrounding quote is gone there).
  */
 function hasOutputRedirection(command: string): boolean {
 	let inSingle = false;
@@ -132,6 +144,38 @@ function hasOutputRedirection(command: string): boolean {
 		} else if (ch === '"' && !inSingle) {
 			inDouble = !inDouble;
 		} else if (ch === ">" && !inSingle && !inDouble) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Detect bash process substitution (`<(cmd)` or `>(cmd)`) outside of quotes.
+ *
+ * Process substitution runs `cmd` in a subshell UNCONDITIONALLY when the shell
+ * parses the token — regardless of whether the outer command ever reads the
+ * resulting FIFO — so `diff <(git log) <(rm -rf x)` executes `rm` even though
+ * the outer head (`diff`) is allowlisted. A read-only mode has no legitimate
+ * use for process substitution, so any occurrence is rejected outright.
+ *
+ * The scan is quote-aware: a literal `"<(x)"` / `'<(x)'` is inert text and is
+ * NOT flagged. Applied per-segment and to each extracted substitution (via
+ * `isSegmentAllowed`), so process substitution nested inside a quoted
+ * `$(...)` — which bash still executes — is caught when the inner is checked.
+ */
+function hasProcessSubstitution(command: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (ch === "'" && !inDouble) {
+			inSingle = !inSingle;
+		} else if (ch === '"' && !inSingle) {
+			inDouble = !inDouble;
+		} else if ((ch === "<" || ch === ">") && command[i + 1] === "(" && !inSingle && !inDouble) {
 			return true;
 		}
 	}
@@ -214,6 +258,16 @@ function isSegmentAllowed(segment: string, entries: string[]): boolean {
 	const trimmed = segment.trim();
 	if (trimmed.length === 0) return false;
 
+	// Process substitution executes its inner command unconditionally — reject
+	// it in every segment and (via the recursive inner check below) inside any
+	// command substitution, including quoted `$(...)` that bash still executes.
+	if (hasProcessSubstitution(trimmed)) return false;
+
+	// Output redirection writes a file. Checking it here (not only once on the
+	// raw top-level string) means a `>` hidden inside a double-quoted `$(...)`
+	// is caught when the extracted inner is evaluated on its own.
+	if (hasOutputRedirection(trimmed)) return false;
+
 	// Bare subshell grouping: `(cmd)` runs `cmd` in a subshell — judge the inner.
 	// (Command substitutions `$(...)`/`` `...` `` are handled below.)
 	if (trimmed.startsWith("(") && trimmed.endsWith(")")) {
@@ -268,6 +322,11 @@ export function isAllowedReadOnlyCommand(command: string, allowlist?: string[]):
 
 	// A read-only mode must never write files — reject output redirection.
 	if (hasOutputRedirection(command)) return false;
+
+	// Reject process substitution `<(...)`/`>(...)` — it executes its inner
+	// command unconditionally. (Also enforced per-segment/inner below; this
+	// top-level check is defense in depth.)
+	if (hasProcessSubstitution(command)) return false;
 
 	const entries = Array.isArray(allowlist) ? allowlist : DEFAULT_READONLY_ALLOWLIST;
 

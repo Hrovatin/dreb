@@ -158,6 +158,69 @@ describe("isAllowedReadOnlyCommand", () => {
 			expect(isAllowedReadOnlyCommand("date -s '2020-01-01'")).toBe(false);
 			expect(isAllowedReadOnlyCommand("date --set='2020-01-01'")).toBe(false);
 		});
+
+		// Regression tests for bundled/attached short-flag forms (finding I3):
+		// `-o`/`-s` must be caught even when combined with other short flags
+		// or with the value attached directly to the flag.
+		it("blocks bundled and attached sort -o forms", () => {
+			expect(isAllowedReadOnlyCommand("sort -ro out.txt in.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("sort -oout.txt in.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("sort -o=out.txt in.txt")).toBe(false);
+			// Read-only sort flag clusters without -o remain allowed.
+			expect(isAllowedReadOnlyCommand("sort -rn file")).toBe(true);
+			expect(isAllowedReadOnlyCommand("sort -bf file")).toBe(true);
+		});
+
+		it("blocks attached date -s but not the read-only date -Iseconds", () => {
+			expect(isAllowedReadOnlyCommand("date -s2020-01-01")).toBe(false);
+			expect(isAllowedReadOnlyCommand("date --set=2020-01-01")).toBe(false);
+			// `-Iseconds` / `-u` are read-only and must NOT be over-blocked.
+			expect(isAllowedReadOnlyCommand("date -Iseconds")).toBe(true);
+			expect(isAllowedReadOnlyCommand("date -u")).toBe(true);
+		});
+	});
+
+	// Regression tests for process-substitution bypass (finding C1): `<(...)`
+	// and `>(...)` execute their inner command unconditionally, so the outer
+	// allowlisted head must not rescue them.
+	describe("process substitution bypass", () => {
+		it("blocks process substitution with a mutating inner", () => {
+			expect(isAllowedReadOnlyCommand("diff <(git log) <(rm -rf /tmp/x)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("cat <(bash -c 'rm -rf /')")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo <(git push origin main --force)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git log <(rm -rf /)")).toBe(false);
+		});
+
+		it("blocks process substitution even with an allowlisted inner", () => {
+			// A read-only mode has no legitimate use for process substitution;
+			// reject it outright regardless of what the inner command is.
+			expect(isAllowedReadOnlyCommand("diff <(git log) <(git status)")).toBe(false);
+		});
+
+		it("blocks process substitution nested inside a quoted command substitution", () => {
+			expect(isAllowedReadOnlyCommand('cat "$(diff <(rm x) y)"')).toBe(false);
+		});
+
+		it("does not flag a quoted literal <( ) as process substitution", () => {
+			expect(isAllowedReadOnlyCommand('grep "<(" file')).toBe(true);
+			expect(isAllowedReadOnlyCommand("cat < in.txt")).toBe(true); // input redirection stays allowed
+		});
+	});
+
+	// Regression tests for the quoted-substitution redirection bypass
+	// (finding C2): a `>` inside a double-quoted `$(...)` still writes a file
+	// because bash executes the substitution; the outer quote must not mask it.
+	describe("redirection hidden inside a quoted command substitution", () => {
+		it("blocks a write redirect inside a double-quoted substitution", () => {
+			expect(isAllowedReadOnlyCommand('cat "$(echo hi > /tmp/pwned)"')).toBe(false);
+			expect(isAllowedReadOnlyCommand('echo "$(echo pwn >> /tmp/z)"')).toBe(false);
+			expect(isAllowedReadOnlyCommand('cat "prefix $(echo hi > /tmp/w) suffix"')).toBe(false);
+		});
+
+		it("still allows a read-only double-quoted substitution and inert quoted >", () => {
+			expect(isAllowedReadOnlyCommand('cat "$(git rev-parse HEAD)"')).toBe(true);
+			expect(isAllowedReadOnlyCommand('echo "a > b"')).toBe(true);
+		});
 	});
 
 	describe("custom allowlist override", () => {
