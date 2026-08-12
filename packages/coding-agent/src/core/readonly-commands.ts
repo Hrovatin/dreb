@@ -29,6 +29,7 @@
  *   - subshell grouping `( ... )` and arithmetic `$(( ... ))`  (the parens)
  *   - ANY redirection `>` `>>` `<` `<<` `<<<` `&>` `2>`  (any `>` or `<`)
  *   - ANSI-C quoting `$'...'`                          (the `$'` opener)
+ *   - brace parameter expansion `${...}`               (the `${` opener)
  *   - backgrounding / stderr piping `&`, `|&`, `&>`    (any `&` not in `&&`)
  *   - newlines (multiple commands / here-documents)
  *
@@ -38,6 +39,15 @@
  * require EVERY segment's head to be allowlisted. Because the dangerous
  * constructs are gone, there is nothing left for a quote-desync to hide.
  *
+ * Each segment must also survive a leading-prefix check: a segment whose first
+ * token is an environment-variable assignment (`VAR=value cmd`), a path'd
+ * command name (`/tmp/evil/ls`, `./x`), or a command-dispatch prefix
+ * (`env`/`command`/`exec`/`builtin`, or a `\`-escaped head) is REJECTED. bash
+ * honors all of these at runtime — `PATH=`/`LD_PRELOAD=`/`GIT_EXTERNAL_DIFF=`
+ * assignments and path'd names change which binary executes — but a bare-name
+ * allowlist match would look past them, so they are refused rather than
+ * normalized away.
+ *
  * This is deliberately conservative: legitimate-but-exotic read-only commands
  * such as `git show $(git rev-parse HEAD)`, `diff <(a) <(b)`, or `grep '>' f`
  * are rejected. That is an accepted trade-off for an opt-in exploration mode —
@@ -45,15 +55,18 @@
  *
  * A handful of otherwise-read-only heads have built-in write/exec escape
  * hatches (`find -delete`/`-exec`, `sort -o`, `date -s`); these are rejected
- * via DANGEROUS_ARG_PATTERNS on the matched segment. Heads whose *entire
- * purpose* includes trivial mutation/execution (`sed -i`, `awk 'system()'`)
- * are simply not on the allowlist.
+ * via DANGEROUS_ARG_PATTERNS on the matched segment. A few git subcommands
+ * (`git branch`/`git tag`/`git remote`) list state read-only in their bare
+ * form but mutate with a name argument or write flag; GIT_READONLY_GUARDS
+ * restricts them to their listing forms. Heads whose *entire purpose* includes
+ * trivial mutation/execution (`sed -i`, `awk 'system()'`) are simply not on
+ * the allowlist.
  *
- * The operator splitting and shell-prefix normalization are shared with
- * forbidden-commands.ts to keep parsing semantics consistent across the guard.
+ * The operator splitting is shared with forbidden-commands.ts to keep parsing
+ * semantics consistent across the guard.
  */
 
-import { splitCommandSegments, stripShellPrefixes } from "./forbidden-commands.js";
+import { splitCommandSegments } from "./forbidden-commands.js";
 
 /**
  * The base set of allowed command "heads". Entries are space-separated
@@ -144,6 +157,107 @@ const DANGEROUS_ARG_PATTERNS: Record<string, RegExp[]> = {
 };
 
 /**
+ * Read-only argument guards for git subcommands whose bare allowlist entry
+ * would otherwise prefix-match a mutating invocation (finding 2). `git branch`,
+ * `git tag`, and `git remote` all *list* state in their bare form but *mutate*
+ * with a name argument or a write flag:
+ *   - `git tag newtag` / `git branch newbranch` create refs (no flag needed)
+ *   - `git branch -D main` / `git tag -d v1` delete refs
+ *   - `git remote add|remove|rename|set-url ...` rewrite remotes
+ *
+ * Keyed by the FULL matched allowlist entry (not just `git`). Each guard
+ * receives the argument tokens after the entry and returns true only for a
+ * clearly read-only (listing) invocation. This is deliberately conservative:
+ * read-only forms that take a positional value (`git tag -l 'v*'`,
+ * `git branch --contains HEAD`) are over-blocked; `/ask off` is the escape
+ * hatch.
+ */
+const READONLY_BRANCH_TAG_FLAGS = new Set([
+	"-a",
+	"--all",
+	"-r",
+	"--remotes",
+	"-v",
+	"-vv",
+	"-vvv",
+	"--verbose",
+	"-l",
+	"--list",
+	"-i",
+	"--ignore-case",
+	"-n",
+	"--show-current",
+	"--merged",
+	"--no-merged",
+	"--color",
+	"--no-color",
+	"--column",
+	"--no-column",
+	"--omit-empty",
+]);
+
+function isReadOnlyBranchTagToken(token: string): boolean {
+	if (READONLY_BRANCH_TAG_FLAGS.has(token)) return true;
+	// Attached-value read-only listing/formatting flags (`--sort=…`,
+	// `--format=…`, `--contains=…`, `--points-at=…`). Separate-value forms are
+	// over-blocked (their value is a bare positional → rejected).
+	if (/^--(?:sort|format|contains|no-contains|points-at)=/.test(token)) return true;
+	return false;
+}
+
+const GIT_READONLY_GUARDS: Record<string, (args: string[]) => boolean> = {
+	// Only flag-form listing invocations; any bare positional (a ref NAME →
+	// create) or mutating flag (`-d`/`-D`/`-m`/`-c`/`-f`/…) is rejected.
+	"git branch": (args) => args.every(isReadOnlyBranchTagToken),
+	"git tag": (args) => args.every(isReadOnlyBranchTagToken),
+	// Bare (`git remote`), verbose list (`git remote -v`), and the read-only
+	// sub-verbs `show`/`get-url`. Everything else (`add`/`remove`/`rm`/
+	// `rename`/`set-url`/`set-head`/`set-branches`/`prune`/`update`) mutates.
+	"git remote": (args) => {
+		if (args.length === 0) return true;
+		if (args.every((a) => a === "-v" || a === "--verbose")) return true;
+		return args[0] === "show" || args[0] === "get-url";
+	},
+};
+
+/**
+ * Reject a segment whose first token is a security-relevant prefix that bash
+ * honors at runtime but that a bare-name allowlist match would look past
+ * (finding 1). Operates on the raw (trimmed) segment BEFORE any allowlist
+ * matching:
+ *   - environment-variable assignment `VAR=value cmd` — bash sets the variable
+ *     for the command's own execution, so `PATH=/tmp/evil ls`,
+ *     `LD_PRELOAD=/x cat`, `GIT_EXTERNAL_DIFF=/x git diff` run attacker code
+ *     while the allowlist would only see `ls`/`cat`/`git diff`.
+ *   - a path'd command name `/tmp/evil/ls`, `./x`, `../x`, `bin/x` — the
+ *     allowlist matches by bare name, so a path would run an arbitrary binary.
+ *   - a `\`-escaped head (`\ls`) or a command-dispatch prefix
+ *     (`env`/`command`/`exec`/`builtin`) that re-runs another command, often
+ *     with attacker-controllable env/flags.
+ *
+ * All are unnecessary for read-only exploration and are refused outright rather
+ * than normalized away (which is what let them through before).
+ */
+function hasDangerousLeadingPrefix(segment: string): boolean {
+	const trimmed = segment.trimStart();
+	if (trimmed.startsWith("\\")) return true;
+
+	const firstToken = trimmed.split(/\s+/, 1)[0] ?? "";
+	if (firstToken.length === 0) return false;
+
+	// `VAR=value` environment assignment prefix.
+	if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(firstToken)) return true;
+	// A path in the command name (absolute, relative, or subdir).
+	if (firstToken.includes("/")) return true;
+	// Command-dispatch prefixes.
+	if (firstToken === "env" || firstToken === "exec" || firstToken === "command" || firstToken === "builtin") {
+		return true;
+	}
+
+	return false;
+}
+
+/**
  * Reject — quote-UNAWARE, on the raw string — any command containing a shell
  * construct that can execute a command, redirect I/O, or that the simple
  * operator-splitter cannot safely tokenize. This is the heart of the
@@ -158,9 +272,10 @@ const DANGEROUS_ARG_PATTERNS: Record<string, RegExp[]> = {
  * dangerous construct past this check. `/ask off` is the escape hatch.
  *
  * Allowed to remain (handled by the later operator split): plain `'...'` /
- * `"..."` quoting, `|` `&&` `||` `;` operators, variable/brace/glob/tilde
- * expansion (`$VAR`, `${VAR}`, `{a,b}`, `*`, `~`) — none of which execute a
- * command or redirect on their own.
+ * `"..."` quoting, `|` `&&` `||` `;` operators, and simple variable / brace-set
+ * / glob / tilde expansion (`$VAR`, `{a,b}`, `*`, `~`) — none of which execute
+ * a command or redirect on their own. Note `${...}` is NOT in this set; it is
+ * rejected above.
  */
 function hasDisallowedConstruct(command: string): boolean {
 	for (let i = 0; i < command.length; i++) {
@@ -180,6 +295,11 @@ function hasDisallowedConstruct(command: string): boolean {
 		// differ from a plain single-quoted string and cannot be modeled by the
 		// operator-splitter's quote masker.
 		if (ch === "$" && command[i + 1] === "'") return true;
+		// Brace parameter expansion `${...}` — banned per the approved plan.
+		// `${VAR}` is inert, but transformation forms (`${x@P}` prompt expansion
+		// executes embedded substitutions) and future syntax make it safer to
+		// refuse the whole construct; read-only exploration does not need it.
+		if (ch === "$" && command[i + 1] === "{") return true;
 	}
 
 	// Backgrounding `&`, stderr pipe `|&`, and `&>` all use a `&` that is not
@@ -210,17 +330,31 @@ function segmentMatchesEntry(segment: string, entry: string): boolean {
  * Whether a single simple command segment is an allowed read-only command.
  *
  * By the time this runs, `hasDisallowedConstruct` has already guaranteed the
- * segment contains no substitution, redirection, subshell, ANSI-C quoting, or
- * backgrounding — so it is a plain `head args...` command (possibly with
- * variable/brace/glob expansion and plain quotes). The head must be allowlisted
- * and must not carry a write/exec escape-hatch flag.
+ * segment contains no substitution, redirection, subshell, ANSI-C/brace
+ * expansion, or backgrounding — so it is a plain `head args...` command
+ * (possibly with `$VAR`/glob/tilde expansion and plain quotes). The segment
+ * must (1) not carry a dangerous leading prefix (env-assignment / path'd name /
+ * dispatch prefix), (2) have an allowlisted head, (3) pass any git read-only
+ * guard for that head, and (4) not carry a write/exec escape-hatch flag.
  */
 function isSimpleSegmentAllowed(segment: string, entries: string[]): boolean {
-	const normalized = stripShellPrefixes(segment).trim();
+	const normalized = segment.trim();
 	if (normalized.length === 0) return false;
+
+	// Finding 1: refuse env-assignment / path'd / dispatch prefixes that bash
+	// honors at runtime but a bare-name allowlist match would look past.
+	if (hasDangerousLeadingPrefix(normalized)) return false;
 
 	const entry = entries.find((e) => segmentMatchesEntry(normalized, e));
 	if (!entry) return false;
+
+	// Finding 2: restrict mutation-capable git subcommands to listing forms.
+	const gitGuard = GIT_READONLY_GUARDS[entry];
+	if (gitGuard) {
+		const rest = normalized.slice(entry.length).trim();
+		const args = rest.length === 0 ? [] : rest.split(/\s+/);
+		if (!gitGuard(args)) return false;
+	}
 
 	// Reject write/exec escape-hatch flags on otherwise-read-only heads.
 	const head = entry.split(" ")[0];
@@ -236,7 +370,9 @@ function isSimpleSegmentAllowed(segment: string, entries: string[]): boolean {
  * Returns true ONLY if (1) the command contains none of the disallowed shell
  * constructs (`hasDisallowedConstruct`), and (2) every operator-split segment
  * is a plain, allowlisted read-only command. Empty/whitespace commands, any
- * redirection/substitution/subshell/ANSI-C/backgrounding construct, and any
+ * redirection/substitution/subshell/ANSI-C/brace-expansion/backgrounding
+ * construct, a segment carrying a dangerous leading prefix (env-assignment /
+ * path'd command name / dispatch prefix), a mutating git subcommand, and any
  * segment whose head is not allowlisted (or carries a write/exec flag) return
  * false.
  *
