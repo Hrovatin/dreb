@@ -20,6 +20,10 @@ function onlyResponse(state: TranscriptState): ResponseGroup {
 	return group;
 }
 
+function allResponses(state: TranscriptState): ResponseGroup[] {
+	return state.items.filter((i): i is ResponseGroup => i.kind === "response");
+}
+
 describe("projection", () => {
 	it("separates answer text from thinking/tool activity", () => {
 		const state = run([
@@ -135,6 +139,71 @@ describe("projection", () => {
 		expect(state.hostError).toContain("exited");
 		expect(state.streaming).toBe(false);
 		expect(onlyResponse(state).collapsed).toBe(true);
+	});
+
+	it("groups sequential agent runs into distinct responses", () => {
+		const state = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "first" } },
+			{ type: "agent_end" },
+			{ type: "message_start", message: { role: "user", content: "again" } },
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "second" } },
+			{ type: "agent_end" },
+		]);
+
+		const responses = allResponses(state);
+		expect(responses).toHaveLength(2);
+		expect(responses.map((r) => r.answer)).toEqual(["first", "second"]);
+		expect(responses[0].id).not.toBe(responses[1].id);
+		expect(responses.every((r) => r.collapsed && !r.streaming)).toBe(true);
+		// The interleaved user turn sits between the two responses.
+		expect(state.items.map((i) => i.kind)).toEqual(["response", "user", "response"]);
+	});
+
+	it("keeps interleaved concurrent tool calls on their own entries", () => {
+		const state = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: { path: "a" } },
+			{ type: "tool_execution_start", toolCallId: "t2", toolName: "bash", args: { cmd: "ls" } },
+			{ type: "tool_execution_update", toolCallId: "t2", partialResult: "listing…" },
+			{ type: "tool_execution_update", toolCallId: "t1", partialResult: "reading…" },
+			{ type: "tool_execution_end", toolCallId: "t2", result: "t2 output", isError: false },
+			{ type: "tool_execution_end", toolCallId: "t1", result: "t1 output", isError: true },
+			{ type: "agent_end" },
+		]);
+
+		const tools = onlyResponse(state).activity.filter((a) => a.kind === "tool");
+		expect(tools).toHaveLength(2);
+		expect(tools[0]).toMatchObject({ toolCallId: "t1", toolName: "read", status: "error", resultText: "t1 output" });
+		expect(tools[1]).toMatchObject({ toolCallId: "t2", toolName: "bash", status: "done", resultText: "t2 output" });
+	});
+
+	it("sets and clears the compaction status without clobbering an unrelated status", () => {
+		const state = createTranscriptState();
+		applyEvent(state, { type: "auto_compaction_start" });
+		expect(state.statusText).toBe("compacting context…");
+		applyEvent(state, { type: "auto_compaction_end" });
+		expect(state.statusText).toBeUndefined();
+
+		// If a different status is set after compaction started, the compaction-end
+		// guard must NOT clear it.
+		applyEvent(state, { type: "auto_compaction_start" });
+		applyEvent(state, { type: "auto_retry_start", attempt: 1, maxAttempts: 3 });
+		expect(state.statusText).toBe("retrying (1/3)…");
+		applyEvent(state, { type: "auto_compaction_end" });
+		expect(state.statusText).toBe("retrying (1/3)…");
+	});
+
+	it("sets a numbered retry status and clears it on retry end", () => {
+		const state = createTranscriptState();
+		applyEvent(state, { type: "auto_retry_start", attempt: 2, maxAttempts: 5 });
+		expect(state.statusText).toBe("retrying (2/5)…");
+		applyEvent(state, { type: "auto_retry_end" });
+		expect(state.statusText).toBeUndefined();
 	});
 
 	it("summarizes activity for the collapsed header", () => {
