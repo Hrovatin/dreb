@@ -194,8 +194,10 @@ describe("isAllowedReadOnlyCommand", () => {
 		// option, so `--o`/`--out` == `--output` and `--s`/`--se` == `--set`.
 		it("blocks unambiguous long-option abbreviations of --output / --set", () => {
 			expect(isAllowedReadOnlyCommand("sort --o=/tmp/pwn.txt in.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("sort --ou=/tmp/pwn.txt in.txt")).toBe(false);
 			expect(isAllowedReadOnlyCommand("sort --out=/tmp/pwn.txt in.txt")).toBe(false);
 			expect(isAllowedReadOnlyCommand("sort --outp=/tmp/pwn.txt in.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("sort --outpu=/tmp/pwn.txt in.txt")).toBe(false);
 			expect(isAllowedReadOnlyCommand("date --se=2020-01-01")).toBe(false);
 			expect(isAllowedReadOnlyCommand("date --s=2020-01-01")).toBe(false);
 		});
@@ -246,6 +248,9 @@ describe("isAllowedReadOnlyCommand", () => {
 			expect(isAllowedReadOnlyCommand('echo \\"hi <(touch /tmp/pwn) bye\\"')).toBe(false);
 			// A single unpaired escaped quote must not mask the rest of the line.
 			expect(isAllowedReadOnlyCommand('cat \\" <(rm -rf /)')).toBe(false);
+			// Finding G3: the escaped-single-quote-before-<( direction too.
+			expect(isAllowedReadOnlyCommand("cat \\' <(rm -rf /)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo \\'hi <(touch /tmp/pwn) bye\\'")).toBe(false);
 		});
 
 		it("blocks output redirection after an escaped quote", () => {
@@ -254,10 +259,68 @@ describe("isAllowedReadOnlyCommand", () => {
 			expect(isAllowedReadOnlyCommand('echo \\" > /tmp/pwn')).toBe(false);
 		});
 
+		// Finding G2: the mirror of the escaped-quote case. An EVEN, non-zero
+		// backslash run before a quote leaves the quote LIVE (the backslashes
+		// escape each other), so it must still open/close normally — a
+		// miscount in the other direction would get the scanner stuck "inside
+		// quotes" and hide a live `>`/`<(` that follows (an under-block).
+		it("keeps a genuinely-live quote after an even backslash run working", () => {
+			// `echo "\\" > /tmp/x` — two backslashes close the quote for real,
+			// exposing the trailing redirect, which must be blocked.
+			expect(isAllowedReadOnlyCommand('echo "\\\\" > /tmp/pwn')).toBe(false);
+			expect(isAllowedReadOnlyCommand('echo "\\\\" <(rm -rf /)')).toBe(false);
+			// Positive control: content genuinely inside the live-quote pair stays
+			// masked, so an inert `>` there does not disqualify the command.
+			expect(isAllowedReadOnlyCommand('echo "\\\\ > inside" hi')).toBe(true);
+		});
+
 		it("still treats genuinely quoted redirection metacharacters as inert", () => {
 			expect(isAllowedReadOnlyCommand('echo "a > b"')).toBe(true);
 			expect(isAllowedReadOnlyCommand("echo 'a > b'")).toBe(true);
 			expect(isAllowedReadOnlyCommand('grep "<(" file')).toBe(true);
+			// Finding G3 positive control: the single-quote literal variant.
+			expect(isAllowedReadOnlyCommand("grep '<(' file")).toBe(true);
+		});
+	});
+
+	// Regression tests for finding G1: bash ANSI-C `$'...'` quoting. Unlike a
+	// plain `'...'` string, backslash IS an escape inside `$'...'`, so `\'` is a
+	// literal apostrophe that does NOT close the string. A quote scanner that
+	// treats `$'...'` like a plain single-quoted string exits one char early on
+	// the first `\'`, sees the real closing `'` as a fresh opener, and inverts
+	// quote parity for the rest of the command — masking every following
+	// operator/redirect/process-substitution. The read-only gate rejects any
+	// `$'` outright (fail closed), and the shared quote scanners model it so the
+	// always-on denylist is not desynced either.
+	describe("ANSI-C $'...' quoting cannot desync the read-only gate", () => {
+		it("blocks a second command chained after $'...' via any operator", () => {
+			expect(isAllowedReadOnlyCommand("git log $'a\\'b' ; rm -rf /tmp/x")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo $'\\'' && touch /tmp/x")).toBe(false);
+			expect(isAllowedReadOnlyCommand("ls /nope $'\\'' || touch /tmp/x")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo $'\\'' | tee /tmp/x")).toBe(false);
+		});
+
+		it("blocks redirection / process substitution after $'...'", () => {
+			expect(isAllowedReadOnlyCommand("echo $'a\\'b' > /tmp/x")).toBe(false);
+			expect(isAllowedReadOnlyCommand("cat $'a\\'b' <(touch /tmp/x)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo $'a\\'b\\'c' > /tmp/x")).toBe(false);
+		});
+
+		it("rejects even a lone $'...' read-only command (fails closed)", () => {
+			// The read-only allowlist has no legitimate use for ANSI-C quoting.
+			expect(isAllowedReadOnlyCommand("echo $'a\\tb'")).toBe(false);
+			expect(isAllowedReadOnlyCommand("grep $'\\t' file")).toBe(false);
+		});
+
+		it("still blocks a dangerous construct placed BEFORE the $'...'", () => {
+			// Ordering check: the desync only ever affected content AFTER the
+			// ANSI-C string, so a `<(` before it was already caught — and still is.
+			expect(isAllowedReadOnlyCommand("cat <(touch /tmp/x) $'a\\'b'")).toBe(false);
+		});
+
+		it("does not flag $' that appears inside a double-quoted string", () => {
+			// Inside double quotes `$'` is ordinary text, not ANSI-C quoting.
+			expect(isAllowedReadOnlyCommand('echo "a $\'b"')).toBe(true);
 		});
 	});
 
