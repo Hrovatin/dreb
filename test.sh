@@ -10,7 +10,8 @@ set -e
 # vars so subprocess git operations resolve against their own cwd. Identity
 # vars (GIT_AUTHOR_*/GIT_COMMITTER_*) are intentionally left intact.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR \
-    GIT_NAMESPACE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+    GIT_NAMESPACE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
 
 # Skip local LLM tests (ollama, lmstudio) — no local server expected in CI/hooks
 export DREB_NO_LOCAL_LLM=1

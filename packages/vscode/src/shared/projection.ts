@@ -48,7 +48,13 @@ export interface UserItem {
 	text: string;
 }
 
-export type TranscriptItem = UserItem | ResponseGroup;
+/** Host-emitted informational line kept in the transcript (e.g. `/session` stats). */
+export interface SystemItem {
+	kind: "system";
+	text: string;
+}
+
+export type TranscriptItem = UserItem | ResponseGroup | SystemItem;
 
 /** A pending, blocking extension-UI request the user must answer. */
 export interface UiRequest {
@@ -351,6 +357,12 @@ export function applyEvent(state: TranscriptState, event: any): void {
 			// Synthetic event for host-side, non-fatal feedback (e.g. an unwired
 			// builtin or an unknown command).
 			state.statusText = String(event.message ?? "");
+			break;
+		}
+		case "host_system": {
+			// Synthetic event for host-side output that should persist in the
+			// transcript (e.g. `/session` stats), not a transient status line.
+			state.items.push({ kind: "system", text: String(event.text ?? "") });
 			break;
 		}
 		default:
