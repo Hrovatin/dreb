@@ -141,6 +141,16 @@ describe("projection", () => {
 		expect(onlyResponse(state).collapsed).toBe(true);
 	});
 
+	it("appends a synthetic host_system line as a persistent transcript item", () => {
+		const state = run([
+			{ type: "message_start", message: { role: "user", content: "hi" } },
+			{ type: "host_system", text: "Session stats\n  cost: $0.0000" },
+		]);
+		expect(state.items.map((i) => i.kind)).toEqual(["user", "system"]);
+		const system = state.items[1];
+		expect(system.kind === "system" && system.text).toContain("Session stats");
+	});
+
 	it("groups sequential agent runs into distinct responses", () => {
 		const state = run([
 			{ type: "agent_start" },
