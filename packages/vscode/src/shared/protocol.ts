@@ -66,12 +66,30 @@ export type UiResponse =
 	| { id: string; selected: string[]; customText?: string }
 	| { id: string; cancelled: true };
 
+/** One file pending change-review, shown in the webview indicator + SCM group. */
+export interface ReviewFileDto {
+	/** Repo-relative path. */
+	path: string;
+	status: "modified" | "added" | "deleted" | "binary";
+	/** Number of textual hunks (0 for binary/whole-file changes). */
+	hunkCount: number;
+}
+
+/** Change-review state mirrored to the webview. `enabled` is false outside a git
+ * repo (review degrades to a notice); `files` is empty when nothing is pending. */
+export interface ReviewStateDto {
+	enabled: boolean;
+	files: ReviewFileDto[];
+}
+
 /** Messages sent from the host to the webview. */
 export type HostToWebview =
 	| { type: "snapshot"; state: TranscriptState; commands: SlashCommandDto[]; status: HostStatus }
 	| { type: "event"; event: unknown }
 	| { type: "commands"; commands: SlashCommandDto[] }
-	| { type: "status"; status: HostStatus };
+	| { type: "status"; status: HostStatus }
+	/** Change-review set changed (per-turn detection, accept/revert). */
+	| { type: "review"; review: ReviewStateDto };
 
 /** Messages sent from the webview to the host. */
 export type WebviewToHost =
@@ -83,4 +101,6 @@ export type WebviewToHost =
 	/** Open the native model picker (header click). */
 	| { type: "pick-model" }
 	/** Open the native thinking-level picker (header click). */
-	| { type: "pick-thinking" };
+	| { type: "pick-thinking" }
+	/** Open the baseline→current diff for a reviewed file (indicator click). */
+	| { type: "review-open-diff"; path: string };

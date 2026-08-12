@@ -10,7 +10,7 @@ import {
 	type TranscriptState,
 	type UiRequest,
 } from "../shared/projection.js";
-import type { HostStatus, SlashCommandDto, UiResponse } from "../shared/protocol.js";
+import type { HostStatus, ReviewStateDto, SlashCommandDto, UiResponse } from "../shared/protocol.js";
 import { renderMarkdown } from "./markdown.js";
 import { onHostMessage, postToHost } from "./vscode-api.js";
 
@@ -18,6 +18,7 @@ export function App() {
 	const [state, setState] = createStore<TranscriptState>(createTranscriptState());
 	const [commands, setCommands] = createSignal<SlashCommandDto[]>([]);
 	const [status, setStatus] = createSignal<HostStatus>({ connected: false, cwd: "" });
+	const [review, setReview] = createSignal<ReviewStateDto>({ enabled: false, files: [] });
 	const [tick, setTick] = createSignal(0);
 
 	let scrollEl: HTMLDivElement | undefined;
@@ -41,6 +42,9 @@ export function App() {
 					break;
 				case "status":
 					setStatus(msg.status);
+					break;
+				case "review":
+					setReview(msg.review);
 					break;
 			}
 			setTick((t) => t + 1);
@@ -101,6 +105,26 @@ export function App() {
 
 			<Show when={state.hostError}>
 				<div class="dreb-banner error">{state.hostError}</div>
+			</Show>
+
+			<Show when={review().files.length > 0}>
+				<div class="dreb-review-bar">
+					<span class="dreb-review-title">
+						{review().files.length} change{review().files.length === 1 ? "" : "s"} pending review
+					</span>
+					<For each={review().files}>
+						{(file) => (
+							<button
+								type="button"
+								class="dreb-review-file"
+								title={`${file.status}${file.hunkCount > 0 ? ` · ${file.hunkCount} hunk${file.hunkCount === 1 ? "" : "s"}` : ""} — open diff`}
+								onClick={() => postToHost({ type: "review-open-diff", path: file.path })}
+							>
+								{shortPath(file.path)}
+							</button>
+						)}
+					</For>
+				</div>
 			</Show>
 
 			<div class="dreb-transcript" ref={scrollEl}>

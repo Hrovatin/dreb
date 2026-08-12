@@ -14,8 +14,20 @@
 
 import { formatSessionStats } from "../shared/format.js";
 import { applyEvent, createTranscriptState, type TranscriptState } from "../shared/projection.js";
-import type { HostStatus, SlashCommandDto, UiResponse } from "../shared/protocol.js";
+import type { HostStatus, ReviewFileDto, ReviewStateDto, SlashCommandDto, UiResponse } from "../shared/protocol.js";
+import { hunkIndexForLine, parseFileDiff } from "./diff-hunks.js";
+import {
+	baselineContent,
+	captureTree,
+	changedFiles,
+	fileDiff,
+	isGitRepo,
+	revertFile,
+	revertHunk,
+} from "./git-snapshot.js";
 import { type HostUi, noopHostUi } from "./host-ui.js";
+import { ReviewModel } from "./review-model.js";
+import { noopReviewUi, type ReviewUi } from "./review-ui.js";
 import { BUILTIN_COMMANDS, DEFERRED_BUILTINS, routeInput, stripSlash, TERMINAL_ONLY_BUILTINS } from "./slash-router.js";
 
 /** Thinking levels offered in the picker. The active model may support a subset;
@@ -108,6 +120,9 @@ export interface SessionControllerOptions {
 	 * controller stays vscode-free and testable. Production injects the
 	 * vscode-backed impl. */
 	ui?: HostUi;
+	/** Native change-review surface (SCM group + quick-diff + diff viewer);
+	 * defaults to a no-op so the controller stays vscode-free and testable. */
+	review?: ReviewUi;
 	logger?: (line: string) => void;
 }
 
@@ -116,6 +131,8 @@ export type ControllerUpdate =
 	| { kind: "status"; status: HostStatus }
 	/** The slash-command list changed (e.g. after `/reload`). */
 	| { kind: "commands"; commands: SlashCommandDto[] }
+	/** The change-review set changed (per-turn detection, accept/revert). */
+	| { kind: "review"; review: ReviewStateDto }
 	/** Transcript was replaced host-side (e.g. `/new`, `/import`); the bridge
 	 * re-sends a fresh snapshot. */
 	| { kind: "resync" };
@@ -137,6 +154,13 @@ export class SessionController {
 	private readonly listeners = new Set<(update: ControllerUpdate) => void>();
 	private readonly factory: RpcClientFactory;
 	private readonly ui: HostUi;
+	private readonly reviewUi: ReviewUi;
+	private readonly reviewModel = new ReviewModel();
+	/** Whether change review is active for this cwd (false outside a git repo). */
+	private reviewEnabled = false;
+	/** Last-published review state (held so the bridge can include it in the
+	 * reload snapshot — review survives webview recreation). */
+	private reviewState: ReviewStateDto = { enabled: false, files: [] };
 	private readonly logger: (line: string) => void;
 	private readonly options: SessionControllerOptions;
 	private client: RpcClientLike | undefined;
@@ -158,6 +182,7 @@ export class SessionController {
 		this.options = options;
 		this.factory = options.clientFactory ?? defaultClientFactory;
 		this.ui = options.ui ?? noopHostUi;
+		this.reviewUi = options.review ?? noopReviewUi;
 		this.logger = options.logger ?? (() => {});
 		this.status = { connected: false, cwd: options.cwd };
 	}
@@ -172,6 +197,12 @@ export class SessionController {
 
 	getStatus(): HostStatus {
 		return this.status;
+	}
+
+	/** The current change-review state (pending files); included by the bridge in
+	 * the reload snapshot so review survives webview recreation. */
+	getReviewState(): ReviewStateDto {
+		return this.reviewState;
 	}
 
 	getCommandList(): SlashCommandDto[] {
@@ -203,6 +234,8 @@ export class SessionController {
 			throw err;
 		}
 		this.setStatus({ ...this.status, connected: true, error: undefined });
+		this.reviewEnabled = isGitRepo(this.options.cwd);
+		this.reviewState = { enabled: this.reviewEnabled, files: [] };
 		await this.refreshCommands();
 		await this.refreshStatus(true);
 	}
@@ -519,6 +552,95 @@ export class SessionController {
 		this.client?.sendExtensionUIResponse({ type: "extension_ui_response", ...response });
 	}
 
+	// ── Change review ──────────────────────────────────────────────────────
+
+	/** Capture the pre-turn baseline once per review cycle. */
+	private maybeCaptureBaseline(): void {
+		if (!this.reviewEnabled || this.reviewModel.hasCycle()) return;
+		const tree = captureTree(this.options.cwd);
+		if (tree) this.reviewModel.beginCycle(tree);
+	}
+
+	/** Recompute the pending-review set from the baseline, push baseline content
+	 * to the review surface, and publish. When nothing remains pending (all
+	 * reverted or accepted), end the cycle so the next edit re-baselines. */
+	private async refreshReview(): Promise<void> {
+		if (!this.reviewEnabled) return;
+		const ref = this.reviewModel.baselineRef();
+		if (!ref) {
+			this.publishReview([]);
+			return;
+		}
+		const changed = changedFiles(this.options.cwd, ref);
+		const pending = this.reviewModel.pending(changed);
+		for (const f of pending) {
+			this.reviewUi.setBaseline(f.path, baselineContent(this.options.cwd, ref, f.path));
+		}
+		this.reviewUi.setPending(pending);
+		this.publishReview(pending);
+		if (pending.length === 0) {
+			this.reviewModel.reset();
+			this.reviewUi.clear();
+		}
+	}
+
+	private publishReview(files: ReviewFileDto[]): void {
+		this.reviewState = { enabled: this.reviewEnabled, files };
+		this.emit({ kind: "review", review: this.reviewState });
+	}
+
+	/** Open the baseline↔current diff for a reviewed file. */
+	async reviewOpenDiff(path: string): Promise<void> {
+		await this.reviewUi.openDiff(path);
+	}
+
+	/** Accept a single file (clear its review marker; no commit). */
+	async reviewAcceptFile(path: string): Promise<void> {
+		this.reviewModel.accept(path);
+		await this.refreshReview();
+	}
+
+	/** Accept every pending change at once (clear the cycle; no commit). */
+	async reviewAcceptAll(): Promise<void> {
+		this.reviewModel.reset();
+		this.reviewUi.clear();
+		this.publishReview([]);
+	}
+
+	/** Revert a whole file to its baseline content, discarding the turn's edits. */
+	async reviewRevertFile(path: string): Promise<void> {
+		const ref = this.reviewModel.baselineRef();
+		if (!ref) return;
+		revertFile(this.options.cwd, ref, path);
+		this.reviewModel.unaccept(path);
+		await this.refreshReview();
+	}
+
+	/** Revert every pending file to baseline, then end the cycle. */
+	async reviewRevertAll(): Promise<void> {
+		const ref = this.reviewModel.baselineRef();
+		if (!ref) return;
+		for (const f of this.reviewState.files) revertFile(this.options.cwd, ref, f.path);
+		this.reviewModel.reset();
+		this.reviewUi.clear();
+		this.publishReview([]);
+	}
+
+	/** Reject exactly the hunk containing `line` (1-based, in the current file)
+	 * — the non-interactive equivalent of `git restore -p`. Returns true when a
+	 * hunk was found and reverted. */
+	async reviewRejectHunkAtLine(path: string, line: number): Promise<boolean> {
+		const ref = this.reviewModel.baselineRef();
+		if (!ref) return false;
+		const { diff, binary } = fileDiff(this.options.cwd, ref, path);
+		if (binary || diff.length === 0) return false;
+		const index = hunkIndexForLine(parseFileDiff(diff).hunks, line);
+		if (index === undefined) return false;
+		const ok = revertHunk(this.options.cwd, ref, path, index);
+		await this.refreshReview();
+		return ok;
+	}
+
 	async dispose(): Promise<void> {
 		if (this.disposed) return;
 		this.disposed = true;
@@ -541,9 +663,17 @@ export class SessionController {
 	private handleEvent(event: unknown): void {
 		applyEvent(this.state, event);
 		this.emit({ kind: "event", event });
+		const type = (event as { type?: unknown })?.type;
+		// Snapshot a baseline before the first turn of a review cycle (changes
+		// then compound against it until accepted/reverted).
+		if (type === "turn_start") this.maybeCaptureBaseline();
 		// After each completed turn, refresh runtime status (cost/context/model)
-		// the way the dashboard does on the streaming→idle transition.
-		if ((event as { type?: unknown })?.type === "agent_end") void this.refreshStatus(true);
+		// the way the dashboard does on the streaming→idle transition, and
+		// recompute the change-review set from the baseline.
+		if (type === "agent_end") {
+			void this.refreshStatus(true);
+			void this.refreshReview();
+		}
 	}
 
 	private handleExit(info: { code?: number | null; signal?: string | null; error?: Error }): void {
