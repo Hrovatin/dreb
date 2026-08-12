@@ -11,26 +11,41 @@
  * `get_commands` with `source: "builtin"`, but the server *rejects* them when
  * sent through `prompt` (the rejection is silently discarded by the RPC client),
  * so every builtin must be intercepted here and routed to a host handler rather
- * than forwarded as a prompt. Only `/compact` is wired in this early build; the
- * rest surface a "not available yet" notice instead of silently doing nothing.
+ * than forwarded as a prompt. The controller dispatches wired builtins to their
+ * RPC method / native UI; recognized-but-unwired builtins surface a notice.
  * No DOM/vscode/@dreb imports — unit-testable in plain node.
  */
 
 import type { SlashCommandDto } from "../shared/protocol.js";
 
-/** Built-ins the host has a dedicated handler for (the rest emit a notice). */
-export type BuiltinCommand = "compact" | "model" | "tree" | "resume" | "settings";
-
-/** Builtin commands surfaced in the composer dropdown alongside agent commands. */
+/** Builtin commands the host dispatches to an RPC method / native UI. */
 export const BUILTIN_COMMANDS: SlashCommandDto[] = [
-	{ name: "compact", description: "Summarize and compact the conversation context", source: "builtin" },
 	{ name: "model", description: "Switch the active model", source: "builtin" },
-	{ name: "tree", description: "Browse and navigate the session tree", source: "builtin" },
-	{ name: "resume", description: "Resume a previous session", source: "builtin" },
-	{ name: "settings", description: "Open dreb settings", source: "builtin" },
+	{ name: "compact", description: "Summarize and compact the conversation context", source: "builtin" },
+	{ name: "new", description: "Start a new session", source: "builtin" },
+	{ name: "reload", description: "Reload skills, extensions, prompts, and settings", source: "builtin" },
+	{ name: "dream", description: "Consolidate and prune memories", source: "builtin" },
+	{ name: "session", description: "Show session info and stats", source: "builtin" },
+	{ name: "name", description: "Set the session display name", source: "builtin" },
+	{ name: "export", description: "Export the session to HTML", source: "builtin" },
+	{ name: "import", description: "Import and resume a session from JSONL", source: "builtin" },
+	{ name: "quit", description: "End the session", source: "builtin" },
 ];
 
-const BUILTIN_NAMES = new Set<BuiltinCommand>(BUILTIN_COMMANDS.map((c) => c.name as BuiltinCommand));
+/** Builtins recognized but not yet wired — dispatched with a "later phase"
+ * notice. They need UI surfaces owned by later phases (settings/sessions/tree). */
+export const DEFERRED_BUILTINS = new Set(["settings", "scoped-models", "fork", "tree", "resume"]);
+
+/** Builtins with no RPC equivalent — only meaningful in the terminal UI. */
+export const TERMINAL_ONLY_BUILTINS = new Set(["login", "logout", "copy", "hotkeys", "buddy"]);
+
+/** All builtin names the router intercepts even without a server advertisement
+ * (the wired fallback list plus the recognized-but-unwired ones). */
+const BUILTIN_NAMES = new Set<string>([
+	...BUILTIN_COMMANDS.map((c) => c.name),
+	...DEFERRED_BUILTINS,
+	...TERMINAL_ONLY_BUILTINS,
+]);
 
 export type RouteDecision =
 	| { kind: "empty" }
@@ -61,7 +76,7 @@ export function routeInput(input: string, commands: readonly SlashCommandDto[] =
 	// Built-ins are host-handled: forwarding them via `prompt` is rejected
 	// server-side and the rejection is silently swallowed, so intercept every
 	// builtin here (whether advertised by get_commands or a hardcoded fallback).
-	if (advertised?.source === "builtin" || BUILTIN_NAMES.has(name as BuiltinCommand)) {
+	if (advertised?.source === "builtin" || BUILTIN_NAMES.has(name)) {
 		return { kind: "builtin", command: name, arg };
 	}
 

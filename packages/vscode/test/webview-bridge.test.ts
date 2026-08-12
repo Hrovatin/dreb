@@ -44,6 +44,36 @@ class BridgeFakeClient implements RpcClientLike {
 			this.ex = undefined;
 		};
 	}
+	async getState(): Promise<any> {
+		return {};
+	}
+	async getDailyCost(): Promise<number> {
+		return 0;
+	}
+	async getSessionStats(): Promise<any> {
+		return { cost: 0 };
+	}
+	async getAvailableModels(): Promise<any[]> {
+		return [];
+	}
+	async setModel(provider: string, modelId: string): Promise<{ provider: string; id: string }> {
+		return { provider, id: modelId };
+	}
+	async setThinkingLevel(): Promise<void> {}
+	async newSession(): Promise<{ cancelled: boolean }> {
+		return { cancelled: false };
+	}
+	async reload(): Promise<void> {}
+	async dream(): Promise<{ message: string }> {
+		return { message: "" };
+	}
+	async setSessionName(): Promise<void> {}
+	async exportHtml(): Promise<{ path: string }> {
+		return { path: "" };
+	}
+	async importJsonl(): Promise<{ cancelled: boolean }> {
+		return { cancelled: false };
+	}
 	emit(event: unknown): void {
 		this.ev?.(event);
 	}
@@ -144,6 +174,47 @@ describe("connectWebview", () => {
 		expect(abort).toHaveBeenCalledTimes(1);
 		expect(respondUi).toHaveBeenCalledWith({ id: "u1", confirmed: true });
 		expect(refresh).toHaveBeenCalled();
+	});
+
+	it("routes pick-model / pick-thinking messages to the controller", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const pickModel = vi.spyOn(controller, "pickModel").mockResolvedValue();
+		const pickThinking = vi.spyOn(controller, "pickThinking").mockResolvedValue();
+
+		const { webview, send } = makeWebview();
+		connectWebview(webview as any, controller);
+
+		send({ type: "pick-model" });
+		send({ type: "pick-thinking" });
+
+		expect(pickModel).toHaveBeenCalledTimes(1);
+		expect(pickThinking).toHaveBeenCalledTimes(1);
+	});
+
+	it("forwards a commands update as a commands message", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+
+		// /reload triggers a commands update after re-fetching get_commands.
+		await controller.submit("/reload");
+		expect(posted.some((m) => m.type === "commands")).toBe(true);
+	});
+
+	it("re-snapshots on a resync update (e.g. after /new)", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+		const snapshotsBefore = posted.filter((m) => m.type === "snapshot").length;
+
+		await controller.submit("/new");
+		const snapshotsAfter = posted.filter((m) => m.type === "snapshot").length;
+		expect(snapshotsAfter).toBeGreaterThan(snapshotsBefore);
 	});
 
 	it("stops streaming to the webview after the disposable is disposed", async () => {
