@@ -83,7 +83,6 @@ import type { ModelRegistry } from "./model-registry.js";
 import { computeNestedContextBlock, type NestedContextState } from "./nested-context.js";
 import { PerformanceTracker } from "./performance-tracker.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
-import { isAllowedReadOnlyCommand } from "./readonly-commands.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import { type SecretPattern, scrubSecrets } from "./secret-scrubber.js";
 import { isSensitivePath } from "./sensitive-paths.js";
@@ -137,11 +136,11 @@ const ASK_MODE_ALLOWED_TOOLS = new Set<string>([
 	"read",
 	"grep",
 	"find",
+	"git",
 	"ls",
 	"web_search",
 	"web_fetch",
 	"ask_user",
-	"bash",
 	"subagent",
 	"search",
 	"skill",
@@ -154,10 +153,10 @@ const ASK_MODE_SYSTEM_PROMPT = `## Read-only Ask mode is ACTIVE
 You are in a read-only exploration/brainstorming mode. You CANNOT modify files or run state-changing commands. Your role is to answer questions, explain code, investigate, and brainstorm approaches.
 
 - Do NOT attempt to edit or write files — those tools are disabled. If a change is needed, describe it; do not apply it.
-- \`bash\` is restricted to an allowlist of read-only commands (e.g. \`git log\`, \`git diff\`, \`ls\`, \`cat\`, \`rg\`). Write/mutating commands are blocked.
+- The \`bash\` tool is DISABLED in this mode — there is no shell. Use the dedicated read-only tools instead: \`read\`, \`grep\`, \`find\`, \`ls\`, \`search\`, and the typed \`git\` tool for repository history (\`git\` log/diff/show/status/blame/… — read-only subcommands only).
 - \`subagent\` may only delegate to read-only agent types (e.g. Explore).
 - This is NOT a formal planning mode; do not produce a persisted plan document unless explicitly asked.
-- If the user wants to implement changes, tell them to turn this off with \`/ask off\`.`;
+- If the user wants to implement changes or run arbitrary shell commands, tell them to turn this off with \`/ask off\`.`;
 
 // ============================================================================
 // Skill Block Parsing
@@ -576,11 +575,19 @@ export class AgentSession {
 		this.agent.setBeforeToolCall(async ({ toolCall, args }) => {
 			// Read-only Ask mode guards — cannot be bypassed by extensions or skills.
 			if (this._askModeEnabled) {
-				// Hard-block write tools even if they somehow remain active.
+				// Hard-block write/shell tools even if they somehow remain active.
+				// In Ask mode there is no shell: the typed `git` tool and the
+				// read-only file tools replace `bash` entirely.
 				if (toolCall.name === "edit" || toolCall.name === "write") {
 					return {
 						block: true as const,
 						reason: `Read-only Ask mode is active — the "${toolCall.name}" tool is disabled. Turn it off with /ask off to make changes.`,
+					};
+				}
+				if (toolCall.name === "bash") {
+					return {
+						block: true as const,
+						reason: `Read-only Ask mode is active — the "bash" tool is disabled (there is no shell in Ask mode). Use the read-only tools (read, grep, find, ls, search) or the typed "git" tool for repository history. Turn it off with /ask off to run shell commands.`,
 					};
 				}
 				// The model invoked the `skill` tool from context (not an explicit
@@ -607,16 +614,9 @@ export class AgentSession {
 						};
 					}
 
-					// Read-only Ask mode: only allowlisted read-only commands may run.
-					if (this._askModeEnabled) {
-						const allowlist = this.settingsManager?.getAskModeAllowedCommands();
-						if (!isAllowedReadOnlyCommand(command, allowlist)) {
-							return {
-								block: true as const,
-								reason: `Read-only Ask mode is active — the command "${command}" is not in the read-only allowlist and was blocked. Only read-only commands (e.g. git log/diff/status, ls, cat, rg) are permitted. Turn it off with /ask off to run other commands.`,
-							};
-						}
-					}
+					// Read-only Ask mode blocks the bash tool entirely (handled above
+					// in the Ask-mode guard). The forbidden-commands denylist below
+					// still applies in all modes.
 
 					// Check script files referenced by the command (e.g., bash script.sh)
 					const scriptPaths = extractScriptPaths(command);
@@ -1540,8 +1540,9 @@ export class AgentSession {
 
 	/**
 	 * Enable read-only Ask mode: snapshot the current active tools, then scope the
-	 * active set to read-only tools (dropping edit/write, keeping bash/subagent which
-	 * are separately gated). Rebuilds the system prompt with the Ask-mode persona.
+	 * active set to read-only tools (dropping edit/write/bash, keeping the typed
+	 * `git` tool and `subagent`, which is separately scoped to read-only agents).
+	 * Rebuilds the system prompt with the Ask-mode persona.
 	 * Idempotent — calling when already enabled is a no-op.
 	 */
 	enableAskMode(): void {
