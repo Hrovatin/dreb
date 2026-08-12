@@ -1,0 +1,346 @@
+:root {
+	color-scheme: light dark;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	padding: 0;
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size, 13px);
+	color: var(--vscode-foreground);
+	background: var(--vscode-editor-background);
+}
+
+.dreb-app {
+	display: flex;
+	flex-direction: column;
+	height: 100vh;
+}
+
+/* Header ------------------------------------------------------------------ */
+.dreb-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 12px;
+	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+
+.dreb-title {
+	font-weight: 600;
+}
+
+.dreb-cwd {
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.85em;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 1;
+}
+
+.dreb-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--vscode-charts-red, #d33);
+}
+.dreb-dot.ok {
+	background: var(--vscode-charts-green, #2a2);
+}
+
+/* Transcript -------------------------------------------------------------- */
+.dreb-transcript {
+	flex: 1;
+	overflow-y: auto;
+	padding: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.dreb-user {
+	align-self: flex-end;
+	max-width: 85%;
+	white-space: pre-wrap;
+	word-break: break-word;
+	padding: 8px 12px;
+	border-radius: 10px;
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, transparent);
+}
+
+.dreb-response {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.dreb-answer {
+	white-space: normal;
+	word-break: break-word;
+	line-height: 1.5;
+}
+.dreb-answer :first-child {
+	margin-top: 0;
+}
+.dreb-answer :last-child {
+	margin-bottom: 0;
+}
+.dreb-answer pre {
+	background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+	padding: 10px;
+	border-radius: 6px;
+	overflow-x: auto;
+}
+.dreb-answer code {
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+
+/* Activity box ------------------------------------------------------------ */
+.dreb-activity {
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	border-radius: 8px;
+	overflow: hidden;
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.06));
+}
+
+.dreb-activity-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	text-align: left;
+	padding: 6px 10px;
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	font-size: 0.9em;
+}
+
+.dreb-caret {
+	width: 1em;
+}
+
+.dreb-activity-body {
+	padding: 4px 10px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.dreb-thinking {
+	white-space: pre-wrap;
+	word-break: break-word;
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+	border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+	padding-left: 8px;
+}
+
+.dreb-tool {
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	border-radius: 6px;
+	padding: 6px 8px;
+	background: var(--vscode-editor-background);
+}
+.dreb-tool.running {
+	border-color: var(--vscode-charts-blue, #38f);
+}
+.dreb-tool.error {
+	border-color: var(--vscode-charts-red, #d33);
+}
+
+.dreb-tool-head {
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+	font-size: 0.9em;
+}
+.dreb-tool-name {
+	font-weight: 600;
+}
+.dreb-tool-status {
+	color: var(--vscode-descriptionForeground);
+}
+.dreb-tool-args {
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+	word-break: break-word;
+	margin-top: 4px;
+}
+.dreb-tool-result {
+	margin: 6px 0 0;
+	max-height: 200px;
+	overflow: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-size: 0.85em;
+}
+
+/* Banners / status -------------------------------------------------------- */
+.dreb-banner {
+	padding: 8px 12px;
+	border-radius: 6px;
+}
+.dreb-banner.error {
+	background: var(--vscode-inputValidation-errorBackground, rgba(220, 50, 50, 0.15));
+	border: 1px solid var(--vscode-inputValidation-errorBorder, #d33);
+	color: var(--vscode-foreground);
+}
+
+.dreb-status-line {
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.85em;
+	font-style: italic;
+}
+
+/* Needs-input ------------------------------------------------------------- */
+.dreb-uireq {
+	border: 1px solid var(--vscode-focusBorder, #38f);
+	border-radius: 8px;
+	padding: 10px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.06));
+}
+.dreb-uireq-title {
+	font-weight: 600;
+}
+.dreb-uireq-message {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+.dreb-uireq-actions {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+.dreb-uireq-actions.column {
+	flex-direction: column;
+	align-items: stretch;
+}
+.dreb-option {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+/* Composer ---------------------------------------------------------------- */
+.dreb-composer {
+	position: relative;
+	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+	padding: 8px 12px;
+}
+
+.dreb-composer-row {
+	display: flex;
+	gap: 8px;
+	align-items: flex-end;
+}
+
+.dreb-input {
+	flex: 1;
+	resize: vertical;
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--vscode-input-foreground);
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.4));
+	border-radius: 6px;
+	padding: 6px 8px;
+}
+
+.dreb-menu {
+	position: absolute;
+	bottom: 100%;
+	left: 12px;
+	right: 12px;
+	margin-bottom: 4px;
+	max-height: 240px;
+	overflow-y: auto;
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+	border-radius: 6px;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.dreb-menu-item {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 2px;
+	width: 100%;
+	text-align: left;
+	border: none;
+	background: transparent;
+	color: var(--vscode-foreground);
+	padding: 6px 10px;
+	cursor: pointer;
+}
+.dreb-menu-item:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+.dreb-menu-name {
+	font-weight: 600;
+}
+.dreb-menu-desc {
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.85em;
+}
+
+button {
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+	border: 1px solid var(--vscode-button-border, transparent);
+	border-radius: 6px;
+	padding: 6px 12px;
+	cursor: pointer;
+}
+button:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+button.ghost {
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	background: var(--vscode-button-secondaryBackground, transparent);
+	border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+}
+.dreb-send.stop {
+	background: var(--vscode-charts-red, #d33);
+}
+
+input[type="text"],
+textarea {
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--vscode-input-foreground);
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.4));
+	border-radius: 6px;
+	padding: 6px 8px;
+}
+
+/* Spinner ----------------------------------------------------------------- */
+.dreb-spinner {
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+	border: 2px solid var(--vscode-descriptionForeground);
+	border-top-color: transparent;
+	border-radius: 50%;
+	animation: dreb-spin 0.8s linear infinite;
+	vertical-align: middle;
+}
+@keyframes dreb-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
