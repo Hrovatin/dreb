@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -228,6 +228,130 @@ describe("git tool — shell-free execution", () => {
 		expect(text).toMatch(/could create or modify/);
 		const branches = execFileSync("git", ["branch", "--list"], { cwd: repo, encoding: "utf-8" });
 		expect(branches).not.toContain("dashdash-branch");
+	});
+});
+
+describe("git tool — timeout, abort, and output cap (round-10 findings 1/2/3/5)", () => {
+	let repo: string;
+
+	beforeAll(() => {
+		repo = mkdtempSync(join(tmpdir(), "dreb-git-tool-r10-"));
+		mkdirSync(repo, { recursive: true });
+		const run = (args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+		run(["init", "-q"]);
+		run(["config", "user.email", "t@example.com"]);
+		run(["config", "user.name", "Tester"]);
+		writeFileSync(join(repo, "a.txt"), "hello\n");
+		run(["add", "a.txt"]);
+		run(["commit", "-q", "-m", "initial commit"]);
+	});
+
+	afterAll(() => {
+		if (repo) rmSync(repo, { recursive: true, force: true });
+	});
+
+	// A spawn seam that ignores the git args and instead launches a real,
+	// long-lived process in its own group. killProcessTree must reap it for the
+	// promise to ever settle — so if the timeout/abort/tree-kill wiring is broken,
+	// these tests hang (and fail) rather than passing falsely.
+	const sleeperSpawn = ((_cmd: string, _args: readonly string[], opts: object) =>
+		spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], opts as never)) as typeof spawn;
+
+	const textOf = (result: { content: Array<{ text?: string }> }) => result.content.map((c) => c.text ?? "").join("");
+
+	it("rejects immediately when the abort signal is already aborted (no spawn)", async () => {
+		const def = createGitToolDefinition(repo);
+		const controller = new AbortController();
+		controller.abort();
+		await expect(
+			def.execute(
+				"id",
+				{ subcommand: "log", args: [] } as never,
+				controller.signal,
+				undefined as never,
+				undefined as never,
+			),
+		).rejects.toThrow(/aborted/i);
+	});
+
+	it("kills the process tree and rejects when aborted mid-run", async () => {
+		const def = createGitToolDefinition(repo, { spawnFn: sleeperSpawn });
+		const controller = new AbortController();
+		const p = def.execute(
+			"id",
+			{ subcommand: "log", args: [] } as never,
+			controller.signal,
+			undefined as never,
+			undefined as never,
+		);
+		setTimeout(() => controller.abort(), 50);
+		await expect(p).rejects.toThrow(/Operation aborted/);
+	});
+
+	it("times out and tree-kills a hanging git, rejecting with a timeout message (finding 2)", async () => {
+		const def = createGitToolDefinition(repo, { timeoutMs: 100, spawnFn: sleeperSpawn });
+		await expect(
+			def.execute(
+				"id",
+				{ subcommand: "log", args: [] } as never,
+				undefined as never,
+				undefined as never,
+				undefined as never,
+			),
+		).rejects.toThrow(/timed out/i);
+	});
+
+	it("stops git early and returns partial output when the capture cap is hit (finding 3)", async () => {
+		// Tiny cap forces capHit on the very first data chunk from a real git read.
+		const def = createGitToolDefinition(repo, { maxCaptureBytes: 8 });
+		const result = await def.execute(
+			"id",
+			{ subcommand: "log", args: ["--format=%H"] } as never,
+			undefined as never,
+			undefined as never,
+			undefined as never,
+		);
+		const text = textOf(result);
+		expect(text).toMatch(/git was stopped early/);
+		// The captured portion (before the marker) is bounded near the cap, not the
+		// full 40-char commit hash.
+		const preMarker = text.split("\n\n[output exceeded")[0];
+		expect(preMarker.length).toBeLessThanOrEqual(8);
+	});
+
+	it("a cap hit wins over a since-armed timeout — success, not a spurious timeout (finding 5)", async () => {
+		// Cap hits on the first chunk and disarms the 50ms watchdog, so even with a
+		// short timeout the result is the bounded-capture success, never a timeout.
+		const def = createGitToolDefinition(repo, { maxCaptureBytes: 8, timeoutMs: 50 });
+		const result = await def.execute(
+			"id",
+			{ subcommand: "log", args: ["--format=%H"] } as never,
+			undefined as never,
+			undefined as never,
+			undefined as never,
+		);
+		const text = textOf(result);
+		expect(text).toMatch(/git was stopped early/);
+		expect(text).not.toMatch(/timed out/i);
+	});
+
+	it("byte-accounts the cap so multi-byte UTF-8 output cannot overshoot (finding 4)", async () => {
+		// Commit a CJK-heavy message; with a small byte cap the captured prefix must
+		// be bounded by BYTES, not UTF-16 code units (each 日 is 3 UTF-8 bytes).
+		execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "日".repeat(50)], { cwd: repo });
+		const def = createGitToolDefinition(repo, { maxCaptureBytes: 12 });
+		const result = await def.execute(
+			"id",
+			{ subcommand: "log", args: ["--format=%s"] } as never,
+			undefined as never,
+			undefined as never,
+			undefined as never,
+		);
+		const text = textOf(result);
+		expect(text).toMatch(/git was stopped early/);
+		const preMarker = text.split("\n\n[output exceeded")[0];
+		// Byte length of the captured prefix must not exceed the cap.
+		expect(Buffer.byteLength(preMarker, "utf-8")).toBeLessThanOrEqual(12);
 	});
 });
 
