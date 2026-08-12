@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { AgentTool } from "@dreb/agent-core";
 import { Text } from "@dreb/tui";
 import { type Static, Type } from "@sinclair/typebox";
+import { waitForChildProcess } from "../../utils/child-process.js";
 import { killProcessTree } from "../../utils/shell.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { getTextOutput, invalidArgText, str } from "./render-utils.js";
@@ -76,10 +77,11 @@ const GIT_TIMEOUT_MS = 60_000;
 
 /**
  * Hard ceiling on how much stdout+stderr we buffer in memory before stopping
- * git early. Output is truncated to `DEFAULT_MAX_BYTES` for display anyway; this
- * cap bounds memory for pathological reads (`git show <huge-blob>`,
- * `git log --all -p`) that the display truncation would otherwise let fully
- * accumulate first.
+ * git early, measured in raw UTF-8 bytes (the capture loop accounts `chunk.length`,
+ * not decoded string length, so the bound holds for multi-byte output). Output is
+ * truncated to `DEFAULT_MAX_BYTES` for display anyway; this cap bounds memory for
+ * pathological reads (`git show <huge-blob>`, `git log --all -p`) that the display
+ * truncation would otherwise let fully accumulate first.
  */
 const MAX_CAPTURE_BYTES = DEFAULT_MAX_BYTES * 4;
 
@@ -511,7 +513,26 @@ export interface GitToolDetails {
 	truncation?: TruncationResult;
 }
 
-export function createGitToolDefinition(cwd: string): ToolDefinition<typeof gitSchema, GitToolDetails | undefined> {
+/**
+ * Options for {@link createGitToolDefinition}. All fields are internal test seams
+ * with production defaults; callers in `src/` pass only `cwd`.
+ */
+export interface GitToolOptions {
+	/** Hard per-invocation timeout in ms. Defaults to {@link GIT_TIMEOUT_MS}. */
+	timeoutMs?: number;
+	/** In-memory stdout+stderr capture ceiling in bytes. Defaults to {@link MAX_CAPTURE_BYTES}. */
+	maxCaptureBytes?: number;
+	/** Injectable spawn (test seam). Defaults to `node:child_process` `spawn`. */
+	spawnFn?: typeof spawn;
+}
+
+export function createGitToolDefinition(
+	cwd: string,
+	options?: GitToolOptions,
+): ToolDefinition<typeof gitSchema, GitToolDetails | undefined> {
+	const timeoutMs = options?.timeoutMs ?? GIT_TIMEOUT_MS;
+	const maxCaptureBytes = options?.maxCaptureBytes ?? MAX_CAPTURE_BYTES;
+	const spawnGit = options?.spawnFn ?? spawn;
 	return {
 		name: "git",
 		label: "git",
@@ -544,7 +565,7 @@ export function createGitToolDefinition(cwd: string): ToolDefinition<typeof gitS
 					reject(new Error("Operation aborted"));
 					return;
 				}
-				const child = spawn("git", [subcommand, ...argList], {
+				const child = spawnGit("git", [subcommand, ...argList], {
 					cwd,
 					env: gitEnv(),
 					stdio: ["ignore", "pipe", "pipe"],
@@ -556,86 +577,99 @@ export function createGitToolDefinition(cwd: string): ToolDefinition<typeof gitS
 				let stderr = "";
 				let capturedBytes = 0;
 				let capHit = false;
-				let aborted = false;
 				let timedOut = false;
-				let settled = false;
 
 				const killTree = () => {
 					if (child.pid) killProcessTree(child.pid);
 					else if (!child.killed) child.kill();
 				};
-				const timeoutHandle = setTimeout(() => {
+				let timeoutHandle: NodeJS.Timeout | undefined = setTimeout(() => {
 					timedOut = true;
 					killTree();
-				}, GIT_TIMEOUT_MS);
-				const cleanup = () => {
-					clearTimeout(timeoutHandle);
-					signal?.removeEventListener("abort", onAbort);
+				}, timeoutMs);
+				// Disarm the watchdog once we've already decided to stop (cap hit or
+				// abort), so a slow post-kill `close` can't let the timer fire and
+				// misreport a completed capture as a timeout (see finding 5).
+				const disarmTimeout = () => {
+					if (timeoutHandle) {
+						clearTimeout(timeoutHandle);
+						timeoutHandle = undefined;
+					}
 				};
-				function onAbort() {
-					aborted = true;
+				const onAbort = () => {
+					disarmTimeout();
 					killTree();
-				}
+				};
 				signal?.addEventListener("abort", onAbort, { once: true });
 
-				// Append captured output up to MAX_CAPTURE_BYTES, then stop git early.
+				// Append captured output up to maxCaptureBytes, then stop git early.
+				// Byte accounting uses the raw Buffer length so the ceiling holds for
+				// multi-byte UTF-8 output.
 				const capture = (chunk: Buffer, stream: "out" | "err") => {
 					if (capHit) return;
-					const s = chunk.toString();
-					const remaining = MAX_CAPTURE_BYTES - capturedBytes;
-					if (s.length >= remaining) {
-						const slice = s.slice(0, Math.max(0, remaining));
+					const remaining = maxCaptureBytes - capturedBytes;
+					if (chunk.length >= remaining) {
+						const slice = chunk.subarray(0, Math.max(0, remaining)).toString();
 						if (stream === "out") stdout += slice;
 						else stderr += slice;
-						capturedBytes += slice.length;
+						capturedBytes += Math.max(0, remaining);
 						capHit = true;
+						// A completed bounded capture is a success, not a timeout — disarm
+						// the watchdog before killing so the timer can't fire in the gap.
+						disarmTimeout();
 						killTree();
 						return;
 					}
-					if (stream === "out") stdout += s;
-					else stderr += s;
-					capturedBytes += s.length;
+					if (stream === "out") stdout += chunk.toString();
+					else stderr += chunk.toString();
+					capturedBytes += chunk.length;
 				};
 				child.stdout?.on("data", (chunk) => capture(chunk, "out"));
 				child.stderr?.on("data", (chunk) => capture(chunk, "err"));
-				child.on("error", (error) => {
-					if (settled) return;
-					settled = true;
-					cleanup();
-					if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-						reject(new Error("git is not installed or not on PATH"));
-						return;
-					}
-					reject(new Error(`Failed to run git: ${error.message}`));
-				});
-				child.on("close", (code) => {
-					if (settled) return;
-					settled = true;
-					cleanup();
-					if (aborted) {
-						reject(new Error("Operation aborted"));
-						return;
-					}
-					if (timedOut) {
-						reject(new Error(`git ${subcommand} timed out after ${GIT_TIMEOUT_MS / 1000}s and was terminated`));
-						return;
-					}
-					const combined = stdout || stderr ? `${stdout}${stderr}` : "";
-					const raw = combined.length > 0 ? combined : code === 0 ? "(no output)" : `git exited with code ${code}`;
-					const truncation = truncateHead(raw, { maxLines: Number.MAX_SAFE_INTEGER });
-					let output = truncation.content;
-					if (capHit) {
-						output += `\n\n[output exceeded ${formatSize(MAX_CAPTURE_BYTES)} — git was stopped early; refine the command]`;
-					} else if (truncation.truncated) {
-						output += `\n\n[${formatSize(DEFAULT_MAX_BYTES)} limit reached — refine the git command]`;
-					}
-					const details: GitToolDetails = {
-						subcommand,
-						exitCode: code,
-						...(truncation.truncated ? { truncation } : {}),
-					};
-					resolve({ content: [{ type: "text" as const, text: output }], details });
-				});
+
+				// Settle via waitForChildProcess so a daemonized descendant holding the
+				// stdio pipe open (ssh/credential helper) can't hang the promise even
+				// after the tree is killed (matches bash.ts / watch-github-ci.ts).
+				waitForChildProcess(child)
+					.then((code) => {
+						disarmTimeout();
+						signal?.removeEventListener("abort", onAbort);
+						if (signal?.aborted) {
+							reject(new Error("Operation aborted"));
+							return;
+						}
+						// A cap hit is a deliberate early stop with usable partial output;
+						// it wins over a since-fired timeout (checked before timedOut).
+						if (!capHit && timedOut) {
+							reject(new Error(`git ${subcommand} timed out after ${timeoutMs / 1000}s and was terminated`));
+							return;
+						}
+						const combined = stdout || stderr ? `${stdout}${stderr}` : "";
+						const raw =
+							combined.length > 0 ? combined : code === 0 ? "(no output)" : `git exited with code ${code}`;
+						const truncation = truncateHead(raw, { maxLines: Number.MAX_SAFE_INTEGER });
+						let output = truncation.content;
+						if (capHit) {
+							output += `\n\n[output exceeded ${formatSize(maxCaptureBytes)} — git was stopped early; refine the command]`;
+						} else if (truncation.truncated) {
+							output += `\n\n[${formatSize(DEFAULT_MAX_BYTES)} limit reached — refine the git command]`;
+						}
+						const details: GitToolDetails = {
+							subcommand,
+							exitCode: code,
+							...(truncation.truncated ? { truncation } : {}),
+						};
+						resolve({ content: [{ type: "text" as const, text: output }], details });
+					})
+					.catch((error: NodeJS.ErrnoException) => {
+						disarmTimeout();
+						signal?.removeEventListener("abort", onAbort);
+						if (error.code === "ENOENT") {
+							reject(new Error("git is not installed or not on PATH"));
+							return;
+						}
+						reject(new Error(`Failed to run git: ${error.message}`));
+					});
 			});
 		},
 		renderCall(args, theme, context) {
