@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import * as vscode from "vscode";
 import { resolveCliPath } from "./cli-path.js";
 import { SessionController } from "./session-controller.js";
+import { createVscodeHostUi } from "./vscode-host-ui.js";
 import { connectWebview, getWebviewHtml } from "./webview-bridge.js";
 
 interface ChatSession {
@@ -51,6 +52,7 @@ async function openChat(context: vscode.ExtensionContext): Promise<void> {
 		cwd,
 		cliPath: cli.ok ? cli.path : "",
 		args: buildArgs(config),
+		ui: createVscodeHostUi(),
 		logger: (line) => console.warn(`[dreb] ${line}`),
 	});
 

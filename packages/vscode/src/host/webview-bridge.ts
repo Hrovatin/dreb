@@ -57,8 +57,26 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 
 	const unsubscribe = controller.onUpdate((update) => {
 		if (!live) return;
-		if (update.kind === "event") post({ type: "event", event: update.event });
-		else post({ type: "status", status: update.status });
+		switch (update.kind) {
+			case "event":
+				post({ type: "event", event: update.event });
+				break;
+			case "status":
+				post({ type: "status", status: update.status });
+				break;
+			case "commands":
+				post({ type: "commands", commands: update.commands });
+				break;
+			case "resync":
+				// Transcript was replaced host-side (/new, /import) — re-snapshot.
+				post({
+					type: "snapshot",
+					state: structuredClone(controller.getTranscript()),
+					commands: controller.getCommandList(),
+					status: controller.getStatus(),
+				});
+				break;
+		}
 	});
 
 	const messageSub = webview.onDidReceiveMessage((raw: WebviewToHost) => {
@@ -85,6 +103,12 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				return;
 			case "refresh-commands":
 				pushCommands();
+				return;
+			case "pick-model":
+				void controller.pickModel();
+				return;
+			case "pick-thinking":
+				void controller.pickThinking();
 				return;
 			case "ui-response":
 				controller.respondUi(raw.response);
