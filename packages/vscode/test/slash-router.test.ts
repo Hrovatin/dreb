@@ -37,6 +37,14 @@ describe("slash-router", () => {
 		expect(routeInput("/review 42", agentCommands)).toEqual({ kind: "prompt", message: "/review 42" });
 	});
 
+	it("intercepts an advertised builtin (not a wired one) instead of prompting", () => {
+		// `/new` is a server builtin (source "builtin") the host doesn't wire yet.
+		// It must be intercepted — never forwarded to prompt (which the server
+		// rejects and silently drops) — so `submit` can surface a notice.
+		const withBuiltin: SlashCommandDto[] = [{ name: "new", description: "New session", source: "builtin" }];
+		expect(routeInput("/new", withBuiltin)).toEqual({ kind: "builtin", command: "new", arg: undefined });
+	});
+
 	it("flags an unknown slash command", () => {
 		expect(routeInput("/bogus now")).toEqual({ kind: "unknown-command", name: "bogus" });
 	});
