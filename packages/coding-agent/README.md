@@ -273,6 +273,8 @@ While Ask mode is on:
 Explicitly invoking a write-capable skill (one whose frontmatter sets `requires-write: true`, such as the `mach6-*` skills) via a `/skill:` command **automatically turns Ask mode off** so the skill can do its work. If the model reaches for such a skill on its own (via the `skill` tool) while Ask mode is on, dreb warns you instead of switching — write actions stay blocked until you run `/ask off`.
 
 > Note: the typed `git` tool is always available (not only in Ask mode) as a structured, shell-free alternative to `bash git …`. Ask mode's read-only guarantee comes from *removing the shell*, not from classifying command strings.
+>
+> **Known limitation — Ask mode is not an OS sandbox.** The read-only guarantee comes from the capability tool set (no shell, typed read-only `git`, no `edit`/`write`), not from OS-level isolation. The tools that remain still run as your user and can read any file your account can read; there is no filesystem or network confinement. True OS-level sandboxing (write-confined filesystem, network deny) is future work.
 
 ### Tab Title
 

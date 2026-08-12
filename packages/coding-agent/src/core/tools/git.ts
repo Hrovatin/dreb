@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { AgentTool } from "@dreb/agent-core";
 import { Text } from "@dreb/tui";
 import { type Static, Type } from "@sinclair/typebox";
+import { killProcessTree } from "../../utils/shell.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { getTextOutput, invalidArgText, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -64,10 +65,34 @@ export type GitToolInput = Static<typeof gitSchema>;
 const MAX_ARGS = 64;
 
 /**
+ * Hard timeout for a single git invocation. Read-only local git operations
+ * finish in well under a second; this bound exists so that an explicitly-allowed
+ * but network-capable read (`git remote show <name>`, which contacts the remote)
+ * cannot hang the agent turn indefinitely. On timeout the whole process group is
+ * killed (see `killProcessTree`) so forked helpers (ssh, credential managers)
+ * are reaped too.
+ */
+const GIT_TIMEOUT_MS = 60_000;
+
+/**
+ * Hard ceiling on how much stdout+stderr we buffer in memory before stopping
+ * git early. Output is truncated to `DEFAULT_MAX_BYTES` for display anyway; this
+ * cap bounds memory for pathological reads (`git show <huge-blob>`,
+ * `git log --all -p`) that the display truncation would otherwise let fully
+ * accumulate first.
+ */
+const MAX_CAPTURE_BYTES = DEFAULT_MAX_BYTES * 4;
+
+/**
  * Global git options that redirect git to another repo/dir or run arbitrary
  * code. These only take effect *before* the subcommand (we place the subcommand
- * ourselves, so a user-supplied copy lands after it and is inert), but we reject
- * them unconditionally as defense-in-depth.
+ * ourselves, so a user-supplied copy lands after it as a subcommand option or an
+ * error), but we reject them as defense-in-depth for any flag that is not
+ * explicitly on a subcommand's read-only allow-list. This check runs *after* the
+ * per-subcommand allow-list so that flags which merely share a name with a
+ * global option but are legitimate read-only subcommand flags — e.g. `git diff
+ * -C` (detect copies), `git ls-files -c` (--cached), `git rev-parse --git-dir`
+ * (print the git dir) — are still permitted.
  */
 const FORBIDDEN_GLOBAL_OPTION =
 	/^(?:-c|-C|--exec-path|--git-dir|--work-tree|--namespace|--config-env|--no-pager)(?:=|$)/;
@@ -407,7 +432,10 @@ const GIT_SPECS: Record<GitSubcommand, SubcommandSpec> = {
  * Validate a subcommand's argument list against its spec. Returns an error
  * message string if any token is disallowed, or `undefined` if the whole list
  * is read-only-safe. Everything after a bare `--` is treated as read-only
- * positionals (paths/refs git only reads).
+ * positionals (paths/refs git only reads) — EXCEPT for `positionals: "none"`
+ * subcommands (branch/tag), where a token after `--` still creates the ref
+ * (`git branch -- <name>` is the documented way to create a flag-looking
+ * branch), so it is rejected the same as a bare positional.
  */
 export function validateGitArgs(subcommand: GitSubcommand, args: string[]): string | undefined {
 	if (args.length > MAX_ARGS) return `Too many git arguments (max ${MAX_ARGS}).`;
@@ -421,14 +449,21 @@ export function validateGitArgs(subcommand: GitSubcommand, args: string[]): stri
 
 	let sawDoubleDash = false;
 	for (const rawToken of args) {
-		if (sawDoubleDash) continue; // post-`--` tokens are read-only pathspecs
+		if (sawDoubleDash) {
+			// Post-`--` tokens are pathspecs git only reads — but for branch/tag
+			// (`positionals: "none"`) `git branch -- <name>` / `git tag -- <name>`
+			// still CREATE the ref, so treat them like a bare positional and reject.
+			if (spec.positionals === "none") {
+				return `git ${subcommand} does not accept positional arguments (even after "--") in read-only mode (it could create or modify a ${subcommand}). Use listing flags only.`;
+			}
+			continue;
+		}
 		if (rawToken === "--") {
 			sawDoubleDash = true;
 			continue;
 		}
-		if (FORBIDDEN_GLOBAL_OPTION.test(rawToken)) {
-			return `Global git option "${rawToken}" is not allowed in read-only mode.`;
-		}
+		// Write/exec flags are ALWAYS rejected, before the allow-list, so no
+		// subcommand spec can accidentally permit one.
 		if (FORBIDDEN_WRITE_FLAG.test(rawToken)) {
 			return `Flag "${rawToken}" can write files and is not allowed in read-only mode.`;
 		}
@@ -440,8 +475,17 @@ export function validateGitArgs(subcommand: GitSubcommand, args: string[]): stri
 			}
 			continue;
 		}
+		// The per-subcommand allow-list is authoritative for flags: a flag listed
+		// as read-only for THIS subcommand is allowed even if it shares a name with
+		// a dangerous global option (which only takes effect before the subcommand,
+		// a position this tool never permits).
 		if (spec.flags.has(rawToken)) continue;
 		if (spec.flagPatterns.some((re) => re.test(rawToken))) continue;
+		// Not on the allow-list. Reject global-redirect options with a specific
+		// message; otherwise a generic unknown-flag rejection.
+		if (FORBIDDEN_GLOBAL_OPTION.test(rawToken)) {
+			return `Global git option "${rawToken}" is not allowed in read-only mode.`;
+		}
 		return `Flag "${rawToken}" is not in the read-only allow-list for git ${subcommand}. Turn off Ask mode (/ask off) to run arbitrary git commands.`;
 	}
 	return undefined;
@@ -504,23 +548,60 @@ export function createGitToolDefinition(cwd: string): ToolDefinition<typeof gitS
 					cwd,
 					env: gitEnv(),
 					stdio: ["ignore", "pipe", "pipe"],
+					// Own process group so a timeout/abort can tree-kill any network
+					// helper git forked (ssh, credential manager), not just git itself.
+					detached: true,
 				});
 				let stdout = "";
 				let stderr = "";
+				let capturedBytes = 0;
+				let capHit = false;
 				let aborted = false;
-				const onAbort = () => {
-					aborted = true;
-					if (!child.killed) child.kill();
+				let timedOut = false;
+				let settled = false;
+
+				const killTree = () => {
+					if (child.pid) killProcessTree(child.pid);
+					else if (!child.killed) child.kill();
 				};
-				signal?.addEventListener("abort", onAbort, { once: true });
-				child.stdout?.on("data", (chunk) => {
-					stdout += chunk.toString();
-				});
-				child.stderr?.on("data", (chunk) => {
-					stderr += chunk.toString();
-				});
-				child.on("error", (error) => {
+				const timeoutHandle = setTimeout(() => {
+					timedOut = true;
+					killTree();
+				}, GIT_TIMEOUT_MS);
+				const cleanup = () => {
+					clearTimeout(timeoutHandle);
 					signal?.removeEventListener("abort", onAbort);
+				};
+				function onAbort() {
+					aborted = true;
+					killTree();
+				}
+				signal?.addEventListener("abort", onAbort, { once: true });
+
+				// Append captured output up to MAX_CAPTURE_BYTES, then stop git early.
+				const capture = (chunk: Buffer, stream: "out" | "err") => {
+					if (capHit) return;
+					const s = chunk.toString();
+					const remaining = MAX_CAPTURE_BYTES - capturedBytes;
+					if (s.length >= remaining) {
+						const slice = s.slice(0, Math.max(0, remaining));
+						if (stream === "out") stdout += slice;
+						else stderr += slice;
+						capturedBytes += slice.length;
+						capHit = true;
+						killTree();
+						return;
+					}
+					if (stream === "out") stdout += s;
+					else stderr += s;
+					capturedBytes += s.length;
+				};
+				child.stdout?.on("data", (chunk) => capture(chunk, "out"));
+				child.stderr?.on("data", (chunk) => capture(chunk, "err"));
+				child.on("error", (error) => {
+					if (settled) return;
+					settled = true;
+					cleanup();
 					if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 						reject(new Error("git is not installed or not on PATH"));
 						return;
@@ -528,16 +609,24 @@ export function createGitToolDefinition(cwd: string): ToolDefinition<typeof gitS
 					reject(new Error(`Failed to run git: ${error.message}`));
 				});
 				child.on("close", (code) => {
-					signal?.removeEventListener("abort", onAbort);
+					if (settled) return;
+					settled = true;
+					cleanup();
 					if (aborted) {
 						reject(new Error("Operation aborted"));
+						return;
+					}
+					if (timedOut) {
+						reject(new Error(`git ${subcommand} timed out after ${GIT_TIMEOUT_MS / 1000}s and was terminated`));
 						return;
 					}
 					const combined = stdout || stderr ? `${stdout}${stderr}` : "";
 					const raw = combined.length > 0 ? combined : code === 0 ? "(no output)" : `git exited with code ${code}`;
 					const truncation = truncateHead(raw, { maxLines: Number.MAX_SAFE_INTEGER });
 					let output = truncation.content;
-					if (truncation.truncated) {
+					if (capHit) {
+						output += `\n\n[output exceeded ${formatSize(MAX_CAPTURE_BYTES)} — git was stopped early; refine the command]`;
+					} else if (truncation.truncated) {
 						output += `\n\n[${formatSize(DEFAULT_MAX_BYTES)} limit reached — refine the git command]`;
 					}
 					const details: GitToolDetails = {
@@ -562,7 +651,7 @@ export function createGitToolDefinition(cwd: string): ToolDefinition<typeof gitS
 	};
 }
 
-function formatGitCall(
+export function formatGitCall(
 	args: { subcommand?: string; args?: string[] } | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.js").theme,
 ): string {
@@ -575,7 +664,7 @@ function formatGitCall(
 	return text;
 }
 
-function formatGitResult(
+export function formatGitResult(
 	result: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 		details?: GitToolDetails;
