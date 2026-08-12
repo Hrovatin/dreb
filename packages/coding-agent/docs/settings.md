@@ -334,7 +334,6 @@ Only host-validated decision metadata is persisted/emitted. Raw arbiter prompts,
 | `shellCommandPrefix` | string | - | Prefix for every bash command (e.g., `"shopt -s expand_aliases"`) |
 | `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`) |
 | `forbiddenCommands` | string[] | `[]` | Additional regex patterns for commands the bash tool will refuse to run (appended to hardcoded defaults) |
-| `askModeAllowedCommands` | string[] | *(built-in read-only set)* | Overrides the allowlist of read-only bash command prefixes permitted while [read-only Ask mode](../README.md#read-only-ask-mode) is active (e.g. `["git log", "git diff", "ls", "cat", "rg"]`). When set, fully replaces the defaults. Only affects `/ask on` sessions |
 
 ```json
 {

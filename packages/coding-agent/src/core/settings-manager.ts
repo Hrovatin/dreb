@@ -150,7 +150,6 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	forbiddenCommands?: string[]; // Regex patterns for commands blocked by the forbidden-commands guard
-	askModeAllowedCommands?: string[]; // Allowlist of read-only command prefixes permitted in Ask mode (full replacement of defaults)
 	sensitiveFilePaths?: string[]; // Additional glob patterns for sensitive file paths blocked by the read/bash guard
 	secretOutputPatterns?: { name: string; pattern: string }[]; // Additional regex patterns for secret scrubbing in tool output
 	agentModels?: AgentModelsSettings;
@@ -1281,10 +1280,6 @@ export class SettingsManager {
 
 	getForbiddenCommands(): string[] | undefined {
 		return this.settings.forbiddenCommands;
-	}
-
-	getAskModeAllowedCommands(): string[] | undefined {
-		return this.settings.askModeAllowedCommands;
 	}
 
 	getSensitiveFilePaths(): string[] | undefined {
