@@ -419,6 +419,25 @@ describe("isForbiddenCommand", () => {
 			// A real single-quoted string keeps `;`/`&&` literal — no false split.
 			expect(isForbiddenCommand("git log 'a ; git push --force'")).toBeUndefined();
 		});
+
+		// Finding G1: bash ANSI-C `$'...'` quoting. Backslash IS an escape inside
+		// `$'...'`, so `\'` is a literal apostrophe that does NOT close the
+		// string. Treating it like a plain single-quoted string would exit one
+		// char early, invert quote parity, and mask a chained dangerous command
+		// from segment splitting — letting it slip past the always-on denylist.
+		it("splits on an operator following a $'...' ANSI-C string", () => {
+			expect(isForbiddenCommand("echo $'\\'' ; git push --force")).toBe("^git push.*(-f\\b|--force)");
+			expect(isForbiddenCommand("echo $'\\'' && git push --force")).toBe("^git push.*(-f\\b|--force)");
+			expect(isForbiddenCommand("git log $'a\\'b' ; git push --force")).toBe("^git push.*(-f\\b|--force)");
+		});
+
+		it("does not over-block legitimate $'...' usage (denylist runs in all modes)", () => {
+			// ANSI-C quoting is common in normal (non-Ask) mode; it must not be
+			// treated as forbidden just because it contains escapes.
+			expect(isForbiddenCommand("git commit -m $'line1\\nline2'")).toBeUndefined();
+			expect(isForbiddenCommand("printf $'%s\\n' hi")).toBeUndefined();
+			expect(isForbiddenCommand("echo $'a\\tb'")).toBeUndefined();
+		});
 	});
 
 	describe("does not false-positive on embedded patterns", () => {
