@@ -137,6 +137,19 @@ function findTool(group: ResponseGroup, toolCallId: string): ToolActivity | unde
 	return undefined;
 }
 
+/** End the in-flight response (if any): stop streaming and collapse its activity
+ * box, optionally stamping a first-seen error. Shared by `agent_end` (clean end)
+ * and `host_error` (fatal end). */
+function closeActiveResponse(state: TranscriptState, error?: string): void {
+	state.streaming = false;
+	const group = activeResponse(state, false);
+	if (group) {
+		group.streaming = false;
+		group.collapsed = true;
+		if (error) group.error = group.error ?? error;
+	}
+}
+
 function partialResultText(payload: unknown): string | undefined {
 	if (typeof payload === "string") return payload;
 	if (payload && typeof payload === "object") {
@@ -159,24 +172,26 @@ function providerErrorText(message: {
 
 function uiRequestFromEvent(event: any): UiRequest | undefined {
 	const method = event?.method as string | undefined;
+	const id = String(event.id);
+	const options = Array.isArray(event.options) ? event.options.map((o: unknown) => String(o)) : undefined;
 	if (method === "select" || method === "confirm" || method === "input" || method === "editor") {
 		return {
-			id: String(event.id),
+			id,
 			method,
 			title: String(event.title ?? ""),
 			message: typeof event.message === "string" ? event.message : undefined,
-			options: Array.isArray(event.options) ? event.options.map((o: unknown) => String(o)) : undefined,
+			options,
 			placeholder: typeof event.placeholder === "string" ? event.placeholder : undefined,
 			prefill: typeof event.prefill === "string" ? event.prefill : undefined,
 		};
 	}
 	if (method === "ask") {
 		return {
-			id: String(event.id),
+			id,
 			method: "ask",
 			title: String(event.title ?? "Question"),
 			question: typeof event.question === "string" ? event.question : "",
-			options: Array.isArray(event.options) ? event.options.map((o: unknown) => String(o)) : undefined,
+			options,
 			allowFreeText: typeof event.allowFreeText === "boolean" ? event.allowFreeText : undefined,
 			multiSelect: typeof event.multiSelect === "boolean" ? event.multiSelect : undefined,
 			multiline: typeof event.multiline === "boolean" ? event.multiline : undefined,
@@ -197,12 +212,7 @@ export function applyEvent(state: TranscriptState, event: any): void {
 			break;
 		}
 		case "agent_end": {
-			state.streaming = false;
-			const group = activeResponse(state, false);
-			if (group) {
-				group.streaming = false;
-				group.collapsed = true;
-			}
+			closeActiveResponse(state);
 			break;
 		}
 		case "message_start": {
@@ -334,13 +344,7 @@ export function applyEvent(state: TranscriptState, event: any): void {
 		case "host_error": {
 			// Synthetic event emitted by the SessionController on RPC child exit.
 			state.hostError = String(event.message ?? "dreb process exited");
-			state.streaming = false;
-			const group = activeResponse(state, false);
-			if (group) {
-				group.streaming = false;
-				group.collapsed = true;
-				group.error = group.error ?? state.hostError;
-			}
+			closeActiveResponse(state, state.hostError);
 			break;
 		}
 		case "host_notice": {

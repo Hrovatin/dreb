@@ -9,8 +9,15 @@ class FakeClient implements RpcClientLike {
 	prompts: string[] = [];
 	compactions: Array<string | undefined> = [];
 	uiResponses: unknown[] = [];
-	commandsResult: Array<{ name: string; description?: string }> = [];
+	commandsResult: Array<{
+		name: string;
+		description?: string;
+		source: "extension" | "prompt" | "skill" | "builtin";
+		dashboard?: boolean;
+	}> = [];
 	startError: Error | undefined;
+	/** When set, the next prompt/compact/abort call rejects with this error. */
+	callError: Error | undefined;
 	private eventListener: ((event: any) => void) | undefined;
 	private exitListener: ((info: any) => void) | undefined;
 
@@ -22,16 +29,26 @@ class FakeClient implements RpcClientLike {
 		this.stopped += 1;
 	}
 	async prompt(message: string): Promise<void> {
+		if (this.callError) throw this.callError;
 		this.prompts.push(message);
 	}
 	async abort(): Promise<void> {
+		if (this.callError) throw this.callError;
 		this.aborted += 1;
 	}
 	async compact(customInstructions?: string): Promise<unknown> {
+		if (this.callError) throw this.callError;
 		this.compactions.push(customInstructions);
 		return {};
 	}
-	async getCommands(): Promise<Array<{ name: string; description?: string }>> {
+	async getCommands(): Promise<
+		Array<{
+			name: string;
+			description?: string;
+			source: "extension" | "prompt" | "skill" | "builtin";
+			dashboard?: boolean;
+		}>
+	> {
 		return this.commandsResult;
 	}
 	sendExtensionUIResponse(response: unknown): void {
@@ -64,7 +81,7 @@ function makeController(fake: FakeClient, cwd = "/tmp/project") {
 describe("SessionController", () => {
 	it("starts the client, connects, and merges agent + builtin commands", async () => {
 		const fake = new FakeClient();
-		fake.commandsResult = [{ name: "/review", description: "Review" }];
+		fake.commandsResult = [{ name: "/review", description: "Review", source: "prompt" }];
 		const controller = makeController(fake);
 
 		await controller.start();
@@ -107,12 +124,67 @@ describe("SessionController", () => {
 
 	it("forwards registered agent commands through prompt", async () => {
 		const fake = new FakeClient();
-		fake.commandsResult = [{ name: "review" }];
+		fake.commandsResult = [{ name: "review", source: "prompt" }];
 		const controller = makeController(fake);
 		await controller.start();
 
 		await controller.submit("/review 42");
 		expect(fake.prompts).toEqual(["/review 42"]);
+	});
+
+	it("intercepts server builtins from get_commands instead of routing them to prompt", async () => {
+		// Regression: builtins advertised by get_commands (source "builtin") must
+		// NOT be forwarded via prompt — the server rejects them and the rejection
+		// is silently dropped, so the user sees nothing. They must be intercepted.
+		const fake = new FakeClient();
+		fake.commandsResult = [
+			{ name: "new", description: "New session", source: "builtin" },
+			{ name: "quit", description: "Quit", source: "builtin", dashboard: false },
+			{ name: "review", source: "extension" },
+		];
+		const controller = makeController(fake);
+		await controller.start();
+
+		// A dashboard-visible builtin appears in the dropdown with source "builtin".
+		const knew = controller.getCommandList().find((c) => c.name === "new");
+		expect(knew?.source).toBe("builtin");
+		// dashboard:false builtins are hidden from the dropdown.
+		expect(controller.getCommandList().some((c) => c.name === "quit")).toBe(false);
+
+		await controller.submit("/new");
+		expect(fake.prompts).toHaveLength(0); // never forwarded to prompt
+		expect(controller.getTranscript().statusText).toMatch(/isn't available yet/);
+	});
+
+	it("blocks submits after a child crash with a reconnect notice", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+		fake.emitExit({ code: 1, signal: null });
+
+		await controller.submit("hello after crash");
+
+		expect(fake.prompts).toHaveLength(0);
+		expect(controller.getTranscript().statusText).toMatch(/isn't connected/);
+	});
+
+	it("surfaces a notice instead of leaking a rejected prompt call", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+		fake.callError = new Error("stdin pipe broken");
+
+		await expect(controller.submit("hello")).resolves.toBeUndefined();
+		expect(controller.getTranscript().statusText).toMatch(/Request failed: stdin pipe broken/);
+	});
+
+	it("swallows a rejected abort without throwing", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+		fake.callError = new Error("abort boom");
+
+		await expect(controller.abort()).resolves.toBeUndefined();
 	});
 
 	it("surfaces a notice for unwired builtins without calling the client", async () => {
