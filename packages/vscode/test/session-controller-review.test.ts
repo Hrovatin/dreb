@@ -93,9 +93,10 @@ class RecordingReviewUi implements ReviewUi {
 	}
 }
 
-function git(args: string[], cwd: string): void {
+function git(args: string[], cwd: string): string {
 	const r = spawnSync("git", args, { cwd, encoding: "utf-8" });
 	if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+	return (r.stdout ?? "").trim();
 }
 
 function initRepo(dir: string): void {
@@ -227,5 +228,53 @@ describe("SessionController change review", () => {
 		} finally {
 			rmSync(plain, { recursive: true, force: true });
 		}
+	});
+
+	it("revertAll restores every file of a multi-file turn and clears the cycle", async () => {
+		// Add a second tracked file so the turn spans two files.
+		writeFileSync(join(repo, "file2.txt"), body());
+		git(["add", "file2.txt"], repo);
+		git(["commit", "-m", "add file2"], repo);
+
+		const review = new RecordingReviewUi();
+		const { controller, client } = await startController(repo, review);
+
+		client.emit({ type: "turn_start" });
+		writeFileSync(join(repo, "file.txt"), body().replace("line3", "AGENT3"));
+		writeFileSync(join(repo, "file2.txt"), body().replace("line5", "AGENT5"));
+		client.emit({ type: "agent_end", messages: [] });
+		await flush();
+		expect(controller.getReviewState().files).toHaveLength(2);
+
+		await controller.reviewRevertAll();
+		expect(readFileSync(join(repo, "file.txt"), "utf-8")).toBe(body());
+		expect(readFileSync(join(repo, "file2.txt"), "utf-8")).toBe(body());
+		expect(controller.getReviewState().files).toEqual([]);
+	});
+
+	it("acceptFile hides one file while the other stays pending, without commit or revert", async () => {
+		writeFileSync(join(repo, "file2.txt"), body());
+		git(["add", "file2.txt"], repo);
+		git(["commit", "-m", "add file2"], repo);
+		const headBefore = git(["rev-parse", "HEAD"], repo);
+
+		const review = new RecordingReviewUi();
+		const { controller, client } = await startController(repo, review);
+
+		client.emit({ type: "turn_start" });
+		const editedA = body().replace("line3", "AGENT3");
+		writeFileSync(join(repo, "file.txt"), editedA);
+		writeFileSync(join(repo, "file2.txt"), body().replace("line5", "AGENT5"));
+		client.emit({ type: "agent_end", messages: [] });
+		await flush();
+		expect(controller.getReviewState().files).toHaveLength(2);
+
+		await controller.reviewAcceptFile("file.txt");
+		// file.txt drops out of the pending set; file2.txt remains.
+		expect(controller.getReviewState().files.map((f) => f.path)).toEqual(["file2.txt"]);
+		// Accept neither reverts (file content still the edited version) nor commits.
+		expect(readFileSync(join(repo, "file.txt"), "utf-8")).toBe(editedA);
+		expect(git(["rev-parse", "HEAD"], repo)).toBe(headBefore);
+		expect(git(["status", "--porcelain"], repo)).not.toBe(""); // still uncommitted
 	});
 });

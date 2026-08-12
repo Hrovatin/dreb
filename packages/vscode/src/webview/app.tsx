@@ -18,7 +18,10 @@ export function App() {
 	const [state, setState] = createStore<TranscriptState>(createTranscriptState());
 	const [commands, setCommands] = createSignal<SlashCommandDto[]>([]);
 	const [status, setStatus] = createSignal<HostStatus>({ connected: false, cwd: "" });
-	const [review, setReview] = createSignal<ReviewStateDto>({ enabled: false, files: [] });
+	// Optimistic pre-hydration default so a git repo doesn't briefly flash the
+	// "unavailable" notice before the first review message arrives; the host
+	// publishes the authoritative enabled/files state on connect and on reload.
+	const [review, setReview] = createSignal<ReviewStateDto>({ enabled: true, files: [] });
 	const [tick, setTick] = createSignal(0);
 
 	let scrollEl: HTMLDivElement | undefined;
@@ -107,24 +110,36 @@ export function App() {
 				<div class="dreb-banner error">{state.hostError}</div>
 			</Show>
 
-			<Show when={review().files.length > 0}>
-				<div class="dreb-review-bar">
-					<span class="dreb-review-title">
-						{review().files.length} change{review().files.length === 1 ? "" : "s"} pending review
-					</span>
-					<For each={review().files}>
-						{(file) => (
-							<button
-								type="button"
-								class="dreb-review-file"
-								title={`${file.status}${file.hunkCount > 0 ? ` · ${file.hunkCount} hunk${file.hunkCount === 1 ? "" : "s"}` : ""} — open diff`}
-								onClick={() => postToHost({ type: "review-open-diff", path: file.path })}
-							>
-								{shortPath(file.path)}
-							</button>
-						)}
-					</For>
-				</div>
+			<Show when={review().files.length > 0 || !review().enabled}>
+				<Show
+					when={review().enabled}
+					fallback={
+						<div class="dreb-review-bar dreb-review-unavailable">
+							<span class="dreb-review-title">
+								Change review unavailable — open a folder that is a Git repository to review and revert agent
+								edits.
+							</span>
+						</div>
+					}
+				>
+					<div class="dreb-review-bar">
+						<span class="dreb-review-title">
+							{review().files.length} change{review().files.length === 1 ? "" : "s"} pending review
+						</span>
+						<For each={review().files}>
+							{(file) => (
+								<button
+									type="button"
+									class="dreb-review-file"
+									title={`${file.status}${file.hunkCount > 0 ? ` · ${file.hunkCount} hunk${file.hunkCount === 1 ? "" : "s"}` : ""} — open diff`}
+									onClick={() => postToHost({ type: "review-open-diff", path: file.path })}
+								>
+									{shortPath(file.path)}
+								</button>
+							)}
+						</For>
+					</div>
+				</Show>
 			</Show>
 
 			<div class="dreb-transcript" ref={scrollEl}>

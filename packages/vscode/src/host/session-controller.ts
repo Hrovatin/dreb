@@ -21,7 +21,7 @@ import {
 	captureTree,
 	changedFiles,
 	fileDiff,
-	isGitRepo,
+	findGitRoot,
 	revertFile,
 	revertHunk,
 } from "./git-snapshot.js";
@@ -158,6 +158,11 @@ export class SessionController {
 	private readonly reviewModel = new ReviewModel();
 	/** Whether change review is active for this cwd (false outside a git repo). */
 	private reviewEnabled = false;
+	/** The git repository root backing change review. All review git operations
+	 * and path joins are anchored here (not `options.cwd`) so a workspace opened
+	 * at a subdirectory of the repo still produces correct repo-root-relative
+	 * paths. Falls back to `options.cwd` when outside a repo (review disabled). */
+	private reviewRoot: string;
 	/** Last-published review state (held so the bridge can include it in the
 	 * reload snapshot — review survives webview recreation). */
 	private reviewState: ReviewStateDto = { enabled: false, files: [] };
@@ -185,10 +190,18 @@ export class SessionController {
 		this.reviewUi = options.review ?? noopReviewUi;
 		this.logger = options.logger ?? (() => {});
 		this.status = { connected: false, cwd: options.cwd };
+		this.reviewRoot = options.cwd;
 	}
 
 	get cwd(): string {
 		return this.options.cwd;
+	}
+
+	/** The git repository root backing change review (repo root, or the workspace
+	 * cwd when review is disabled). Used by the extension to map editor URIs to
+	 * the repo-root-relative paths the review model speaks. */
+	get gitRoot(): string {
+		return this.reviewRoot;
 	}
 
 	getTranscript(): TranscriptState {
@@ -234,8 +247,14 @@ export class SessionController {
 			throw err;
 		}
 		this.setStatus({ ...this.status, connected: true, error: undefined });
-		this.reviewEnabled = isGitRepo(this.options.cwd);
+		const root = findGitRoot(this.options.cwd);
+		this.reviewEnabled = root !== null;
+		this.reviewRoot = root ?? this.options.cwd;
 		this.reviewState = { enabled: this.reviewEnabled, files: [] };
+		// Publish the (possibly disabled) review state so the webview can show a
+		// clear "change review unavailable" notice when this isn't a git repo
+		// (acceptance criterion: degrade gracefully with a clear notice).
+		this.emit({ kind: "review", review: this.reviewState });
 		await this.refreshCommands();
 		await this.refreshStatus(true);
 	}
@@ -557,7 +576,7 @@ export class SessionController {
 	/** Capture the pre-turn baseline once per review cycle. */
 	private maybeCaptureBaseline(): void {
 		if (!this.reviewEnabled || this.reviewModel.hasCycle()) return;
-		const tree = captureTree(this.options.cwd);
+		const tree = captureTree(this.reviewRoot);
 		if (tree) this.reviewModel.beginCycle(tree);
 	}
 
@@ -571,10 +590,10 @@ export class SessionController {
 			this.publishReview([]);
 			return;
 		}
-		const changed = changedFiles(this.options.cwd, ref);
+		const changed = changedFiles(this.reviewRoot, ref);
 		const pending = this.reviewModel.pending(changed);
 		for (const f of pending) {
-			this.reviewUi.setBaseline(f.path, baselineContent(this.options.cwd, ref, f.path));
+			this.reviewUi.setBaseline(f.path, baselineContent(this.reviewRoot, ref, f.path));
 		}
 		this.reviewUi.setPending(pending);
 		this.publishReview(pending);
@@ -611,19 +630,30 @@ export class SessionController {
 	async reviewRevertFile(path: string): Promise<void> {
 		const ref = this.reviewModel.baselineRef();
 		if (!ref) return;
-		revertFile(this.options.cwd, ref, path);
-		this.reviewModel.unaccept(path);
+		const ok = revertFile(this.reviewRoot, ref, path);
+		if (ok) this.reviewModel.unaccept(path);
+		else this.emitNotice(`Could not revert ${path}.`);
+		// refreshReview recomputes from the working tree, so a file that failed to
+		// revert stays listed rather than being silently dropped.
 		await this.refreshReview();
 	}
 
-	/** Revert every pending file to baseline, then end the cycle. */
+	/** Revert every pending file to baseline, then end the cycle. Files that fail
+	 * to revert remain pending (surfaced via `refreshReview`) and are reported,
+	 * rather than being silently cleared while their edits persist on disk. */
 	async reviewRevertAll(): Promise<void> {
 		const ref = this.reviewModel.baselineRef();
 		if (!ref) return;
-		for (const f of this.reviewState.files) revertFile(this.options.cwd, ref, f.path);
-		this.reviewModel.reset();
-		this.reviewUi.clear();
-		this.publishReview([]);
+		const failures: string[] = [];
+		for (const f of this.reviewState.files) {
+			if (revertFile(this.reviewRoot, ref, f.path)) this.reviewModel.unaccept(f.path);
+			else failures.push(f.path);
+		}
+		if (failures.length > 0) {
+			const noun = failures.length === 1 ? "file" : "files";
+			this.emitNotice(`Could not revert ${failures.length} ${noun}: ${failures.join(", ")}`);
+		}
+		await this.refreshReview();
 	}
 
 	/** Reject exactly the hunk containing `line` (1-based, in the current file)
@@ -632,11 +662,11 @@ export class SessionController {
 	async reviewRejectHunkAtLine(path: string, line: number): Promise<boolean> {
 		const ref = this.reviewModel.baselineRef();
 		if (!ref) return false;
-		const { diff, binary } = fileDiff(this.options.cwd, ref, path);
+		const { diff, binary } = fileDiff(this.reviewRoot, ref, path);
 		if (binary || diff.length === 0) return false;
 		const index = hunkIndexForLine(parseFileDiff(diff).hunks, line);
 		if (index === undefined) return false;
-		const ok = revertHunk(this.options.cwd, ref, path, index);
+		const ok = revertHunk(this.reviewRoot, ref, path, index);
 		await this.refreshReview();
 		return ok;
 	}

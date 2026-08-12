@@ -72,7 +72,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const editor = vscode.window.activeTextEditor;
 			const controller = registry.active?.controller;
 			if (!editor || !controller) return;
-			const path = toRepoRelative(controller.cwd, editor.document.uri);
+			const path = toRepoRelative(controller.gitRoot, editor.document.uri);
 			if (path === undefined) {
 				vscode.window.showInformationMessage("dreb: the active file is not under change review.");
 				return;
@@ -93,7 +93,7 @@ function resolveReviewTarget(arg: unknown): { controller: SessionController; pat
 	if (typeof arg === "string") return { controller, path: arg };
 	const uri = (arg as { resourceUri?: vscode.Uri })?.resourceUri;
 	if (!uri) return undefined;
-	const path = toRepoRelative(controller.cwd, uri);
+	const path = toRepoRelative(controller.gitRoot, uri);
 	return path === undefined ? undefined : { controller, path };
 }
 

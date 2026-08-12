@@ -6,7 +6,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -163,5 +163,90 @@ describe("git-snapshot", () => {
 
 		expect(revertFile(repo, base, "created.txt")).toBe(true);
 		expect(existsSync(join(repo, "created.txt"))).toBe(false);
+	});
+
+	it("does not garble the changed set when a file is renamed (rename detection off)", () => {
+		// A second tracked file so any pair-wise desync from a 3-token rename
+		// record would corrupt this entry too.
+		write(repo, "other.txt", ["keep1", "keep2", "keep3"]);
+		git(["add", "other.txt"], repo);
+		git(["commit", "-m", "add other"], repo);
+
+		const base = captureTree(repo) as string;
+		// Rename file.txt → renamed.txt (content-identical → git would call it a
+		// rename with detection on) and independently modify other.txt.
+		renameSync(join(repo, "file.txt"), join(repo, "renamed.txt"));
+		write(repo, "other.txt", ["keep1", "CHANGED", "keep3"]);
+
+		const changed = changedFiles(repo, base).sort((a, b) => a.path.localeCompare(b.path));
+		// With --no-renames the rename degrades to a clean delete + add, and the
+		// unrelated modification is parsed correctly (no status/path swap).
+		expect(changed).toEqual([
+			{ path: "file.txt", status: "deleted", hunkCount: expect.any(Number) },
+			{ path: "other.txt", status: "modified", hunkCount: 1 },
+			{ path: "renamed.txt", status: "added", hunkCount: expect.any(Number) },
+		]);
+	});
+
+	it("works when cwd is a subdirectory of the repo (paths stay repo-root-relative)", () => {
+		mkdirSync(join(repo, "sub"), { recursive: true });
+		write(repo, "sub/nested.txt", lines());
+		git(["add", "sub/nested.txt"], repo);
+		git(["commit", "-m", "add nested"], repo);
+
+		const sub = join(repo, "sub");
+		expect(isGitRepo(sub)).toBe(true);
+		const base = captureTree(sub) as string;
+		expect(base).not.toBeNull();
+
+		const body = lines();
+		body[2] = "AGENT3";
+		write(repo, "sub/nested.txt", body);
+
+		// Changed-file paths are repo-root-relative even though cwd is the subdir.
+		const changed = changedFiles(sub, base);
+		expect(changed).toEqual([{ path: "sub/nested.txt", status: "modified", hunkCount: 1 }]);
+
+		// fileDiff, baselineContent, and revertFile all resolve against the repo
+		// root — not the subdir — so they operate on the real file.
+		expect(fileDiff(sub, base, "sub/nested.txt").diff).toContain("AGENT3");
+		expect(baselineContent(sub, base, "sub/nested.txt")).toBe(`${lines().join("\n")}\n`);
+		expect(revertFile(sub, base, "sub/nested.txt")).toBe(true);
+		expect(read(repo, "sub/nested.txt")).toEqual(lines());
+	});
+
+	it("revertHunk reverts a subdir file's hunk when cwd is that subdir", () => {
+		mkdirSync(join(repo, "sub"), { recursive: true });
+		write(repo, "sub/nested.txt", lines());
+		git(["add", "sub/nested.txt"], repo);
+		git(["commit", "-m", "add nested"], repo);
+
+		const sub = join(repo, "sub");
+		const base = captureTree(sub) as string;
+		const body = lines();
+		body[2] = "AGENT3";
+		body[15] = "AGENT16";
+		write(repo, "sub/nested.txt", body);
+
+		expect(revertHunk(sub, base, "sub/nested.txt", 0)).toBe(true);
+		const after = read(repo, "sub/nested.txt");
+		expect(after[2]).toBe("line3"); // first hunk reverted
+		expect(after[15]).toBe("AGENT16"); // second preserved
+	});
+
+	it("revertFile refuses (returns false) and leaves the file untouched on a bad baseline ref", () => {
+		// A failed baseline read must never be mistaken for "absent from baseline"
+		// and trigger a destructive delete.
+		const body = lines();
+		body[4] = "AGENT5";
+		write(repo, "file.txt", body);
+		const bogusTree = "0000000000000000000000000000000000000000";
+
+		expect(revertFile(repo, bogusTree, "file.txt")).toBe(false);
+		// The working file is left exactly as it was (NOT deleted, NOT truncated).
+		expect(read(repo, "file.txt")).toEqual(body);
+		expect(existsSync(join(repo, "file.txt"))).toBe(true);
+		// baselineContent likewise reports null (not "") on a genuine read error.
+		expect(baselineContent(repo, bogusTree, "file.txt")).toBeNull();
 	});
 });

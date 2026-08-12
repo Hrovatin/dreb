@@ -261,6 +261,11 @@ body {
 .dreb-review-file:hover {
 	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
 }
+.dreb-review-unavailable .dreb-review-title {
+	font-weight: 400;
+	font-style: italic;
+	margin-right: 0;
+}
 
 
 .dreb-status-line {

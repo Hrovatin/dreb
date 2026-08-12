@@ -19,6 +19,7 @@
 import { isAbsolute, join, relative, sep } from "node:path";
 import * as vscode from "vscode";
 import type { ReviewFileDto } from "../shared/protocol.js";
+import { findGitRoot } from "./git-snapshot.js";
 import type { ReviewUi } from "./review-ui.js";
 
 export const BASELINE_SCHEME = "dreb-baseline";
@@ -30,6 +31,11 @@ function baselineUri(path: string): vscode.Uri {
 }
 
 export function createVscodeReviewUi(cwd: string): ReviewUi & vscode.Disposable {
+	// Change-review paths are repo-root-relative (they come from diffing git tree
+	// objects), so every path join / URI must be anchored to the repository root,
+	// not the workspace cwd — otherwise a workspace opened at a subdirectory of
+	// the repo would build wrong file URIs and quick-diff would never match.
+	const root = findGitRoot(cwd) ?? cwd;
 	const baselines = new Map<string, string>();
 	const changeEmitter = new vscode.EventEmitter<vscode.Uri>();
 
@@ -42,13 +48,13 @@ export function createVscodeReviewUi(cwd: string): ReviewUi & vscode.Disposable 
 
 	const quickDiff: vscode.QuickDiffProvider = {
 		provideOriginalResource(uri) {
-			const rel = toRepoRelative(cwd, uri);
+			const rel = toRepoRelative(root, uri);
 			if (rel === undefined || !baselines.has(rel)) return undefined;
 			return baselineUri(rel);
 		},
 	};
 
-	const scm = vscode.scm.createSourceControl("drebReview", "dreb — pending review", vscode.Uri.file(cwd));
+	const scm = vscode.scm.createSourceControl("drebReview", "dreb — pending review", vscode.Uri.file(root));
 	scm.quickDiffProvider = quickDiff;
 	const group = scm.createResourceGroup("pending", "Pending review");
 
@@ -61,7 +67,7 @@ export function createVscodeReviewUi(cwd: string): ReviewUi & vscode.Disposable 
 		},
 		setPending(files: ReviewFileDto[]) {
 			group.resourceStates = files.map((f) => {
-				const resourceUri = vscode.Uri.file(join(cwd, f.path));
+				const resourceUri = vscode.Uri.file(join(root, f.path));
 				return {
 					resourceUri,
 					decorations: {
@@ -79,7 +85,7 @@ export function createVscodeReviewUi(cwd: string): ReviewUi & vscode.Disposable 
 		},
 		async openDiff(path) {
 			const left = baselineUri(path);
-			const right = vscode.Uri.file(join(cwd, path));
+			const right = vscode.Uri.file(join(root, path));
 			await vscode.commands.executeCommand("vscode.diff", left, right, `${path} (dreb review)`);
 		},
 		clear() {
