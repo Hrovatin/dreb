@@ -1,0 +1,365 @@
+/**
+ * Pure transcript projection — folds dreb RPC session events into a render
+ * model. No DOM, no framework, and NO `@dreb/coding-agent` import: this module
+ * is shared verbatim by the extension host (which keeps the authoritative
+ * state) and the webview (which applies the same events for live rendering),
+ * so it must stay dependency-free and unit-testable in plain node.
+ *
+ * Model: an append-only list of transcript items. A "response" groups one agent
+ * run's streamed output, separating the collapsible *activity* (thinking +
+ * tool calls) from the clean *answer* (assistant text). Events are typed
+ * structurally (`any`) on purpose — dispatch on `type`, ignore unknown values.
+ */
+
+export interface ThinkingActivity {
+	kind: "thinking";
+	text: string;
+}
+
+export interface ToolActivity {
+	kind: "tool";
+	toolCallId: string;
+	toolName: string;
+	args: unknown;
+	status: "running" | "done" | "error";
+	/** Result text (or partial output while running). */
+	resultText: string;
+}
+
+export type ActivityItem = ThinkingActivity | ToolActivity;
+
+export interface ResponseGroup {
+	kind: "response";
+	id: number;
+	/** Thinking + tool activity, in arrival order (rendered in the activity box). */
+	activity: ActivityItem[];
+	/** Accumulated final-answer markdown (assistant text content). */
+	answer: string;
+	/** True between agent_start and agent_end for this run. */
+	streaming: boolean;
+	/** Activity box collapse state; auto-collapses when the run ends. */
+	collapsed: boolean;
+	/** Provider failure text, if this run ended in an error. */
+	error?: string;
+}
+
+export interface UserItem {
+	kind: "user";
+	text: string;
+}
+
+export type TranscriptItem = UserItem | ResponseGroup;
+
+/** A pending, blocking extension-UI request the user must answer. */
+export interface UiRequest {
+	id: string;
+	method: "select" | "confirm" | "input" | "editor" | "ask";
+	title: string;
+	message?: string;
+	options?: string[];
+	placeholder?: string;
+	prefill?: string;
+	/** ask: the question prompt. */
+	question?: string;
+	/** ask: offer a free-text field (defaults true). */
+	allowFreeText?: boolean;
+	/** ask: render options as checkboxes instead of radios. */
+	multiSelect?: boolean;
+	/** ask: use a multi-line text area for free text. */
+	multiline?: boolean;
+	/** ask: absolute runtime deadline (ms epoch); survives reload. */
+	expiresAt?: number;
+}
+
+export interface TranscriptState {
+	items: TranscriptItem[];
+	/** True while an agent run is in flight (drives the composer/stop button). */
+	streaming: boolean;
+	/** Blocking extension-UI requests awaiting a response. */
+	uiRequests: UiRequest[];
+	/** Transient non-fatal status (retry/compaction); MVP surfaces a single line. */
+	statusText?: string;
+	/** Fatal host-side error (e.g. the RPC child process exited). */
+	hostError?: string;
+	/** Monotonic id source for response groups. */
+	nextResponseId: number;
+}
+
+export function createTranscriptState(): TranscriptState {
+	return { items: [], streaming: false, uiRequests: [], nextResponseId: 1 };
+}
+
+/** Flatten message content (string or content-part array) to plain text. */
+function contentToText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	const parts: string[] = [];
+	for (const raw of content) {
+		const part = raw as { text?: unknown };
+		if (typeof part?.text === "string") parts.push(part.text);
+	}
+	return parts.join("\n");
+}
+
+/**
+ * The active response is the last item when it is a still-streaming response
+ * group. Everything a single agent run streams (thinking, tools, answer text)
+ * lands in that one group. When `create` is set and there is none, a new group
+ * is appended — this also covers runs that begin without a preceding
+ * `agent_start` (defensive) and steered mid-run user turns.
+ */
+function activeResponse(state: TranscriptState, create: boolean): ResponseGroup | undefined {
+	const last = state.items[state.items.length - 1];
+	if (last && last.kind === "response" && last.streaming) return last;
+	if (!create) return undefined;
+	const group: ResponseGroup = {
+		kind: "response",
+		id: state.nextResponseId++,
+		activity: [],
+		answer: "",
+		streaming: true,
+		collapsed: false,
+	};
+	state.items.push(group);
+	return group;
+}
+
+function lastThinking(group: ResponseGroup): ThinkingActivity | undefined {
+	const last = group.activity[group.activity.length - 1];
+	return last?.kind === "thinking" ? last : undefined;
+}
+
+function findTool(group: ResponseGroup, toolCallId: string): ToolActivity | undefined {
+	for (let i = group.activity.length - 1; i >= 0; i--) {
+		const item = group.activity[i];
+		if (item.kind === "tool" && item.toolCallId === toolCallId) return item;
+	}
+	return undefined;
+}
+
+function partialResultText(payload: unknown): string | undefined {
+	if (typeof payload === "string") return payload;
+	if (payload && typeof payload === "object") {
+		const content = (payload as { content?: unknown }).content;
+		if (content !== undefined) return contentToText(content);
+	}
+	return undefined;
+}
+
+function providerErrorText(message: {
+	role?: unknown;
+	stopReason?: unknown;
+	errorMessage?: unknown;
+}): string | undefined {
+	if (message?.role !== "assistant" || message.stopReason !== "error") return undefined;
+	return typeof message.errorMessage === "string" && message.errorMessage.trim().length > 0
+		? message.errorMessage
+		: "Unknown error";
+}
+
+function uiRequestFromEvent(event: any): UiRequest | undefined {
+	const method = event?.method as string | undefined;
+	if (method === "select" || method === "confirm" || method === "input" || method === "editor") {
+		return {
+			id: String(event.id),
+			method,
+			title: String(event.title ?? ""),
+			message: typeof event.message === "string" ? event.message : undefined,
+			options: Array.isArray(event.options) ? event.options.map((o: unknown) => String(o)) : undefined,
+			placeholder: typeof event.placeholder === "string" ? event.placeholder : undefined,
+			prefill: typeof event.prefill === "string" ? event.prefill : undefined,
+		};
+	}
+	if (method === "ask") {
+		return {
+			id: String(event.id),
+			method: "ask",
+			title: String(event.title ?? "Question"),
+			question: typeof event.question === "string" ? event.question : "",
+			options: Array.isArray(event.options) ? event.options.map((o: unknown) => String(o)) : undefined,
+			allowFreeText: typeof event.allowFreeText === "boolean" ? event.allowFreeText : undefined,
+			multiSelect: typeof event.multiSelect === "boolean" ? event.multiSelect : undefined,
+			multiline: typeof event.multiline === "boolean" ? event.multiline : undefined,
+			expiresAt: typeof event.expiresAt === "number" ? event.expiresAt : undefined,
+		};
+	}
+	return undefined;
+}
+
+/** Apply one session event (or synthetic host event) to the transcript state. */
+export function applyEvent(state: TranscriptState, event: any): void {
+	switch (event?.type) {
+		case "agent_start": {
+			state.streaming = true;
+			state.statusText = undefined;
+			// A new run resolves any prior blocking UI requests server-side.
+			state.uiRequests = [];
+			break;
+		}
+		case "agent_end": {
+			state.streaming = false;
+			const group = activeResponse(state, false);
+			if (group) {
+				group.streaming = false;
+				group.collapsed = true;
+			}
+			break;
+		}
+		case "message_start": {
+			const message = event.message as { role?: string; content?: unknown } | undefined;
+			if (message?.role === "user") {
+				state.items.push({ kind: "user", text: contentToText(message.content) });
+			} else if (message?.role === "assistant") {
+				activeResponse(state, true);
+			}
+			break;
+		}
+		case "message_update": {
+			const stream = event.assistantMessageEvent as { type: string; delta?: string; content?: string } | undefined;
+			if (!stream) break;
+			const group = activeResponse(state, true);
+			if (!group) break;
+			switch (stream.type) {
+				case "text_delta":
+					group.answer += stream.delta ?? "";
+					break;
+				case "text_end":
+					// text_end carries the authoritative block content; if no deltas
+					// were seen (e.g. a non-streaming provider), adopt it.
+					if (typeof stream.content === "string" && group.answer.length === 0) group.answer = stream.content;
+					break;
+				case "thinking_start":
+					group.activity.push({ kind: "thinking", text: "" });
+					break;
+				case "thinking_delta": {
+					const thinking = lastThinking(group);
+					if (thinking) thinking.text += stream.delta ?? "";
+					else group.activity.push({ kind: "thinking", text: stream.delta ?? "" });
+					break;
+				}
+				case "thinking_end": {
+					const thinking = lastThinking(group);
+					if (thinking && typeof stream.content === "string") thinking.text = stream.content;
+					break;
+				}
+				default:
+					// text_start / toolcall_* — tools are tracked via tool_execution_* below.
+					break;
+			}
+			break;
+		}
+		case "message_end": {
+			const message = event.message as { role?: string; stopReason?: string; errorMessage?: string } | undefined;
+			if (message) {
+				const error = providerErrorText(message);
+				if (error) {
+					const group = activeResponse(state, true);
+					if (group) group.error = error;
+				}
+			}
+			break;
+		}
+		case "tool_execution_start": {
+			const group = activeResponse(state, true);
+			if (!group) break;
+			const toolCallId = String(event.toolCallId);
+			const existing = findTool(group, toolCallId);
+			if (existing) {
+				existing.toolName = String(event.toolName);
+				existing.args = event.args;
+				existing.status = "running";
+				existing.resultText = "";
+			} else {
+				group.activity.push({
+					kind: "tool",
+					toolCallId,
+					toolName: String(event.toolName),
+					args: event.args,
+					status: "running",
+					resultText: "",
+				});
+			}
+			break;
+		}
+		case "tool_execution_update": {
+			const group = activeResponse(state, false);
+			const tool = group ? findTool(group, String(event.toolCallId)) : undefined;
+			if (tool) {
+				const text = partialResultText(event.partialResult);
+				if (text !== undefined) tool.resultText = text;
+			}
+			break;
+		}
+		case "tool_execution_end": {
+			const group = activeResponse(state, false);
+			const tool = group ? findTool(group, String(event.toolCallId)) : undefined;
+			if (tool) {
+				tool.status = event.isError ? "error" : "done";
+				const text = partialResultText(event.result);
+				if (text !== undefined) tool.resultText = text;
+			}
+			break;
+		}
+		case "extension_ui_request": {
+			const request = uiRequestFromEvent(event);
+			if (request) {
+				// Replace any stale request with the same id, then append.
+				state.uiRequests = state.uiRequests.filter((r) => r.id !== request.id);
+				state.uiRequests.push(request);
+			} else if (event.method === "setStatus") {
+				state.statusText = typeof event.statusText === "string" ? event.statusText : undefined;
+			}
+			break;
+		}
+		case "extension_ui_response_handled": {
+			state.uiRequests = state.uiRequests.filter((r) => r.id !== String(event.id));
+			break;
+		}
+		case "auto_compaction_start": {
+			state.statusText = "compacting context…";
+			break;
+		}
+		case "auto_compaction_end": {
+			if (state.statusText === "compacting context…") state.statusText = undefined;
+			break;
+		}
+		case "auto_retry_start": {
+			state.statusText = `retrying (${event.attempt}/${event.maxAttempts})…`;
+			break;
+		}
+		case "auto_retry_end": {
+			state.statusText = undefined;
+			break;
+		}
+		case "host_error": {
+			// Synthetic event emitted by the SessionController on RPC child exit.
+			state.hostError = String(event.message ?? "dreb process exited");
+			state.streaming = false;
+			const group = activeResponse(state, false);
+			if (group) {
+				group.streaming = false;
+				group.collapsed = true;
+				group.error = group.error ?? state.hostError;
+			}
+			break;
+		}
+		case "host_notice": {
+			// Synthetic event for host-side, non-fatal feedback (e.g. an unwired
+			// builtin or an unknown command).
+			state.statusText = String(event.message ?? "");
+			break;
+		}
+		default:
+			break;
+	}
+}
+
+/** One-line summary of a response's activity for the collapsed header. */
+export function activitySummary(group: ResponseGroup): string {
+	const toolCount = group.activity.filter((a) => a.kind === "tool").length;
+	const thoughtCount = group.activity.filter((a) => a.kind === "thinking").length;
+	const parts: string[] = [];
+	if (thoughtCount > 0) parts.push(`${thoughtCount} thought${thoughtCount === 1 ? "" : "s"}`);
+	if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount === 1 ? "" : "s"}`);
+	return parts.length > 0 ? parts.join(" · ") : "no activity";
+}
