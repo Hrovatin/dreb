@@ -51,6 +51,9 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 	const post = (message: HostToWebview): void => {
 		void webview.postMessage(message);
 	};
+	const pushCommands = (): void => {
+		void controller.refreshCommands().then(() => post({ type: "commands", commands: controller.getCommandList() }));
+	};
 
 	const unsubscribe = controller.onUpdate((update) => {
 		if (!live) return;
@@ -71,9 +74,7 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 					status: controller.getStatus(),
 				});
 				live = true;
-				void controller
-					.refreshCommands()
-					.then(() => post({ type: "commands", commands: controller.getCommandList() }));
+				pushCommands();
 				return;
 			}
 			case "submit":
@@ -83,9 +84,7 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				void controller.abort();
 				return;
 			case "refresh-commands":
-				void controller
-					.refreshCommands()
-					.then(() => post({ type: "commands", commands: controller.getCommandList() }));
+				pushCommands();
 				return;
 			case "ui-response":
 				controller.respondUi(raw.response);

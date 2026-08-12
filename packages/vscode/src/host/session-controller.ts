@@ -28,7 +28,15 @@ export interface RpcClientLike {
 	prompt(message: string, images?: unknown[]): Promise<void>;
 	abort(): Promise<void>;
 	compact(customInstructions?: string): Promise<unknown>;
-	getCommands(): Promise<Array<{ name: string; description?: string }>>;
+	getCommands(): Promise<
+		Array<{
+			name: string;
+			description?: string;
+			source: "extension" | "prompt" | "skill" | "builtin";
+			/** Builtins only: false hides the command from autocomplete. */
+			dashboard?: boolean;
+		}>
+	>;
 	sendExtensionUIResponse(response: unknown): void;
 	onEvent(listener: (event: any) => void): () => void;
 	onExit(listener: (info: any) => void): () => void;
@@ -128,51 +136,79 @@ export class SessionController {
 		await this.refreshCommands();
 	}
 
-	/** Fetch the agent's commands and merge with host builtins. */
+	/** Fetch the agent's commands and merge with host builtins.
+	 *
+	 * Resource commands (extension/prompt/skill) become `source: "agent"` and
+	 * route through `prompt`. Built-ins are surfaced as `source: "builtin"` so
+	 * the router intercepts them (sending a builtin through `prompt` is rejected
+	 * server-side and silently dropped). On success we trust the server's
+	 * builtin list (respecting its `dashboard` visibility flag); if the call
+	 * fails we degrade to the hardcoded builtin fallback. */
 	async refreshCommands(): Promise<SlashCommandDto[]> {
 		let agentCommands: SlashCommandDto[] = [];
+		let builtinCommands: SlashCommandDto[] | undefined;
 		try {
 			const raw = (await this.client?.getCommands()) ?? [];
-			agentCommands = raw.map((c) => ({
-				name: stripSlash(c.name),
-				description: c.description,
-				source: "agent" as const,
-			}));
+			agentCommands = raw
+				.filter((c) => c.source !== "builtin")
+				.map((c) => ({ name: stripSlash(c.name), description: c.description, source: "agent" as const }));
+			builtinCommands = raw
+				.filter((c) => c.source === "builtin" && c.dashboard !== false)
+				.map((c) => ({ name: stripSlash(c.name), description: c.description, source: "builtin" as const }));
 		} catch (err) {
 			this.logger(`getCommands failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
-		this.commands = [...agentCommands, ...BUILTIN_COMMANDS];
+		this.commands = [
+			...agentCommands,
+			...(builtinCommands && builtinCommands.length > 0 ? builtinCommands : BUILTIN_COMMANDS),
+		];
 		return this.commands;
 	}
 
-	/** Route composer text to the correct RPC call. */
+	/** Route composer text to the correct RPC call. Guarded on an active
+	 * connection so a submit that races the spawn window (or lands after a
+	 * child crash) surfaces a notice instead of dispatching into a client that
+	 * isn't ready, and every awaited RPC call is wrapped so a rejection becomes
+	 * a visible notice rather than an unhandled promise rejection. */
 	async submit(text: string): Promise<void> {
-		if (!this.client) {
-			this.emitNotice("dreb is still starting up — try again in a moment.");
+		if (!this.client || !this.status.connected) {
+			this.emitNotice(
+				this.status.error
+					? "dreb isn't connected — reopen the chat to restart it."
+					: "dreb is still starting up — try again in a moment.",
+			);
 			return;
 		}
 		const decision = routeInput(text, this.commands);
-		switch (decision.kind) {
-			case "empty":
-				return;
-			case "prompt":
-				await this.client?.prompt(decision.message);
-				return;
-			case "builtin":
-				if (decision.command === "compact") {
-					await this.client?.compact(decision.arg);
+		if (decision.kind === "empty") return;
+		try {
+			switch (decision.kind) {
+				case "prompt":
+					await this.client.prompt(decision.message);
 					return;
-				}
-				this.emitNotice(`The /${decision.command} command isn't available yet in this early build.`);
-				return;
-			case "unknown-command":
-				this.emitNotice(`Unknown command: /${decision.name}`);
-				return;
+				case "builtin":
+					if (decision.command === "compact") {
+						await this.client.compact(decision.arg);
+						return;
+					}
+					this.emitNotice(`The /${decision.command} command isn't available yet in this early build.`);
+					return;
+				case "unknown-command":
+					this.emitNotice(`Unknown command: /${decision.name}`);
+					return;
+			}
+		} catch (err) {
+			this.emitNotice(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
 
 	async abort(): Promise<void> {
-		await this.client?.abort();
+		if (!this.client || !this.status.connected) return;
+		try {
+			await this.client.abort();
+		} catch (err) {
+			this.logger(`abort failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	}
 
 	/** Surface a fatal host-side failure (e.g. the CLI could not be located)
