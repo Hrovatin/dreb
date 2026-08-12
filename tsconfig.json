@@ -26,5 +26,5 @@
 		}
 	},
 	"include": ["packages/*/src/**/*", "packages/*/test/**/*", "packages/coding-agent/examples/**/*"],
-	"exclude": ["packages/web-ui/**/*", "**/dist/**", "packages/dashboard/src/client/**/*", "packages/dashboard/test/client/**/*", "packages/coding-agent/examples/extensions/sandbox/**"]
+	"exclude": ["packages/web-ui/**/*", "**/dist/**", "packages/dashboard/src/client/**/*", "packages/dashboard/test/client/**/*", "packages/vscode/src/webview/**/*", "packages/coding-agent/examples/extensions/sandbox/**"]
 }
