@@ -15,3 +15,6 @@ packages/ai/src/models.generated.ts
 *.env
 .env*
 secrets/
+
+# VS Code extension packages
+*.vsix

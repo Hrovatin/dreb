@@ -21,6 +21,7 @@ export default defineConfig({
 			"packages/semantic-search",
 			"packages/telegram",
 			"packages/dashboard",
+			"packages/vscode",
 		],
 	},
 });
