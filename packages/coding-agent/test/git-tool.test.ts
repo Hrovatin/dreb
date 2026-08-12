@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -251,11 +252,14 @@ describe("git tool — timeout, abort, and output cap (round-10 findings 1/2/3/5
 	});
 
 	// A spawn seam that ignores the git args and instead launches a real,
-	// long-lived process in its own group. killProcessTree must reap it for the
-	// promise to ever settle — so if the timeout/abort/tree-kill wiring is broken,
-	// these tests hang (and fail) rather than passing falsely.
+	// long-lived process in its own group. Its internal timer (10 minutes) is
+	// deliberately far longer than this file's 30s vitest `testTimeout` and the
+	// explicit per-test timeouts below, so the process CANNOT self-exit during a
+	// test: the only way the promise settles is if killProcessTree actually reaps
+	// it. If the timeout/abort/tree-kill wiring regresses to a no-op, these tests
+	// hang until their per-test timeout and FAIL — they cannot pass falsely.
 	const sleeperSpawn = ((_cmd: string, _args: readonly string[], opts: object) =>
-		spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], opts as never)) as typeof spawn;
+		spawn(process.execPath, ["-e", "setTimeout(() => {}, 600000)"], opts as never)) as typeof spawn;
 
 	const textOf = (result: { content: Array<{ text?: string }> }) => result.content.map((c) => c.text ?? "").join("");
 
@@ -285,11 +289,15 @@ describe("git tool — timeout, abort, and output cap (round-10 findings 1/2/3/5
 			undefined as never,
 		);
 		setTimeout(() => controller.abort(), 50);
+		// The sleeper runs for 10 minutes; the only way this promise rejects within
+		// the 10s budget is if onAbort's killProcessTree genuinely reaps it.
 		await expect(p).rejects.toThrow(/Operation aborted/);
-	});
+	}, 10_000);
 
 	it("times out and tree-kills a hanging git, rejecting with a timeout message (finding 2)", async () => {
 		const def = createGitToolDefinition(repo, { timeoutMs: 100, spawnFn: sleeperSpawn });
+		// The sleeper never self-exits within the budget, so a "timed out" rejection
+		// can only arrive if the watchdog's killProcessTree actually terminates it.
 		await expect(
 			def.execute(
 				"id",
@@ -299,6 +307,45 @@ describe("git tool — timeout, abort, and output cap (round-10 findings 1/2/3/5
 				undefined as never,
 			),
 		).rejects.toThrow(/timed out/i);
+	}, 10_000);
+
+	it("maps a spawn ENOENT to a clear 'git is not installed' error (rewritten .catch path)", async () => {
+		// A real spawn of a missing binary emits `error` with code ENOENT, which
+		// waitForChildProcess surfaces to the rewritten .catch branch.
+		const missingBinarySpawn = (() => spawn("dreb-definitely-not-a-real-binary-xyz", [])) as unknown as typeof spawn;
+		const def = createGitToolDefinition(repo, { spawnFn: missingBinarySpawn });
+		await expect(
+			def.execute(
+				"id",
+				{ subcommand: "log", args: [] } as never,
+				undefined as never,
+				undefined as never,
+				undefined as never,
+			),
+		).rejects.toThrow(/git is not installed or not on PATH/i);
+	});
+
+	it("wraps a non-ENOENT spawn error in a 'Failed to run git' message (rewritten .catch path)", async () => {
+		// Fake child that emits a generic (non-ENOENT) error after the tool has
+		// attached its listeners, exercising the .catch fallback branch.
+		const genericErrorSpawn = (() => {
+			const child = new EventEmitter() as unknown as ReturnType<typeof spawn>;
+			Object.assign(child, { stdout: null, stderr: null, pid: undefined, killed: false, kill: () => true });
+			setTimeout(() => {
+				child.emit("error", Object.assign(new Error("permission denied"), { code: "EACCES" }));
+			}, 0);
+			return child;
+		}) as unknown as typeof spawn;
+		const def = createGitToolDefinition(repo, { spawnFn: genericErrorSpawn });
+		await expect(
+			def.execute(
+				"id",
+				{ subcommand: "log", args: [] } as never,
+				undefined as never,
+				undefined as never,
+				undefined as never,
+			),
+		).rejects.toThrow(/Failed to run git: permission denied/i);
 	});
 
 	it("stops git early and returns partial output when the capture cap is hit (finding 3)", async () => {
