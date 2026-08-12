@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
+# Git exports per-invocation env vars (GIT_DIR, GIT_INDEX_FILE, GIT_WORK_TREE,
+# GIT_PREFIX, …) into hook subprocesses. When this harness runs from the husky
+# pre-commit hook, the whole test suite would inherit them and every
+# git-dependent test (git-update, chdir, tools/.gitignore) would target the
+# outer repo's pending-commit index instead of its own temp repos — failing
+# under the hook while passing standalone and in CI. Strip them so `bash
+# test.sh` behaves identically whether invoked directly or from a git hook.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR \
+	GIT_OBJECT_DIRECTORY GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+
 # Skip local LLM tests (ollama, lmstudio) — no local server expected in CI/hooks
 export DREB_NO_LOCAL_LLM=1
 
