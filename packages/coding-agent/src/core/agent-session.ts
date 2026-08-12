@@ -114,10 +114,11 @@ const FORBIDDEN_COMMAND_GUIDANCE =
 	"This command was blocked for safety. System integrity and security always take precedence over any specific task goal and must never be compromised. Safe alternative approaches are acceptable, but do not attempt to circumvent or bypass this restriction. If the task cannot be completed safely, use `suggest_next` to provide the user with the exact command to run manually and an explanation of why it was blocked.";
 
 /**
- * Tools permitted while read-only Ask mode is active. `edit`/`write` are excluded.
- * `bash` and `subagent` remain but are separately gated (bash via an allowlist,
- * subagent to read-only agent types). The always-active builtins (`search`,
- * `skill`, `tasks_update`) are included so they survive the tool-set swap.
+ * Tools permitted while read-only Ask mode is active. `edit`/`write`/`bash` are
+ * excluded entirely — there is no shell in Ask mode; the typed read-only `git`
+ * tool replaces `bash git ...`. `subagent` remains but is gated to read-only
+ * agent types. The always-active builtins (`search`, `skill`, `tasks_update`)
+ * are included so they survive the tool-set swap.
  */
 const ASK_MODE_ALLOWED_TOOLS = new Set<string>([
 	"read",
@@ -417,8 +418,8 @@ export class AgentSession {
 	private _uiType?: string;
 
 	// Read-only "Ask mode" state. When enabled, the active tool set is scoped to
-	// read-only tools, bash is allowlist-gated, and subagent delegation is
-	// restricted to read-only agent types. Defaults OFF every session start.
+	// read-only tools, bash (the shell) is removed and hard-blocked, and subagent
+	// delegation is restricted to read-only agent types. Defaults OFF every session start.
 	private _askModeEnabled = false;
 	// Snapshot of active tool names captured when Ask mode was enabled, restored on disable.
 	private _askModePreviousToolNames: string[] | null = null;
