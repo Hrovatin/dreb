@@ -256,6 +256,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 		"write",
 		"grep",
 		"find",
+		"git",
 		"ls",
 		"web_search",
 		"web_fetch",

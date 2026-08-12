@@ -39,6 +39,15 @@ export {
 	findToolDefinition,
 } from "./find.js";
 export {
+	createGitTool,
+	createGitToolDefinition,
+	type GitToolDetails,
+	type GitToolInput,
+	gitTool,
+	gitToolDefinition,
+	validateGitArgs,
+} from "./git.js";
+export {
 	createGrepTool,
 	createGrepToolDefinition,
 	type GrepOperations,
@@ -186,6 +195,7 @@ import {
 } from "./bash.js";
 import { createEditTool, createEditToolDefinition, editTool, editToolDefinition } from "./edit.js";
 import { createFindTool, createFindToolDefinition, findTool, findToolDefinition } from "./find.js";
+import { createGitTool, createGitToolDefinition, gitTool, gitToolDefinition } from "./git.js";
 import { createGrepTool, createGrepToolDefinition, grepTool, grepToolDefinition } from "./grep.js";
 import { createLsTool, createLsToolDefinition, lsTool, lsToolDefinition } from "./ls.js";
 import {
@@ -247,6 +257,7 @@ export const allTools = {
 	write: writeTool,
 	grep: grepTool,
 	find: findTool,
+	git: gitTool,
 	ls: lsTool,
 	web_search: webSearchTool,
 	web_fetch: webFetchTool,
@@ -265,6 +276,7 @@ export const allToolDefinitions = {
 	write: writeToolDefinition,
 	grep: grepToolDefinition,
 	find: findToolDefinition,
+	git: gitToolDefinition,
 	ls: lsToolDefinition,
 	web_search: webSearchToolDefinition,
 	web_fetch: webFetchToolDefinition,
@@ -313,6 +325,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 		write: createWriteToolDefinition(cwd),
 		grep: createGrepToolDefinition(cwd),
 		find: createFindToolDefinition(cwd),
+		git: createGitToolDefinition(cwd),
 		ls: createLsToolDefinition(cwd),
 		web_search: createWebSearchToolDefinition(cwd),
 		web_fetch: createWebFetchToolDefinition(cwd),
@@ -356,6 +369,7 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 		write: createWriteTool(cwd),
 		grep: createGrepTool(cwd),
 		find: createFindTool(cwd),
+		git: createGitTool(cwd),
 		ls: createLsTool(cwd),
 		web_search: createWebSearchTool(cwd),
 		web_fetch: createWebFetchTool(cwd),

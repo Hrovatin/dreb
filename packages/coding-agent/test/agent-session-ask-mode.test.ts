@@ -55,9 +55,11 @@ describe("AgentSession — read-only Ask mode", () => {
 		const active = session.getActiveToolNames();
 		expect(active).not.toContain("edit");
 		expect(active).not.toContain("write");
+		// bash (the shell) is dropped in Ask mode — replaced by the typed git tool.
+		expect(active).not.toContain("bash");
 		// Read-only + gated tools remain.
 		expect(active).toContain("read");
-		expect(active).toContain("bash");
+		expect(active).toContain("git");
 		expect(active).toContain("subagent");
 
 		session.disableAskMode();
@@ -117,20 +119,35 @@ describe("AgentSession — Ask mode beforeToolCall guard", () => {
 		return (name: string, args: unknown) => hook({ toolCall: { name }, args });
 	}
 
-	it("blocks a non-allowlisted bash command only when Ask mode is on", async () => {
+	it("hard-blocks the bash tool entirely while Ask mode is on (no shell)", async () => {
 		const session = await makeSession(tempDir, agentDir);
 		const guard = getGuard(session);
 
-		// Off: a benign non-allowlisted command is not blocked by Ask mode.
+		// Off: bash is not blocked by Ask mode.
 		expect(await guard("bash", { command: "npm install" })).toBeUndefined();
+		expect(await guard("bash", { command: "git log --oneline" })).toBeUndefined();
 
 		session.enableAskMode();
+		// On: EVERY bash command is blocked — there is no shell in Ask mode,
+		// including commands that would previously have been "read-only".
 		const blocked = await guard("bash", { command: "npm install" });
 		expect(blocked?.block).toBe(true);
-		expect(blocked?.reason).toContain("read-only allowlist");
+		expect(blocked?.reason).toContain('"bash" tool is disabled');
 
-		// An allowlisted read-only command still passes while Ask mode is on.
-		expect(await guard("bash", { command: "git log --oneline" })).toBeUndefined();
+		const blockedRead = await guard("bash", { command: "git log --oneline" });
+		expect(blockedRead?.block).toBe(true);
+		expect(blockedRead?.reason).toContain('"bash" tool is disabled');
+	});
+
+	it("does NOT block the typed git tool while Ask mode is on", async () => {
+		const session = await makeSession(tempDir, agentDir);
+		const guard = getGuard(session);
+
+		session.enableAskMode();
+		// The git tool is the read-only replacement for `bash git ...`; the
+		// beforeToolCall guard must not block it (its own validator enforces
+		// read-only args).
+		expect(await guard("git", { subcommand: "log", args: ["--oneline"] })).toBeUndefined();
 	});
 
 	it("hard-blocks edit and write while Ask mode is on, even if invoked directly", async () => {
@@ -197,7 +214,7 @@ describe("scopeAgentsReadOnly", () => {
 			["Writer", { name: "Writer", description: "", tools: "edit,write,bash", systemPrompt: "" }],
 		]);
 		const scoped = scopeAgentsReadOnly(agents);
-		expect(scoped.get("Writer")?.tools).toBe("read,grep,find,ls");
+		expect(scoped.get("Writer")?.tools).toBe("read,grep,find,git,ls");
 	});
 });
 

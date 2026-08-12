@@ -255,10 +255,12 @@ function summarizeAgentsForArbitration(
 /**
  * Read-only tools a child agent may keep when spawned from a read-only Ask-mode
  * parent. Write/mutating tools (edit, write, bash) are stripped so the child
- * cannot perform writes even though its own definition permits them.
+ * cannot perform writes even though its own definition permits them. The typed
+ * `git` tool is read-only (mutating git flags/sub-verbs are rejected) so it is
+ * kept.
  */
-const READONLY_CHILD_TOOLS = new Set(["read", "grep", "find", "ls", "web_search", "web_fetch"]);
-const READONLY_CHILD_FALLBACK = "read,grep,find,ls";
+const READONLY_CHILD_TOOLS = new Set(["read", "grep", "find", "git", "ls", "web_search", "web_fetch"]);
+const READONLY_CHILD_FALLBACK = "read,grep,find,git,ls";
 
 /**
  * Return a copy of the agent-type map with every config's tools intersected with
