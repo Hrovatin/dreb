@@ -20,6 +20,9 @@ VERSION=$(node -p "require('./package.json').version")
 echo "Syncing version $VERSION to all packages..."
 
 for pkg in packages/*/package.json; do
+	# The VS Code extension is versioned independently (Marketplace, not npm) and
+	# must never be touched by root version syncing.
+	[ "$pkg" = "packages/vscode/package.json" ] && continue
 	node -e "
 		const fs = require('fs');
 		const pkg = JSON.parse(fs.readFileSync('$pkg', 'utf-8'));
@@ -60,8 +63,11 @@ if [ -f package-lock.json ]; then
 
 		// Top-level workspace packages we just bumped (direct children of packages/).
 		// Mirrors the 'packages/*/package.json' glob above and excludes nested
-		// example extensions, which carry independent versions.
+		// example extensions, which carry independent versions. The vscode
+		// package is also excluded — the VS Code extension is versioned
+		// independently.
 		const dirs = fs.readdirSync('packages').filter((name) => {
+			if (name === 'vscode') return false;
 			try {
 				return fs.statSync('packages/' + name + '/package.json').isFile();
 			} catch {
@@ -110,5 +116,5 @@ fi
 echo "Done. Files to stage for version bump commit:"
 echo "  package.json"
 echo "  package-lock.json"
-for pkg in packages/*/package.json; do echo "  $pkg"; done
+for pkg in packages/*/package.json; do [ "$pkg" = "packages/vscode/package.json" ] && continue; echo "  $pkg"; done
 for pj in packages/*/.claude-plugin/plugin.json; do [ -f "$pj" ] && echo "  $pj"; done
