@@ -290,8 +290,8 @@ describe("isAllowedReadOnlyCommand", () => {
 	// the first `\'`, sees the real closing `'` as a fresh opener, and inverts
 	// quote parity for the rest of the command — masking every following
 	// operator/redirect/process-substitution. The read-only gate rejects any
-	// `$'` outright (fail closed), and the shared quote scanners model it so the
-	// always-on denylist is not desynced either.
+	// `$'` outright (fail closed) BEFORE any quote-sensitive scan, via the
+	// shared `containsAnsiCQuoting` detector.
 	describe("ANSI-C $'...' quoting cannot desync the read-only gate", () => {
 		it("blocks a second command chained after $'...' via any operator", () => {
 			expect(isAllowedReadOnlyCommand("git log $'a\\'b' ; rm -rf /tmp/x")).toBe(false);
@@ -304,6 +304,13 @@ describe("isAllowedReadOnlyCommand", () => {
 			expect(isAllowedReadOnlyCommand("echo $'a\\'b' > /tmp/x")).toBe(false);
 			expect(isAllowedReadOnlyCommand("cat $'a\\'b' <(touch /tmp/x)")).toBe(false);
 			expect(isAllowedReadOnlyCommand("echo $'a\\'b\\'c' > /tmp/x")).toBe(false);
+		});
+
+		// Finding H1: `$$'` (PID expansion + plain quote) is also rejected — the
+		// detector fires broadly so the fail-closed posture covers it too.
+		it("blocks commands using a $$'...' sequence (fail closed)", () => {
+			expect(isAllowedReadOnlyCommand("echo $$'\\''' ; touch /tmp/x")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo $$'plain'")).toBe(false);
 		});
 
 		it("rejects even a lone $'...' read-only command (fails closed)", () => {
@@ -321,6 +328,13 @@ describe("isAllowedReadOnlyCommand", () => {
 		it("does not flag $' that appears inside a double-quoted string", () => {
 			// Inside double quotes `$'` is ordinary text, not ANSI-C quoting.
 			expect(isAllowedReadOnlyCommand('echo "a $\'b"')).toBe(true);
+		});
+
+		// Finding T3: `\$'x'` is an escaped literal `$` + a plain `'x'` string,
+		// NOT ANSI-C quoting, so it is not flagged by the ANSI-C detector. The
+		// command is still judged normally (here `echo` is read-only → allowed).
+		it("does not flag an escaped-dollar \\$'x' as ANSI-C quoting", () => {
+			expect(isAllowedReadOnlyCommand("echo \\$'x'")).toBe(true);
 		});
 	});
 
