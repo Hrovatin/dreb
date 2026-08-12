@@ -88,6 +88,83 @@ describe("isAllowedReadOnlyCommand", () => {
 	// tokenize. This is one uniform check (`hasDisallowedConstruct`) that
 	// removes the entire class of quote-desync / nested-substitution bypasses,
 	// replacing the previous recursive quote-tracking scanners.
+	// ── Finding 1: environment-assignment / path / dispatch prefix injection ──
+	// `stripShellPrefixes` used to LAUNDER these leading prefixes for the
+	// allowlist match while bash honored them at runtime (`PATH=`/`LD_PRELOAD=`/
+	// `GIT_EXTERNAL_DIFF=` → arbitrary code execution; a path'd name → arbitrary
+	// binary). They are now rejected outright before matching.
+	describe("dangerous leading prefixes are rejected (finding 1)", () => {
+		it("rejects VAR=value environment-assignment prefixes", () => {
+			expect(isAllowedReadOnlyCommand("PATH=/tmp/evil ls -la /etc")).toBe(false);
+			expect(isAllowedReadOnlyCommand("LD_PRELOAD=/tmp/evil.so cat file.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("GIT_EXTERNAL_DIFF=/tmp/evil.sh git diff")).toBe(false);
+			expect(isAllowedReadOnlyCommand("GIT_PAGER=/tmp/evil git log")).toBe(false);
+			expect(isAllowedReadOnlyCommand("env LD_PRELOAD=/tmp/evil.so ls")).toBe(false);
+		});
+
+		it("rejects a path'd command name (absolute, relative, or subdir)", () => {
+			expect(isAllowedReadOnlyCommand("/tmp/evil/ls")).toBe(false);
+			expect(isAllowedReadOnlyCommand("./evil")).toBe(false);
+			expect(isAllowedReadOnlyCommand("../evil ls")).toBe(false);
+			expect(isAllowedReadOnlyCommand("bin/x")).toBe(false);
+		});
+
+		it("rejects backslash-escape and command-dispatch prefixes", () => {
+			expect(isAllowedReadOnlyCommand("\\ls")).toBe(false);
+			expect(isAllowedReadOnlyCommand("env ls")).toBe(false);
+			expect(isAllowedReadOnlyCommand("command ls")).toBe(false);
+			expect(isAllowedReadOnlyCommand("exec ls")).toBe(false);
+			expect(isAllowedReadOnlyCommand("builtin pwd")).toBe(false);
+		});
+
+		it("still allows `=` and `/` when they are in ARGUMENTS, not the head", () => {
+			// The prefix check only inspects the first token (the command name).
+			expect(isAllowedReadOnlyCommand("cat /etc/hosts")).toBe(true);
+			expect(isAllowedReadOnlyCommand("grep foo=bar file")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git config --get user.name")).toBe(true);
+			expect(isAllowedReadOnlyCommand("echo $HOME")).toBe(true);
+		});
+	});
+
+	// ── Finding 2: mutation-capable git subcommands restricted to listing ────
+	// Bare `git branch`/`git tag`/`git remote` allowlist entries used to
+	// prefix-match ref-creating/deleting/remote-rewriting invocations. They are
+	// now restricted to their read-only listing forms.
+	describe("git branch/tag/remote restricted to read-only forms (finding 2)", () => {
+		it("blocks ref-creating / deleting / moving git branch and git tag", () => {
+			expect(isAllowedReadOnlyCommand("git tag newtag")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git branch newbranch")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git branch -D main")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git branch -d feature")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git tag -d v1.0")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git branch -m old new")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git branch --set-upstream-to=origin/main")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git tag -a v1 -m msg")).toBe(false);
+		});
+
+		it("blocks remote-rewriting git remote subcommands", () => {
+			expect(isAllowedReadOnlyCommand("git remote add evil https://attacker.example/r.git")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git remote remove origin")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git remote rename a b")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git remote set-url origin https://attacker.example")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git remote prune origin")).toBe(false);
+		});
+
+		it("allows read-only listing forms", () => {
+			expect(isAllowedReadOnlyCommand("git branch")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git branch -a")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git branch -vv")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git branch --list")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git tag")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git tag -l")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git tag --list")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git remote")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git remote -v")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git remote show origin")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git remote get-url origin")).toBe(true);
+		});
+	});
+
 	describe("disallowed constructs are rejected outright", () => {
 		it("rejects command substitution $(...) and backticks", () => {
 			expect(isAllowedReadOnlyCommand("$(git log)")).toBe(false);
@@ -140,6 +217,21 @@ describe("isAllowedReadOnlyCommand", () => {
 			expect(isAllowedReadOnlyCommand("echo $'a\\tb'")).toBe(false);
 			expect(isAllowedReadOnlyCommand("grep $'\\t' file")).toBe(false);
 			expect(isAllowedReadOnlyCommand("echo $$'plain'")).toBe(false);
+		});
+
+		it("rejects brace parameter expansion (dollar-brace) (finding 3)", () => {
+			// The `$` and `{` are concatenated so the source contains no literal
+			// `${` (which biome's noTemplateCurlyInString would flag); the runtime
+			// strings are exactly `echo ${x}`, `echo ${HOME}`, etc.
+			const D = "$";
+			expect(isAllowedReadOnlyCommand(`echo ${D}{x}`)).toBe(false);
+			expect(isAllowedReadOnlyCommand(`echo ${D}{HOME}`)).toBe(false);
+			expect(isAllowedReadOnlyCommand(`echo ${D}{x@P}`)).toBe(false);
+			// Nested $(...) inside the expansion is independently caught by the
+			// paren ban too, but the ${ opener rejects it first regardless.
+			expect(isAllowedReadOnlyCommand(`cat ${D}{FILE:-${D}(rm x)}`)).toBe(false);
+			// Plain `$VAR` (no brace) remains allowed.
+			expect(isAllowedReadOnlyCommand("echo $HOME")).toBe(true);
 		});
 
 		it("rejects embedded newlines (multiple commands / here-docs)", () => {
@@ -196,7 +288,8 @@ describe("isAllowedReadOnlyCommand", () => {
 		it("does not allow sed or awk at all (write/exec escape hatches)", () => {
 			expect(isAllowedReadOnlyCommand("sed -i s/a/b/ file.txt")).toBe(false);
 			expect(isAllowedReadOnlyCommand("sed s/a/b/ file.txt")).toBe(false);
-			// awk system()/redirect forms also contain banned `(`/`>` chars.
+			// awk / sed are not on the allowlist at all (write/exec escape hatches),
+			// so they are rejected regardless of arguments.
 			expect(isAllowedReadOnlyCommand("awk 'BEGIN{print}' file")).toBe(false);
 		});
 
