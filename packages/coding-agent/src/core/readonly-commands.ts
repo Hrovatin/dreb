@@ -7,37 +7,53 @@
  * gatekeeper for dreb's read-only "Ask mode", where the agent must not be
  * able to mutate the filesystem, repository, or environment.
  *
- * A command is allowed only if EVERY shell segment (after subshell and
- * shell-prefix normalization) matches at least one allowlist entry. Entries
- * are space-separated prefixes so subcommands can be matched precisely
- * (`git log` matches `git log --oneline` but bare `git` does not match
- * `git push`). Any output redirection (`>`/`>>`) disqualifies the command
- * because a read-only mode must never write files.
+ * ## Design: fail-closed by restriction (not by tokenizing bash)
  *
- * ## Security model (why the OUTER command is authoritative)
+ * Earlier iterations tried to *understand* arbitrary bash — masking quotes,
+ * splitting on operators, and recursively validating command substitutions —
+ * so that constructs like `cat $(git rev-parse HEAD)` could be allowed while
+ * `cat $(rm x)` was rejected. Faithfully re-implementing bash's word-splitting
+ * and quoting grammar proved to be an unbounded rabbit hole: every round of
+ * hardening, a new quoting/substitution corner (ANSI-C `$'...'`, `$$'` PID
+ * expansion, `$'` nested inside a double-quoted `$(...)`, chained `;` inside a
+ * quoted substitution, …) desynced the hand-rolled scanner and re-opened a
+ * bypass. A guard that must be *perfect* to be *safe* is the wrong shape.
  *
- * Command substitutions (`$(...)`, `` `...` ``) are handled so the *outer*
- * command head is what gets matched against the allowlist — NOT the inner
- * substitution. Extracting only the inner command (as the forbidden-commands
- * denylist safely does, because there checking the inner can only ADD matches)
- * would be a critical bypass for an allowlist: `rm -rf x $(git log)` must be
- * rejected on the `rm` head, even though `git log` is allowlisted. Each inner
- * substitution is ALSO required to be read-only, so `cat $(git rev-parse HEAD)`
- * is allowed (both `cat` and `git rev-parse` are read-only) while
- * `cat $(rm x)` is rejected (the substitution mutates).
+ * So this gate no longer tries to safely parse those constructs — it REFUSES
+ * them. `isAllowedReadOnlyCommand` first rejects, on the raw string and
+ * quote-UNAWARE, any command containing a construct that can execute a command,
+ * redirect I/O, or that the simple operator-splitter cannot reason about:
+ *
+ *   - command substitution `$(...)` / `` `...` ``  (any `(` `)` or backtick)
+ *   - process substitution `<(...)` / `>(...)`      (the `(`, plus `<`/`>`)
+ *   - subshell grouping `( ... )` and arithmetic `$(( ... ))`  (the parens)
+ *   - ANY redirection `>` `>>` `<` `<<` `<<<` `&>` `2>`  (any `>` or `<`)
+ *   - ANSI-C quoting `$'...'`                          (the `$'` opener)
+ *   - backgrounding / stderr piping `&`, `|&`, `&>`    (any `&` not in `&&`)
+ *   - newlines (multiple commands / here-documents)
+ *
+ * Only after that hard reject does it split what remains — a pipeline/list of
+ * plain simple commands joined by `|`, `&&`, `||`, `;` — on those operators
+ * (quote-aware, but now only plain `'...'`/`"..."` quoting can occur) and
+ * require EVERY segment's head to be allowlisted. Because the dangerous
+ * constructs are gone, there is nothing left for a quote-desync to hide.
+ *
+ * This is deliberately conservative: legitimate-but-exotic read-only commands
+ * such as `git show $(git rev-parse HEAD)`, `diff <(a) <(b)`, or `grep '>' f`
+ * are rejected. That is an accepted trade-off for an opt-in exploration mode —
+ * `/ask off` returns to normal (default) behavior for those cases.
  *
  * A handful of otherwise-read-only heads have built-in write/exec escape
  * hatches (`find -delete`/`-exec`, `sort -o`, `date -s`); these are rejected
- * via DANGEROUS_ARG_PATTERNS. Heads whose *entire purpose* includes trivial
- * mutation/execution (`sed -i`, `sed .../e`, `awk 'system()'`,
- * `awk 'print > f'`) are deliberately NOT on the allowlist at all.
+ * via DANGEROUS_ARG_PATTERNS on the matched segment. Heads whose *entire
+ * purpose* includes trivial mutation/execution (`sed -i`, `awk 'system()'`)
+ * are simply not on the allowlist.
  *
- * The shell normalization (segment splitting, prefix stripping) is shared with
- * forbidden-commands.ts to guarantee identical parsing semantics on both sides
- * of the guard.
+ * The operator splitting and shell-prefix normalization are shared with
+ * forbidden-commands.ts to keep parsing semantics consistent across the guard.
  */
 
-import { containsAnsiCQuoting, isEscaped, splitCommandSegments, stripShellPrefixes } from "./forbidden-commands.js";
+import { splitCommandSegments, stripShellPrefixes } from "./forbidden-commands.js";
 
 /**
  * The base set of allowed command "heads". Entries are space-separated
@@ -97,8 +113,9 @@ export const DEFAULT_READONLY_ALLOWLIST: string[] = [
  * allowlist entry's head). If any pattern matches the normalized segment, the
  * command is rejected even though its head is allowlisted.
  *
- * Examples blocked: `find . -delete`, `find . -exec rm {} \;`,
- * `sort -o out.txt in.txt`, `date -s '2020-01-01'`.
+ * These cover mutation via FLAGS, which survive the construct reject above
+ * (they use no shell metacharacters). Examples blocked: `find . -delete`,
+ * `find . -exec rm {} \;`, `sort -o out.txt in.txt`, `date -s '2020-01-01'`.
  */
 const DANGEROUS_ARG_PATTERNS: Record<string, RegExp[]> = {
 	find: [
@@ -127,80 +144,50 @@ const DANGEROUS_ARG_PATTERNS: Record<string, RegExp[]> = {
 };
 
 /**
- * Walk `command` maintaining bash-accurate, escape-aware quote state and
- * return true as soon as `detect` fires at a position OUTSIDE any active
- * quote. Shared by the redirection and process-substitution scanners so both
- * agree on exactly which characters are quoted.
+ * Reject — quote-UNAWARE, on the raw string — any command containing a shell
+ * construct that can execute a command, redirect I/O, or that the simple
+ * operator-splitter cannot safely tokenize. This is the heart of the
+ * fail-closed-by-restriction design (see the module doc): rather than parse
+ * these constructs correctly (a repeatedly-bypassed approach), read-only mode
+ * refuses them outright.
  *
- * Escape handling mirrors `maskQuotedContent`/`isEscaped` in
- * forbidden-commands.ts: a backslash-escaped `\"`/`\'` is a literal character,
- * NOT a quote delimiter. Getting this wrong fails OPEN — a single stray `\"`
- * would otherwise flip the scanner "inside quotes" for the rest of the string
- * and hide a real, live `>` or `<(` from detection.
+ * The scan is intentionally NOT quote-aware: even a metacharacter that would be
+ * inert inside quotes (`grep '>' f`, `echo "a|b"` … well, `|` is allowed, but
+ * `echo "a>b"`) causes rejection. That over-blocks some legitimate commands,
+ * which is the accepted trade-off — it means NO quoting subtlety can smuggle a
+ * dangerous construct past this check. `/ask off` is the escape hatch.
  *
- * This scanner models plain `'...'` and `"..."` only. It does NOT try to model
- * bash ANSI-C `$'...'` quoting: `isAllowedReadOnlyCommand` rejects any command
- * containing `$'` outright (via `containsAnsiCQuoting`) BEFORE this scanner
- * runs, so a `$'...'` never reaches it.
+ * Allowed to remain (handled by the later operator split): plain `'...'` /
+ * `"..."` quoting, `|` `&&` `||` `;` operators, variable/brace/glob/tilde
+ * expansion (`$VAR`, `${VAR}`, `{a,b}`, `*`, `~`) — none of which execute a
+ * command or redirect on their own.
  */
-function scanOutsideQuotes(command: string, detect: (ch: string, i: number, cmd: string) => boolean): boolean {
-	let inSingle = false;
-	let inDouble = false;
-
+function hasDisallowedConstruct(command: string): boolean {
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
-		if (ch === "'" && !inDouble) {
-			// Bash performs no escaping inside single quotes, so a `'` always
-			// closes. Outside any quote, a backslash-escaped `\'` is literal and
-			// must NOT open a single-quoted region.
-			if (inSingle) inSingle = false;
-			else if (!isEscaped(command, i)) inSingle = true;
-		} else if (ch === '"' && !inSingle) {
-			// A backslash-escaped `\"` is a literal quote, not a delimiter.
-			if (!isEscaped(command, i)) inDouble = !inDouble;
-		} else if (!inSingle && !inDouble && detect(ch, i, command)) {
+		if (
+			ch === "(" || // $(...), <(...), >(...), (subshell), $(( arithmetic ))
+			ch === ")" ||
+			ch === "`" || // `...` command substitution
+			ch === ">" || // > >> &> >( 2> — any output redirection / output procsub
+			ch === "<" || // < << <<< <( — any input redirection / here-doc / procsub
+			ch === "\n" ||
+			ch === "\r" // newline: multiple commands / here-documents
+		) {
 			return true;
 		}
+		// ANSI-C quoting `$'...'` — its C-escape rules (`\'`, `\n`, `\x27`)
+		// differ from a plain single-quoted string and cannot be modeled by the
+		// operator-splitter's quote masker.
+		if (ch === "$" && command[i + 1] === "'") return true;
 	}
 
+	// Backgrounding `&`, stderr pipe `|&`, and `&>` all use a `&` that is not
+	// part of the `&&` operator. Strip every `&&` pair, then any surviving `&`
+	// is a disallowed background/redirect operator.
+	if (command.replace(/&&/g, "").includes("&")) return true;
+
 	return false;
-}
-
-/**
- * Detect output redirection (`>` or `>>`) outside of quoted strings.
- *
- * A read-only mode must never write files, so any output redirect
- * disqualifies the command. Input redirection (`<`) is fine because it
- * only reads. Quoted content is ignored so `echo "a > b"` is not treated
- * as a redirect, and escaped quotes are honored (see `scanOutsideQuotes`).
- *
- * This is applied per-segment AND to each extracted command substitution
- * (see `isSegmentAllowed`), so a `>` hidden inside a double-quoted
- * substitution — `cat "$(echo hi > f)"`, where the outer `"` would otherwise
- * mask the `>` from a single top-level scan — is still caught once the inner
- * `echo hi > f` is checked on its own (the surrounding quote is gone there).
- */
-function hasOutputRedirection(command: string): boolean {
-	return scanOutsideQuotes(command, (ch) => ch === ">");
-}
-
-/**
- * Detect bash process substitution (`<(cmd)` or `>(cmd)`) outside of quotes.
- *
- * Process substitution runs `cmd` in a subshell UNCONDITIONALLY when the shell
- * parses the token — regardless of whether the outer command ever reads the
- * resulting FIFO — so `diff <(git log) <(rm -rf x)` executes `rm` even though
- * the outer head (`diff`) is allowlisted. A read-only mode has no legitimate
- * use for process substitution, so any occurrence is rejected outright.
- *
- * The scan is quote-aware (including escaped quotes): a literal `"<(x)"` /
- * `'<(x)'` is inert text and is NOT flagged. Applied per-segment and to each
- * extracted substitution (via `isSegmentAllowed`), so process substitution
- * nested inside a quoted `$(...)` — which bash still executes — is caught when
- * the inner is checked.
- */
-function hasProcessSubstitution(command: string): boolean {
-	return scanOutsideQuotes(command, (ch, i, cmd) => (ch === "<" || ch === ">") && cmd[i + 1] === "(");
 }
 
 /**
@@ -220,97 +207,17 @@ function segmentMatchesEntry(segment: string, entry: string): boolean {
 }
 
 /**
- * Split a segment into its outer text (with every command substitution
- * replaced by a single space) plus the list of inner substitution commands.
+ * Whether a single simple command segment is an allowed read-only command.
  *
- * Handles balanced `$( ... )` (including nesting) and `` `...` `` backticks.
- * Returns `null` if a substitution is unbalanced, which the caller treats as
- * a rejection — a read-only guard must fail CLOSED on anything it cannot parse.
+ * By the time this runs, `hasDisallowedConstruct` has already guaranteed the
+ * segment contains no substitution, redirection, subshell, ANSI-C quoting, or
+ * backgrounding — so it is a plain `head args...` command (possibly with
+ * variable/brace/glob expansion and plain quotes). The head must be allowlisted
+ * and must not carry a write/exec escape-hatch flag.
  */
-function splitSubstitutions(segment: string): { outer: string; inners: string[] } | null {
-	let outer = "";
-	const inners: string[] = [];
-	let i = 0;
-	const n = segment.length;
-
-	while (i < n) {
-		const ch = segment[i];
-		if (ch === "$" && segment[i + 1] === "(") {
-			// Find the matching close paren, honoring nested `$( ... )`.
-			let depth = 1;
-			let j = i + 2;
-			while (j < n && depth > 0) {
-				if (segment[j] === "(") depth++;
-				else if (segment[j] === ")") {
-					depth--;
-					if (depth === 0) break;
-				}
-				j++;
-			}
-			if (depth !== 0) return null; // unbalanced → fail closed
-			inners.push(segment.slice(i + 2, j).trim());
-			outer += " ";
-			i = j + 1;
-		} else if (ch === "`") {
-			let j = i + 1;
-			while (j < n && segment[j] !== "`") j++;
-			if (j >= n) return null; // unbalanced backtick → fail closed
-			inners.push(segment.slice(i + 1, j).trim());
-			outer += " ";
-			i = j + 1;
-		} else {
-			outer += ch;
-			i++;
-		}
-	}
-
-	return { outer, inners };
-}
-
-/**
- * Whether a single shell segment is an allowed read-only command.
- *
- * The OUTER command head is authoritative: any command substitution is masked
- * before head matching (so `rm ... $(git log)` is judged on `rm`, not
- * `git log`), and every inner substitution must itself be read-only.
- */
-function isSegmentAllowed(segment: string, entries: string[]): boolean {
-	const trimmed = segment.trim();
-	if (trimmed.length === 0) return false;
-
-	// Process substitution executes its inner command unconditionally — reject
-	// it in every segment and (via the recursive inner check below) inside any
-	// command substitution, including quoted `$(...)` that bash still executes.
-	if (hasProcessSubstitution(trimmed)) return false;
-
-	// Output redirection writes a file. Checking it here (not only once on the
-	// raw top-level string) means a `>` hidden inside a double-quoted `$(...)`
-	// is caught when the extracted inner is evaluated on its own.
-	if (hasOutputRedirection(trimmed)) return false;
-
-	// Bare subshell grouping: `(cmd)` runs `cmd` in a subshell — judge the inner.
-	// (Command substitutions `$(...)`/`` `...` `` are handled below.)
-	if (trimmed.startsWith("(") && trimmed.endsWith(")")) {
-		return isSegmentAllowed(trimmed.slice(1, -1), entries);
-	}
-
-	const split = splitSubstitutions(trimmed);
-	if (!split) return false; // unbalanced substitution → fail closed
-
-	// Every command substitution must itself be a read-only command, otherwise
-	// the substitution executes a mutating command as a side effect.
-	for (const inner of split.inners) {
-		if (inner.length === 0) return false;
-		if (!isSegmentAllowed(inner, entries)) return false;
-	}
-
-	// The outer command (substitutions masked to spaces) determines the head.
-	const normalized = stripShellPrefixes(split.outer).trim();
-	if (normalized.length === 0) {
-		// Segment was purely command substitution(s), e.g. `$(git log)`.
-		// Allowed only because every inner was verified read-only above.
-		return split.inners.length > 0;
-	}
+function isSimpleSegmentAllowed(segment: string, entries: string[]): boolean {
+	const normalized = stripShellPrefixes(segment).trim();
+	if (normalized.length === 0) return false;
 
 	const entry = entries.find((e) => segmentMatchesEntry(normalized, e));
 	if (!entry) return false;
@@ -326,10 +233,12 @@ function isSegmentAllowed(segment: string, entries: string[]): boolean {
 /**
  * Check whether a command is allowed under the read-only allowlist.
  *
- * Returns true ONLY if every shell segment is a read-only command after
- * normalization. Empty/whitespace commands, output redirection (`>`/`>>`),
- * unbalanced command substitutions, and any segment whose outer head is not
- * allowlisted (or carries a write/exec flag) return false.
+ * Returns true ONLY if (1) the command contains none of the disallowed shell
+ * constructs (`hasDisallowedConstruct`), and (2) every operator-split segment
+ * is a plain, allowlisted read-only command. Empty/whitespace commands, any
+ * redirection/substitution/subshell/ANSI-C/backgrounding construct, and any
+ * segment whose head is not allowlisted (or carries a write/exec flag) return
+ * false.
  *
  * @param command The full command string to check.
  * @param allowlist When provided (and an array), REPLACES the default
@@ -340,31 +249,22 @@ export function isAllowedReadOnlyCommand(command: string, allowlist?: string[]):
 	if (typeof command !== "string") return false;
 	if (command.trim().length === 0) return false;
 
-	// Reject bash ANSI-C `$'...'` quoting outright, BEFORE any quote-sensitive
-	// scan below. It has no legitimate use in a read-only command, and its
-	// escaping rules differ from a plain single-quoted string in ways the
-	// scanners here deliberately do not model — failing CLOSED on it removes an
-	// entire class of quote-desync bypass (a `\'` inside `$'...'` that would
-	// otherwise mask a following operator/redirect/process-substitution). This
-	// must run first so `hasOutputRedirection`/`hasProcessSubstitution`/
-	// `splitCommandSegments` never have to reason about a `$'...'` token.
-	if (containsAnsiCQuoting(command)) return false;
-
-	// A read-only mode must never write files — reject output redirection.
-	if (hasOutputRedirection(command)) return false;
-
-	// Reject process substitution `<(...)`/`>(...)` — it executes its inner
-	// command unconditionally. (Also enforced per-segment/inner below; this
-	// top-level check is defense in depth.)
-	if (hasProcessSubstitution(command)) return false;
+	// Fail-closed reject of every construct that can execute/redirect or that
+	// the operator-splitter cannot safely tokenize. This single check removes
+	// the entire class of quote-desync / nested-substitution bypasses that a
+	// quote-aware parser repeatedly failed to close (see the module doc).
+	if (hasDisallowedConstruct(command)) return false;
 
 	const entries = Array.isArray(allowlist) ? allowlist : DEFAULT_READONLY_ALLOWLIST;
 
+	// What remains is a pipeline/list of plain simple commands. Split on
+	// `|`/`&&`/`||`/`;` (quote-aware; only plain quoting can occur now) and
+	// require every segment to be an allowlisted read-only command.
 	const segments = splitCommandSegments(command);
 	if (segments.length === 0) return false;
 
 	for (const segment of segments) {
-		if (!isSegmentAllowed(segment, entries)) return false;
+		if (!isSimpleSegmentAllowed(segment, entries)) return false;
 	}
 
 	return true;

@@ -37,6 +37,12 @@ describe("isAllowedReadOnlyCommand", () => {
 		it("allows rg pattern", () => {
 			expect(isAllowedReadOnlyCommand("rg pattern")).toBe(true);
 		});
+
+		it("allows plain quoted arguments (no disallowed metacharacters)", () => {
+			expect(isAllowedReadOnlyCommand("grep 'foo bar' file")).toBe(true);
+			expect(isAllowedReadOnlyCommand('grep "foo bar" file')).toBe(true);
+			expect(isAllowedReadOnlyCommand("find . -name '*.ts'")).toBe(true);
+		});
 	});
 
 	describe("mutating / non-allowlisted commands", () => {
@@ -51,91 +57,147 @@ describe("isAllowedReadOnlyCommand", () => {
 		it("disallows python x.py", () => {
 			expect(isAllowedReadOnlyCommand("python x.py")).toBe(false);
 		});
+
+		it("disallows env-prefixed mutating command", () => {
+			expect(isAllowedReadOnlyCommand("env rm x")).toBe(false);
+		});
 	});
 
 	describe("chained and piped commands", () => {
 		it("disallows a chain where one segment is bad", () => {
 			expect(isAllowedReadOnlyCommand("git log && rm -rf x")).toBe(false);
+			expect(isAllowedReadOnlyCommand("cat f | rm x")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git status ; npm publish")).toBe(false);
 		});
 
 		it("allows a pipe where every segment is allowed", () => {
 			expect(isAllowedReadOnlyCommand("cat f | grep x")).toBe(true);
+			expect(isAllowedReadOnlyCommand("git log | head")).toBe(true);
+		});
+
+		it("allows &&/||/; chains where every segment is allowed", () => {
+			expect(isAllowedReadOnlyCommand("git log && git status")).toBe(true);
+			expect(isAllowedReadOnlyCommand("cat a || cat b")).toBe(true);
+			expect(isAllowedReadOnlyCommand("ls ; pwd")).toBe(true);
 		});
 	});
 
-	describe("output redirection", () => {
-		it("disallows writing to a file with >", () => {
-			expect(isAllowedReadOnlyCommand("cat f > out.txt")).toBe(false);
-		});
-
-		it("disallows appending to a file with >>", () => {
-			expect(isAllowedReadOnlyCommand("cat f >> out.txt")).toBe(false);
-		});
-
-		it("allows input redirection with <", () => {
-			expect(isAllowedReadOnlyCommand("cat < in.txt")).toBe(true);
-		});
-	});
-
-	describe("subshell and prefix bypasses", () => {
-		it("disallows a subshell that writes", () => {
-			expect(isAllowedReadOnlyCommand("$(git push)")).toBe(false);
-		});
-
-		it("disallows env-prefixed mutating command", () => {
-			expect(isAllowedReadOnlyCommand("env rm x")).toBe(false);
-		});
-
-		it("allows a whole-segment read-only command substitution", () => {
-			expect(isAllowedReadOnlyCommand("$(git log)")).toBe(true);
-			expect(isAllowedReadOnlyCommand("`git status`")).toBe(true);
-		});
-
-		it("allows a read-only outer command with a read-only substitution argument", () => {
-			expect(isAllowedReadOnlyCommand("cat $(git rev-parse HEAD)")).toBe(true);
-			expect(isAllowedReadOnlyCommand("git log $(cat file)")).toBe(true);
-		});
-
-		it("rejects a substitution whose inner command mutates", () => {
+	// ── B1 design: fail-closed by restriction ──────────────────────────────
+	// Read-only mode REJECTS, on the raw string, any construct that can execute
+	// a command, redirect I/O, or that the operator-splitter cannot safely
+	// tokenize. This is one uniform check (`hasDisallowedConstruct`) that
+	// removes the entire class of quote-desync / nested-substitution bypasses,
+	// replacing the previous recursive quote-tracking scanners.
+	describe("disallowed constructs are rejected outright", () => {
+		it("rejects command substitution $(...) and backticks", () => {
+			expect(isAllowedReadOnlyCommand("$(git log)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("`git status`")).toBe(false);
+			expect(isAllowedReadOnlyCommand("cat $(git rev-parse HEAD)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git log $(cat file)")).toBe(false);
+			// Mutating outer command with a trailing substitution — rejected.
+			expect(isAllowedReadOnlyCommand("rm -rf ./build $(git log)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("rm `cat foobar`")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git push origin +main $(ls)")).toBe(false);
+			// Mutating inner — rejected.
 			expect(isAllowedReadOnlyCommand("cat $(rm x)")).toBe(false);
 			expect(isAllowedReadOnlyCommand("echo $(git push)")).toBe(false);
-		});
-	});
-
-	// Regression tests for the command-substitution allowlist bypass (finding 1):
-	// the OUTER command head is authoritative, so a mutating command suffixed
-	// with an allowlisted substitution must NOT be approved.
-	describe("command-substitution bypass (outer head authoritative)", () => {
-		it("blocks a mutating outer command with a trailing $() substitution", () => {
-			expect(isAllowedReadOnlyCommand("rm -rf ./build $(git log)")).toBe(false);
-			expect(isAllowedReadOnlyCommand("chmod 777 secret.key $(ls)")).toBe(false);
-			expect(isAllowedReadOnlyCommand("mv $(cat a) $(cat b)")).toBe(false);
-			expect(isAllowedReadOnlyCommand("npm publish $(pwd)")).toBe(false);
-		});
-
-		it("blocks a mutating outer command with a trailing backtick substitution", () => {
-			expect(isAllowedReadOnlyCommand("rm `cat foobar`")).toBe(false);
-		});
-
-		it("blocks a git push variant hidden behind a substitution", () => {
-			// Not caught by the forbidden-commands force-push denylist, so the
-			// allowlist itself must reject it.
-			expect(isAllowedReadOnlyCommand("git push origin +main $(ls)")).toBe(false);
-		});
-
-		it("fails closed on unbalanced command substitutions", () => {
+			// Unbalanced substitution — still rejected (contains `(` / backtick).
 			expect(isAllowedReadOnlyCommand("cat $(git log")).toBe(false);
 			expect(isAllowedReadOnlyCommand("cat `git log")).toBe(false);
 		});
+
+		it("rejects process substitution <(...) and >(...)", () => {
+			expect(isAllowedReadOnlyCommand("diff <(git log) <(git status)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("diff <(git log) <(rm -rf /tmp/x)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("cat foo >(tee /tmp/pwned)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo hi >(bash -c 'rm -rf /')")).toBe(false);
+		});
+
+		it("rejects subshell grouping and arithmetic parentheses", () => {
+			expect(isAllowedReadOnlyCommand("(git status)")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo $((1 + 1))")).toBe(false);
+		});
+
+		it("rejects all output/input redirection", () => {
+			expect(isAllowedReadOnlyCommand("cat f > out.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("cat f >> out.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo hi &> out.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("cat 2> err.txt")).toBe(false);
+			// Input redirection / here-strings / here-docs are rejected too
+			// (fail-closed — `<` also introduces `<(` and `<<<`).
+			expect(isAllowedReadOnlyCommand("cat < in.txt")).toBe(false);
+			expect(isAllowedReadOnlyCommand("cat <<< 'here string'")).toBe(false);
+		});
+
+		it("rejects backgrounding and stderr-pipe & (but not the && operator)", () => {
+			expect(isAllowedReadOnlyCommand("git log &")).toBe(false);
+			expect(isAllowedReadOnlyCommand("cat f |& grep x")).toBe(false);
+			// Control: `&&` is a permitted operator, not a background `&`.
+			expect(isAllowedReadOnlyCommand("git log && git status")).toBe(true);
+		});
+
+		it("rejects ANSI-C $'...' quoting (and the $$' PID-expansion form)", () => {
+			expect(isAllowedReadOnlyCommand("echo $'a\\tb'")).toBe(false);
+			expect(isAllowedReadOnlyCommand("grep $'\\t' file")).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo $$'plain'")).toBe(false);
+		});
+
+		it("rejects embedded newlines (multiple commands / here-docs)", () => {
+			expect(isAllowedReadOnlyCommand("git log\nrm -rf x")).toBe(false);
+			expect(isAllowedReadOnlyCommand("git log\n")).toBe(false);
+		});
 	});
 
-	// Regression tests for mutation-capable allowlist heads (finding 2).
+	// ── Round-6 regression PoCs ─────────────────────────────────────────────
+	// These previously bypassed the gate by hiding a `$'...'` / chained command
+	// inside a double-quoted `$(...)`. Under B1 they are rejected structurally
+	// (they all contain `$(` / `(` / `>`), with no quote-parsing required.
+	describe("round-6 nested-substitution PoCs are rejected", () => {
+		it("blocks $'...' nested in a double-quoted command substitution", () => {
+			expect(isAllowedReadOnlyCommand("cat \"$(echo $'a\\'b' > /tmp/mk)\"")).toBe(false);
+			expect(isAllowedReadOnlyCommand("cat \"$(git log $'\\'' ; rm -rf /tmp/x)\"")).toBe(false);
+		});
+
+		it("blocks a chained command inside a double-quoted command substitution", () => {
+			expect(isAllowedReadOnlyCommand('echo "$(echo x ; touch /tmp/marker)"')).toBe(false);
+			expect(isAllowedReadOnlyCommand('echo "$(git log ; rm -rf /tmp/x)"')).toBe(false);
+		});
+
+		it("blocks the same via backticks and process substitution", () => {
+			expect(isAllowedReadOnlyCommand('git log "`echo hi ; touch /tmp/marker`"')).toBe(false);
+			expect(isAllowedReadOnlyCommand('cat "$(diff <(rm x) y)"')).toBe(false);
+		});
+	});
+
+	// ── Accepted over-block trade-off ───────────────────────────────────────
+	// B1 rejects some legitimate read-only commands because they use a banned
+	// metacharacter (even inside quotes) or a substitution. This is the
+	// deliberate cost of the fail-closed design; `/ask off` is the escape hatch.
+	describe("accepted over-blocks (fail-closed trade-off)", () => {
+		it("rejects otherwise read-only commands that use a substitution", () => {
+			expect(isAllowedReadOnlyCommand("git show $(git rev-parse HEAD)")).toBe(false);
+			expect(isAllowedReadOnlyCommand('cat "$(git rev-parse HEAD)"')).toBe(false);
+			expect(isAllowedReadOnlyCommand("diff <(sort a) <(sort b)")).toBe(false);
+		});
+
+		it("rejects quoted metacharacters that would be inert in real bash", () => {
+			expect(isAllowedReadOnlyCommand('echo "a > b"')).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo 'a > b'")).toBe(false);
+			expect(isAllowedReadOnlyCommand("grep '<(' file")).toBe(false);
+			expect(isAllowedReadOnlyCommand('echo "a $\'b"')).toBe(false);
+			expect(isAllowedReadOnlyCommand("echo \\$'x'")).toBe(false);
+		});
+	});
+
+	// Regression tests for mutation-capable allowlist heads via FLAGS. These use
+	// no shell metacharacters, so they survive `hasDisallowedConstruct` and are
+	// caught by DANGEROUS_ARG_PATTERNS on the matched segment.
 	describe("mutation-capable heads and flags", () => {
 		it("does not allow sed or awk at all (write/exec escape hatches)", () => {
 			expect(isAllowedReadOnlyCommand("sed -i s/a/b/ file.txt")).toBe(false);
 			expect(isAllowedReadOnlyCommand("sed s/a/b/ file.txt")).toBe(false);
-			expect(isAllowedReadOnlyCommand("awk 'BEGIN{system(\"rm -rf /tmp/x\")}'")).toBe(false);
-			expect(isAllowedReadOnlyCommand("awk '{print > \"out\"}' file")).toBe(false);
+			// awk system()/redirect forms also contain banned `(`/`>` chars.
+			expect(isAllowedReadOnlyCommand("awk 'BEGIN{print}' file")).toBe(false);
 		});
 
 		it("blocks find with mutating action flags but allows plain find", () => {
@@ -200,157 +262,6 @@ describe("isAllowedReadOnlyCommand", () => {
 			expect(isAllowedReadOnlyCommand("sort --outpu=/tmp/pwn.txt in.txt")).toBe(false);
 			expect(isAllowedReadOnlyCommand("date --se=2020-01-01")).toBe(false);
 			expect(isAllowedReadOnlyCommand("date --s=2020-01-01")).toBe(false);
-		});
-	});
-
-	// Regression tests for process-substitution bypass (finding C1): `<(...)`
-	// and `>(...)` execute their inner command unconditionally, so the outer
-	// allowlisted head must not rescue them.
-	describe("process substitution bypass", () => {
-		it("blocks process substitution with a mutating inner", () => {
-			expect(isAllowedReadOnlyCommand("diff <(git log) <(rm -rf /tmp/x)")).toBe(false);
-			expect(isAllowedReadOnlyCommand("cat <(bash -c 'rm -rf /')")).toBe(false);
-			expect(isAllowedReadOnlyCommand("echo <(git push origin main --force)")).toBe(false);
-			expect(isAllowedReadOnlyCommand("git log <(rm -rf /)")).toBe(false);
-		});
-
-		it("blocks process substitution even with an allowlisted inner", () => {
-			// A read-only mode has no legitimate use for process substitution;
-			// reject it outright regardless of what the inner command is.
-			expect(isAllowedReadOnlyCommand("diff <(git log) <(git status)")).toBe(false);
-		});
-
-		it("blocks process substitution nested inside a quoted command substitution", () => {
-			expect(isAllowedReadOnlyCommand('cat "$(diff <(rm x) y)"')).toBe(false);
-		});
-
-		// Finding 5: output process substitution `>(cmd)` must be blocked too —
-		// the previous tests only exercised the `<(...)` direction.
-		it("blocks output process substitution >(cmd)", () => {
-			expect(isAllowedReadOnlyCommand("cat foo >(tee /tmp/pwned)")).toBe(false);
-			expect(isAllowedReadOnlyCommand("diff <(git log) >(touch /tmp/pwned)")).toBe(false);
-			expect(isAllowedReadOnlyCommand("echo hi >(bash -c 'rm -rf /')")).toBe(false);
-		});
-
-		it("does not flag a quoted literal <( ) as process substitution", () => {
-			expect(isAllowedReadOnlyCommand('grep "<(" file')).toBe(true);
-			expect(isAllowedReadOnlyCommand("cat < in.txt")).toBe(true); // input redirection stays allowed
-		});
-	});
-
-	// Regression tests for finding 1: the quote-tracking scanners must be
-	// escape-aware. A backslash-escaped `\"`/`\'` is a LITERAL character in
-	// bash, not a quote delimiter — treating it as one flips the scanner
-	// "inside quotes" and hides a real, live `<(...)` or `>` that follows,
-	// which previously let arbitrary commands execute / write files.
-	describe("escaped quotes do not desync the quote scanner", () => {
-		it("blocks process substitution after an escaped double quote", () => {
-			expect(isAllowedReadOnlyCommand('echo \\"hi <(touch /tmp/pwn) bye\\"')).toBe(false);
-			// A single unpaired escaped quote must not mask the rest of the line.
-			expect(isAllowedReadOnlyCommand('cat \\" <(rm -rf /)')).toBe(false);
-			// Finding G3: the escaped-single-quote-before-<( direction too.
-			expect(isAllowedReadOnlyCommand("cat \\' <(rm -rf /)")).toBe(false);
-			expect(isAllowedReadOnlyCommand("echo \\'hi <(touch /tmp/pwn) bye\\'")).toBe(false);
-		});
-
-		it("blocks output redirection after an escaped quote", () => {
-			expect(isAllowedReadOnlyCommand('echo \\"hi > /tmp/pwn\\"')).toBe(false);
-			expect(isAllowedReadOnlyCommand("echo \\'hi > /tmp/pwn\\'")).toBe(false);
-			expect(isAllowedReadOnlyCommand('echo \\" > /tmp/pwn')).toBe(false);
-		});
-
-		// Finding G2: the mirror of the escaped-quote case. An EVEN, non-zero
-		// backslash run before a quote leaves the quote LIVE (the backslashes
-		// escape each other), so it must still open/close normally — a
-		// miscount in the other direction would get the scanner stuck "inside
-		// quotes" and hide a live `>`/`<(` that follows (an under-block).
-		it("keeps a genuinely-live quote after an even backslash run working", () => {
-			// `echo "\\" > /tmp/x` — two backslashes close the quote for real,
-			// exposing the trailing redirect, which must be blocked.
-			expect(isAllowedReadOnlyCommand('echo "\\\\" > /tmp/pwn')).toBe(false);
-			expect(isAllowedReadOnlyCommand('echo "\\\\" <(rm -rf /)')).toBe(false);
-			// Positive control: content genuinely inside the live-quote pair stays
-			// masked, so an inert `>` there does not disqualify the command.
-			expect(isAllowedReadOnlyCommand('echo "\\\\ > inside" hi')).toBe(true);
-		});
-
-		it("still treats genuinely quoted redirection metacharacters as inert", () => {
-			expect(isAllowedReadOnlyCommand('echo "a > b"')).toBe(true);
-			expect(isAllowedReadOnlyCommand("echo 'a > b'")).toBe(true);
-			expect(isAllowedReadOnlyCommand('grep "<(" file')).toBe(true);
-			// Finding G3 positive control: the single-quote literal variant.
-			expect(isAllowedReadOnlyCommand("grep '<(' file")).toBe(true);
-		});
-	});
-
-	// Regression tests for finding G1: bash ANSI-C `$'...'` quoting. Unlike a
-	// plain `'...'` string, backslash IS an escape inside `$'...'`, so `\'` is a
-	// literal apostrophe that does NOT close the string. A quote scanner that
-	// treats `$'...'` like a plain single-quoted string exits one char early on
-	// the first `\'`, sees the real closing `'` as a fresh opener, and inverts
-	// quote parity for the rest of the command — masking every following
-	// operator/redirect/process-substitution. The read-only gate rejects any
-	// `$'` outright (fail closed) BEFORE any quote-sensitive scan, via the
-	// shared `containsAnsiCQuoting` detector.
-	describe("ANSI-C $'...' quoting cannot desync the read-only gate", () => {
-		it("blocks a second command chained after $'...' via any operator", () => {
-			expect(isAllowedReadOnlyCommand("git log $'a\\'b' ; rm -rf /tmp/x")).toBe(false);
-			expect(isAllowedReadOnlyCommand("echo $'\\'' && touch /tmp/x")).toBe(false);
-			expect(isAllowedReadOnlyCommand("ls /nope $'\\'' || touch /tmp/x")).toBe(false);
-			expect(isAllowedReadOnlyCommand("echo $'\\'' | tee /tmp/x")).toBe(false);
-		});
-
-		it("blocks redirection / process substitution after $'...'", () => {
-			expect(isAllowedReadOnlyCommand("echo $'a\\'b' > /tmp/x")).toBe(false);
-			expect(isAllowedReadOnlyCommand("cat $'a\\'b' <(touch /tmp/x)")).toBe(false);
-			expect(isAllowedReadOnlyCommand("echo $'a\\'b\\'c' > /tmp/x")).toBe(false);
-		});
-
-		// Finding H1: `$$'` (PID expansion + plain quote) is also rejected — the
-		// detector fires broadly so the fail-closed posture covers it too.
-		it("blocks commands using a $$'...' sequence (fail closed)", () => {
-			expect(isAllowedReadOnlyCommand("echo $$'\\''' ; touch /tmp/x")).toBe(false);
-			expect(isAllowedReadOnlyCommand("echo $$'plain'")).toBe(false);
-		});
-
-		it("rejects even a lone $'...' read-only command (fails closed)", () => {
-			// The read-only allowlist has no legitimate use for ANSI-C quoting.
-			expect(isAllowedReadOnlyCommand("echo $'a\\tb'")).toBe(false);
-			expect(isAllowedReadOnlyCommand("grep $'\\t' file")).toBe(false);
-		});
-
-		it("still blocks a dangerous construct placed BEFORE the $'...'", () => {
-			// Ordering check: the desync only ever affected content AFTER the
-			// ANSI-C string, so a `<(` before it was already caught — and still is.
-			expect(isAllowedReadOnlyCommand("cat <(touch /tmp/x) $'a\\'b'")).toBe(false);
-		});
-
-		it("does not flag $' that appears inside a double-quoted string", () => {
-			// Inside double quotes `$'` is ordinary text, not ANSI-C quoting.
-			expect(isAllowedReadOnlyCommand('echo "a $\'b"')).toBe(true);
-		});
-
-		// Finding T3: `\$'x'` is an escaped literal `$` + a plain `'x'` string,
-		// NOT ANSI-C quoting, so it is not flagged by the ANSI-C detector. The
-		// command is still judged normally (here `echo` is read-only → allowed).
-		it("does not flag an escaped-dollar \\$'x' as ANSI-C quoting", () => {
-			expect(isAllowedReadOnlyCommand("echo \\$'x'")).toBe(true);
-		});
-	});
-
-	// Regression tests for the quoted-substitution redirection bypass
-	// (finding C2): a `>` inside a double-quoted `$(...)` still writes a file
-	// because bash executes the substitution; the outer quote must not mask it.
-	describe("redirection hidden inside a quoted command substitution", () => {
-		it("blocks a write redirect inside a double-quoted substitution", () => {
-			expect(isAllowedReadOnlyCommand('cat "$(echo hi > /tmp/pwned)"')).toBe(false);
-			expect(isAllowedReadOnlyCommand('echo "$(echo pwn >> /tmp/z)"')).toBe(false);
-			expect(isAllowedReadOnlyCommand('cat "prefix $(echo hi > /tmp/w) suffix"')).toBe(false);
-		});
-
-		it("still allows a read-only double-quoted substitution and inert quoted >", () => {
-			expect(isAllowedReadOnlyCommand('cat "$(git rev-parse HEAD)"')).toBe(true);
-			expect(isAllowedReadOnlyCommand('echo "a > b"')).toBe(true);
 		});
 	});
 
