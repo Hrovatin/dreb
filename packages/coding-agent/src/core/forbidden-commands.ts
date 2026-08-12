@@ -98,25 +98,42 @@ const QUOTED_CONTENT_PATTERNS: string[] = [
  * Handles escaped quotes (\", \') within strings. Correctly counts
  * consecutive backslashes before a quote — an even count means the quote
  * is real (e.g. `\\"` is escaped-backslash + closing quote).
+ *
+ * Also models bash's ANSI-C `$'...'` quoting, where — unlike a plain `'...'`
+ * string — a backslash IS an escape, so `\'` is a literal apostrophe that does
+ * NOT close the string. Treating `$'...'` like a plain single-quoted string
+ * (unconditional close) would exit one character early on the first `\'`, see
+ * the real closing `'` as a fresh opener, invert quote parity for the rest of
+ * the command, and mask any following `;`/`&&`/`||`/`|` — hiding a second
+ * command from `splitCommandSegments` and letting it slip past the denylist.
  */
 function maskQuotedContent(command: string): string {
 	let result = "";
 	let inSingle = false;
 	let inDouble = false;
+	// Whether the currently-open single-quote region was entered via `$'`
+	// (ANSI-C quoting). Escaping rules differ from a plain `'...'` region.
+	let singleAnsiC = false;
 
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
 
 		if (ch === "'" && !inDouble) {
-			// In bash, backslash cannot escape anything INSIDE a single-quoted
-			// string, so a `'` there always closes. OUTSIDE any quote, however,
-			// a backslash-escaped `\'` is a literal character and must NOT open a
+			// In a plain `'...'` string backslash has no power, so a `'` always
+			// closes. In an ANSI-C `$'...'` string a `\'` is escaped/literal and
+			// must NOT close — only an unescaped `'` closes. OUTSIDE any quote, a
+			// backslash-escaped `\'` is a literal character and must NOT open a
 			// single-quoted region — otherwise a real operator after it (`;`,
 			// `&&`) would be masked and hidden from segment splitting.
 			if (inSingle) {
-				inSingle = false;
+				if (!singleAnsiC || !isEscaped(command, i)) {
+					inSingle = false;
+					singleAnsiC = false;
+				}
 			} else if (!isEscaped(command, i)) {
 				inSingle = true;
+				// `$'` (unescaped `$` immediately before) starts an ANSI-C string.
+				singleAnsiC = i > 0 && command[i - 1] === "$" && !isEscaped(command, i - 1);
 			}
 			result += ch;
 		} else if (ch === '"' && !inSingle) {
