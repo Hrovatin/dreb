@@ -5446,7 +5446,7 @@ ${cycleModelForward || cycleModelBackward ? `| \`${cycleModelForward}\` / \`${cy
 		this.footer.invalidate();
 		this.showWarning(
 			nowOn
-				? "Read-only Ask mode ON — edits/writes disabled, bash limited to read-only commands, subagents limited to read-only agents. Use /ask off to exit."
+				? "Read-only Ask mode ON — edits/writes disabled, no shell (use the typed read-only git tool), subagents limited to read-only agents. Use /ask off to exit."
 				: "Read-only Ask mode OFF — normal tools restored.",
 		);
 	}
