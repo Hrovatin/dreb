@@ -45,6 +45,15 @@ describe("slash-router", () => {
 		expect(routeInput("/new", withBuiltin)).toEqual({ kind: "builtin", command: "new", arg: undefined });
 	});
 
+	it("intercepts wired-fallback, deferred, and terminal-only builtins by name", () => {
+		// Even without a get_commands advertisement, the router recognizes every
+		// builtin name (wired fallback + deferred + terminal-only) and intercepts
+		// it so submit never forwards it to prompt.
+		expect(routeInput("/export a.html")).toEqual({ kind: "builtin", command: "export", arg: "a.html" });
+		expect(routeInput("/fork")).toEqual({ kind: "builtin", command: "fork", arg: undefined });
+		expect(routeInput("/login")).toEqual({ kind: "builtin", command: "login", arg: undefined });
+	});
+
 	it("flags an unknown slash command", () => {
 		expect(routeInput("/bogus now")).toEqual({ kind: "unknown-command", name: "bogus" });
 	});

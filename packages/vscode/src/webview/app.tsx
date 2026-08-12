@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
+import { formatContextUsage, formatCost, formatModel, formatThinking } from "../shared/format.js";
 import {
 	activitySummary,
 	applyEvent,
@@ -63,6 +64,38 @@ export function App() {
 				<span class="dreb-cwd" title={status().cwd}>
 					{shortPath(status().cwd)}
 				</span>
+				<button
+					type="button"
+					class="dreb-chip"
+					title="Change model"
+					disabled={!status().connected}
+					onClick={() => postToHost({ type: "pick-model" })}
+				>
+					{formatModel(status().model)}
+				</button>
+				<button
+					type="button"
+					class="dreb-chip"
+					title="Change thinking level"
+					disabled={!status().connected}
+					onClick={() => postToHost({ type: "pick-thinking" })}
+				>
+					think: {formatThinking(status().thinkingLevel)}
+				</button>
+				<Show when={formatCost(status().cost)}>
+					{(cost) => (
+						<span class="dreb-chip-static" title="cost">
+							{cost()}
+						</span>
+					)}
+				</Show>
+				<Show when={formatContextUsage(status().contextUsage)}>
+					{(ctx) => (
+						<span class="dreb-chip-static" title="context usage">
+							{ctx()}
+						</span>
+					)}
+				</Show>
 				<span class={`dreb-dot ${status().connected ? "ok" : "off"}`} />
 			</header>
 
@@ -73,7 +106,13 @@ export function App() {
 			<div class="dreb-transcript" ref={scrollEl}>
 				<For each={state.items}>
 					{(item) =>
-						item.kind === "user" ? <div class="dreb-user">{item.text}</div> : <ResponseView group={item} />
+						item.kind === "user" ? (
+							<div class="dreb-user">{item.text}</div>
+						) : item.kind === "system" ? (
+							<pre class="dreb-system">{item.text}</pre>
+						) : (
+							<ResponseView group={item} />
+						)
 					}
 				</For>
 
