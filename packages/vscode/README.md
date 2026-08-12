@@ -4,7 +4,7 @@ A native chat client for the [dreb](https://github.com/aebrer/dreb) coding agent
 
 This package is modeled on `@dreb/dashboard`: an extension **host** owns the RPC child and the authoritative transcript state, and a **webview** renders it. The only transport difference is that the dashboard's HTTP+SSE layer is replaced by VS Code's `postMessage` bridge.
 
-> Status: **Phase 0 + 1** (foundation + MVP chat). See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
+> Status: **Phase 2** (built-in slash commands + TUI-parity status header) on top of the Phase 0 + 1 foundation and MVP chat. See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
 
 ## Architecture
 
@@ -19,12 +19,42 @@ src/
     webview-bridge.ts   postMessage wiring + webview HTML/CSP
     cli-path.ts         resolve the dreb CLI (setting → dependency)
     slash-router.ts     route composer text → prompt vs builtin RPC (pure, tested)
+    session-registry.ts single-live-panel lifecycle (reentrancy-safe, pure, tested)
+    host-ui.ts          native-prompt port (quick pick / input / dialogs); vscode-free
+    vscode-host-ui.ts   the real `HostUi` backed by `vscode.window`
+  shared/
+    format.ts           status-header + `/session` display formatters (pure, tested)
   webview/       # SolidJS UI — bundled with Vite → dist/webview
-    app.tsx             transcript, collapsible activity box, composer, needs-input
+    app.tsx             transcript, collapsible activity box, composer, needs-input,
+                        and the status header (model · thinking · cost · ctx)
 ```
 
 - The host keeps the authoritative `TranscriptState`. On (re)load the webview announces `ready` and receives a full snapshot, so recreating the webview never loses the conversation.
 - Host and webview apply the **same** pure `applyEvent` reducer, so live streaming and the reload snapshot stay consistent.
+- `SessionController` drives native VS Code prompts only through the `HostUi` port, so the controller and its tests stay node-only; `vscode-host-ui.ts` is the sole place that imports `vscode` for prompts.
+
+## Slash commands
+
+Type `/` in the composer to run a built-in command instead of sending a prompt. dreb's server advertises builtins via `get_commands` but rejects them as prompts, so the host intercepts every builtin and routes it to an RPC method or a native VS Code surface:
+
+| Command | Action |
+| --- | --- |
+| `/model` | Native quick pick to switch the active model (session-local). |
+| `/compact` | Summarize and compact the conversation context. |
+| `/new` | Start a new session. |
+| `/reload` | Reload skills, extensions, prompts, and settings. |
+| `/dream` | Consolidate and prune memories. |
+| `/session` | Show session info and stats (messages, tokens, cost, context). |
+| `/name` | Set the session display name (native input box). |
+| `/export` | Export the session to HTML (native save dialog). |
+| `/import` | Import and resume a session from JSONL (native open dialog). |
+| `/quit` | End the session; the panel stays open showing an ended banner. Re-run **dreb: Open Chat** for a fresh session. |
+
+Commands owned by later phases (`/settings`, `/scoped-models`, `/fork`, `/tree`, `/resume`) and terminal-only commands (`/login`, `/logout`, `/copy`, `/hotkeys`, `/buddy`) are recognized but surface a notice rather than running. An unrecognized command (e.g. `/foo`) surfaces an "unknown command" notice.
+
+## Status header
+
+The webview renders a compact header mirroring the TUI: **model · thinking level · cost · context usage**. Cost shows the session total (`$0.123`, `+ (sub)` on a subscription) and, when known, the larger daily total (`, today $1.23`); context usage shows `ctx 42%`. All formatting lives in the pure `shared/format.ts` so the header renders costs consistently.
 
 ## Requirements
 

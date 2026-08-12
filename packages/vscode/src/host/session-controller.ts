@@ -12,9 +12,43 @@
  * events + status changes. The webview bridge adapts those to `postMessage`.
  */
 
+import { formatSessionStats } from "../shared/format.js";
 import { applyEvent, createTranscriptState, type TranscriptState } from "../shared/projection.js";
 import type { HostStatus, SlashCommandDto, UiResponse } from "../shared/protocol.js";
-import { BUILTIN_COMMANDS, routeInput, stripSlash } from "./slash-router.js";
+import { type HostUi, noopHostUi } from "./host-ui.js";
+import { BUILTIN_COMMANDS, DEFERRED_BUILTINS, routeInput, stripSlash, TERMINAL_ONLY_BUILTINS } from "./slash-router.js";
+
+/** Thinking levels offered in the picker. The active model may support a subset;
+ * `set_thinking_level` clamps server-side and we reflect the applied value via a
+ * follow-up state refresh (the valid-per-model list is not exposed over RPC). */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
+
+/** Structural view of the runtime state fields the controller reads. */
+interface RpcSessionStateLike {
+	model?: { provider: string; id: string; name?: string };
+	thinkingLevel?: string;
+	usingSubscription?: boolean;
+	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+}
+
+/** Structural view of `getSessionStats()` (superset assignable from SessionStats). */
+interface SessionStatsLike {
+	sessionId?: string;
+	userMessages?: number;
+	assistantMessages?: number;
+	toolCalls?: number;
+	totalMessages?: number;
+	tokens?: { input?: number; output?: number; total?: number };
+	cost?: number;
+	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+}
+
+/** Structural view of one available model. */
+interface ModelInfoLike {
+	provider: string;
+	id: string;
+	name?: string;
+}
 
 /**
  * Structural view of the parts of `RpcClient` the controller uses. Kept
@@ -40,6 +74,21 @@ export interface RpcClientLike {
 	sendExtensionUIResponse(response: unknown): void;
 	onEvent(listener: (event: any) => void): () => void;
 	onExit(listener: (info: any) => void): () => void;
+	// Runtime status (TUI parity).
+	getState(): Promise<RpcSessionStateLike>;
+	getDailyCost(): Promise<number>;
+	getSessionStats(): Promise<SessionStatsLike>;
+	// Model / thinking selection.
+	getAvailableModels(): Promise<ModelInfoLike[]>;
+	setModel(provider: string, modelId: string): Promise<{ provider: string; id: string }>;
+	setThinkingLevel(level: string): Promise<void>;
+	// Built-in slash commands.
+	newSession(parentSession?: string): Promise<{ cancelled: boolean }>;
+	reload(): Promise<void>;
+	dream(args?: string): Promise<{ message: string }>;
+	setSessionName(name: string): Promise<void>;
+	exportHtml(outputPath?: string): Promise<{ path: string }>;
+	importJsonl(inputPath: string): Promise<{ cancelled: boolean }>;
 }
 
 export type RpcClientFactory = (options: {
@@ -55,10 +104,21 @@ export interface SessionControllerOptions {
 	args?: string[];
 	/** Override the RpcClient constructor (tests inject a fake). */
 	clientFactory?: RpcClientFactory;
+	/** Native prompt port (quick picks / dialogs); defaults to a no-op so the
+	 * controller stays vscode-free and testable. Production injects the
+	 * vscode-backed impl. */
+	ui?: HostUi;
 	logger?: (line: string) => void;
 }
 
-export type ControllerUpdate = { kind: "event"; event: unknown } | { kind: "status"; status: HostStatus };
+export type ControllerUpdate =
+	| { kind: "event"; event: unknown }
+	| { kind: "status"; status: HostStatus }
+	/** The slash-command list changed (e.g. after `/reload`). */
+	| { kind: "commands"; commands: SlashCommandDto[] }
+	/** Transcript was replaced host-side (e.g. `/new`, `/import`); the bridge
+	 * re-sends a fresh snapshot. */
+	| { kind: "resync" };
 
 /** Lazily loads the ESM-only agent runtime so tests with an injected factory
  * never pull it in. */
@@ -76,6 +136,7 @@ export class SessionController {
 	private readonly state: TranscriptState = createTranscriptState();
 	private readonly listeners = new Set<(update: ControllerUpdate) => void>();
 	private readonly factory: RpcClientFactory;
+	private readonly ui: HostUi;
 	private readonly logger: (line: string) => void;
 	private readonly options: SessionControllerOptions;
 	private client: RpcClientLike | undefined;
@@ -84,10 +145,19 @@ export class SessionController {
 	private unsubEvent: (() => void) | undefined;
 	private unsubExit: (() => void) | undefined;
 	private disposed = false;
+	/** Serializes status refreshes: coalesces an overlapping request into one
+	 * trailing re-run so a new turn starting mid-refresh still ends up current.
+	 * `statusAgainIncludeDaily` accumulates the daily-cost intent of every
+	 * coalesced caller so the trailing re-run doesn't drop a requested daily
+	 * refresh (e.g. an `agent_end` refresh coalesced into a cheaper one). */
+	private statusBusy = false;
+	private statusAgain = false;
+	private statusAgainIncludeDaily = false;
 
 	constructor(options: SessionControllerOptions) {
 		this.options = options;
 		this.factory = options.clientFactory ?? defaultClientFactory;
+		this.ui = options.ui ?? noopHostUi;
 		this.logger = options.logger ?? (() => {});
 		this.status = { connected: false, cwd: options.cwd };
 	}
@@ -134,6 +204,7 @@ export class SessionController {
 		}
 		this.setStatus({ ...this.status, connected: true, error: undefined });
 		await this.refreshCommands();
+		await this.refreshStatus(true);
 	}
 
 	/** Fetch the agent's commands and merge with host builtins.
@@ -187,11 +258,7 @@ export class SessionController {
 					await this.client.prompt(decision.message);
 					return;
 				case "builtin":
-					if (decision.command === "compact") {
-						await this.client.compact(decision.arg);
-						return;
-					}
-					this.emitNotice(`The /${decision.command} command isn't available yet in this early build.`);
+					await this.runBuiltin(decision.command, decision.arg);
 					return;
 				case "unknown-command":
 					this.emitNotice(`Unknown command: /${decision.name}`);
@@ -211,6 +278,235 @@ export class SessionController {
 		}
 	}
 
+	/** Dispatch a built-in slash command to its RPC method / native UI. Invoked
+	 * only from `submit` (which has already verified an active connection), so a
+	 * rejection here is caught by `submit` and surfaced as a notice. */
+	private async runBuiltin(command: string, arg?: string): Promise<void> {
+		const client = this.client;
+		if (!client) return;
+		switch (command) {
+			case "compact":
+				await client.compact(arg);
+				return;
+			case "model":
+				await this.pickModel();
+				return;
+			case "new": {
+				const result = await client.newSession();
+				if (result?.cancelled) {
+					this.emitNotice("New session cancelled.");
+					return;
+				}
+				this.resetTranscriptState();
+				await this.refreshCommands();
+				await this.refreshStatus(true);
+				this.emit({ kind: "resync" });
+				this.emitNotice("Started a new session.");
+				return;
+			}
+			case "reload": {
+				await client.reload();
+				await this.refreshCommands();
+				this.emit({ kind: "commands", commands: this.commands });
+				await this.refreshStatus(false);
+				this.emitNotice("Reloaded skills, extensions, prompts, and settings.");
+				return;
+			}
+			case "dream": {
+				const result = await client.dream(arg);
+				this.emitNotice(result?.message ?? "Memory consolidation complete.");
+				return;
+			}
+			case "session": {
+				const stats = await client.getSessionStats();
+				this.pushSystem(formatSessionStats(stats));
+				return;
+			}
+			case "name": {
+				const name = arg ?? (await this.ui.inputBox({ prompt: "Session name", placeholder: "My session" }));
+				if (!name || name.trim().length === 0) return;
+				await client.setSessionName(name.trim());
+				await this.refreshStatus(false);
+				this.emitNotice(`Renamed session to "${name.trim()}".`);
+				return;
+			}
+			case "export": {
+				const path =
+					arg ?? (await this.ui.saveDialog({ defaultName: "dreb-session.html", filters: { HTML: ["html"] } }));
+				if (!path) return;
+				const result = await client.exportHtml(path);
+				this.emitNotice(`Exported session to ${result.path}.`);
+				return;
+			}
+			case "import": {
+				const path = arg ?? (await this.ui.openDialog({ filters: { "Session JSONL": ["jsonl"] } }));
+				if (!path) return;
+				const result = await client.importJsonl(path);
+				if (result?.cancelled) {
+					this.emitNotice("Import cancelled.");
+					return;
+				}
+				this.resetTranscriptState();
+				await this.refreshCommands();
+				await this.refreshStatus(true);
+				this.emit({ kind: "resync" });
+				this.emitNotice(`Imported session from ${path}.`);
+				return;
+			}
+			case "quit": {
+				// Emit feedback BEFORE dispose (which clears listeners), then tear
+				// down the child. `dispose` unsubscribes first, so stopping the
+				// client does not surface a spurious "process exited" error.
+				this.emitNotice("Session ended — reopen the chat to start a new one.");
+				this.setStatus({ ...this.status, connected: false, error: undefined });
+				await this.dispose();
+				return;
+			}
+			default:
+				if (DEFERRED_BUILTINS.has(command)) {
+					this.emitNotice(`/${command} is coming in a later phase.`);
+				} else if (TERMINAL_ONLY_BUILTINS.has(command)) {
+					this.emitNotice(`/${command} is handled in the terminal UI, not over RPC.`);
+				} else {
+					this.emitNotice(`The /${command} command isn't available yet.`);
+				}
+				return;
+		}
+	}
+
+	/** Open the native model picker and apply the selection. Public so the
+	 * webview header can trigger it via a `pick-model` message. */
+	async pickModel(): Promise<void> {
+		const client = this.client;
+		if (!client || !this.status.connected) {
+			this.emitNotice("dreb isn't connected — reopen the chat to restart it.");
+			return;
+		}
+		try {
+			const models = await client.getAvailableModels();
+			if (models.length === 0) {
+				this.emitNotice("No models are available.");
+				return;
+			}
+			const picked = await this.ui.quickPick(
+				models.map((m) => ({
+					label: m.name && m.name.length > 0 ? m.name : m.id,
+					description: m.provider,
+					detail: `${m.provider}/${m.id}`,
+					value: `${m.provider}\u0000${m.id}`,
+				})),
+				{ placeholder: "Select a model" },
+			);
+			if (!picked) return;
+			const sep = picked.indexOf("\u0000");
+			const provider = picked.slice(0, sep);
+			const modelId = picked.slice(sep + 1);
+			await client.setModel(provider, modelId);
+			await this.refreshStatus(false);
+		} catch (err) {
+			this.emitNotice(`Model selection failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	/** Open the native thinking-level picker and apply the selection. Public so
+	 * the webview header can trigger it via a `pick-thinking` message. */
+	async pickThinking(): Promise<void> {
+		const client = this.client;
+		if (!client || !this.status.connected) {
+			this.emitNotice("dreb isn't connected — reopen the chat to restart it.");
+			return;
+		}
+		try {
+			const current = this.status.thinkingLevel;
+			const picked = await this.ui.quickPick(
+				THINKING_LEVELS.map((level) => ({
+					label: level,
+					description: level === current ? "current" : undefined,
+					value: level,
+				})),
+				{ placeholder: "Select thinking level" },
+			);
+			if (!picked) return;
+			await client.setThinkingLevel(picked);
+			await this.refreshStatus(false);
+		} catch (err) {
+			this.emitNotice(`Thinking-level change failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	/** Re-read runtime status (model / thinking / cost / context) and emit it.
+	 * Coalesces overlapping calls into a single trailing re-run. Failures are
+	 * logged, never surfaced to the transcript (status is best-effort). */
+	private async refreshStatus(includeDailyCost: boolean): Promise<void> {
+		const client = this.client;
+		if (!client || !this.status.connected) return;
+		if (this.statusBusy) {
+			this.statusAgain = true;
+			// Preserve the strongest pending intent: if any coalesced caller wants
+			// the daily cost, the trailing re-run must fetch it (finding 2).
+			if (includeDailyCost) this.statusAgainIncludeDaily = true;
+			return;
+		}
+		this.statusBusy = true;
+		try {
+			const [state, stats, daily] = await Promise.all([
+				client.getState(),
+				client.getSessionStats(),
+				// When not refetching, preserve the last-known daily total rather
+				// than wiping the chip on every /name, /reload, or picker (finding 6).
+				includeDailyCost ? client.getDailyCost() : Promise.resolve<number | undefined>(this.status.cost?.daily),
+			]);
+			const model = state.model
+				? { provider: state.model.provider, id: state.model.id, name: state.model.name }
+				: undefined;
+			this.setStatus({
+				...this.status,
+				model,
+				thinkingLevel: state.thinkingLevel,
+				cost: {
+					session: stats.cost ?? 0,
+					daily,
+					usingSubscription: state.usingSubscription ?? false,
+				},
+				contextUsage: state.contextUsage
+					? {
+							tokens: state.contextUsage.tokens,
+							contextWindow: state.contextUsage.contextWindow,
+							percent: state.contextUsage.percent,
+						}
+					: undefined,
+			});
+		} catch (err) {
+			this.logger(`refreshStatus failed: ${err instanceof Error ? err.message : String(err)}`);
+		} finally {
+			this.statusBusy = false;
+			if (this.statusAgain) {
+				this.statusAgain = false;
+				// Serve coalesced callers with their accumulated daily intent, not
+				// this finishing call's parameter (finding 2).
+				const again = this.statusAgainIncludeDaily;
+				this.statusAgainIncludeDaily = false;
+				void this.refreshStatus(again);
+			}
+		}
+	}
+
+	/** Clear the transcript in place (properties, not the reference) so `/new`
+	 * and `/import` present a fresh conversation after a `resync`. */
+	private resetTranscriptState(): void {
+		this.state.items = [];
+		this.state.streaming = false;
+		this.state.uiRequests = [];
+		this.state.statusText = undefined;
+		this.state.hostError = undefined;
+		this.state.nextResponseId = 1;
+	}
+
+	/** Append a persistent host-side line to the transcript (e.g. `/session`). */
+	private pushSystem(text: string): void {
+		this.handleEvent({ type: "host_system", text });
+	}
+
 	/** Surface a fatal host-side failure (e.g. the CLI could not be located)
 	 * into the transcript + status without spawning a child. */
 	reportFatal(message: string): void {
@@ -224,6 +520,7 @@ export class SessionController {
 	}
 
 	async dispose(): Promise<void> {
+		if (this.disposed) return;
 		this.disposed = true;
 		this.unsubEvent?.();
 		this.unsubExit?.();
@@ -235,9 +532,18 @@ export class SessionController {
 		}
 	}
 
+	/** Whether this controller has been torn down (e.g. via `/quit`). A disposed
+	 * controller cannot be restarted; the host must build a fresh one. */
+	isDisposed(): boolean {
+		return this.disposed;
+	}
+
 	private handleEvent(event: unknown): void {
 		applyEvent(this.state, event);
 		this.emit({ kind: "event", event });
+		// After each completed turn, refresh runtime status (cost/context/model)
+		// the way the dashboard does on the streaming→idle transition.
+		if ((event as { type?: unknown })?.type === "agent_end") void this.refreshStatus(true);
 	}
 
 	private handleExit(info: { code?: number | null; signal?: string | null; error?: Error }): void {
