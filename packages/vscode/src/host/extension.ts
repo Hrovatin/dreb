@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import * as vscode from "vscode";
 import { resolveCliPath } from "./cli-path.js";
 import { SessionController } from "./session-controller.js";
+import { SessionRegistry } from "./session-registry.js";
 import { createVscodeHostUi } from "./vscode-host-ui.js";
 import { connectWebview, getWebviewHtml } from "./webview-bridge.js";
 
@@ -22,34 +23,40 @@ interface ChatSession {
 	connection: vscode.Disposable;
 }
 
-let current: ChatSession | undefined;
+/** Enforces the single-live-panel invariant and the reentrancy-safe open /
+ * teardown lifecycle. The vscode-specific operations are injected; the racing
+ * logic itself lives in the vscode-free, unit-tested `session-registry.ts`. */
+const registry = new SessionRegistry<ChatSession>({
+	isDisposed: (s) => s.controller.isDisposed(),
+	reveal: (s) => s.panel.reveal(vscode.ViewColumn.Active),
+	teardown: async (s) => {
+		s.connection.dispose();
+		await s.controller.dispose();
+		s.panel.dispose();
+	},
+});
 
 export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand("dreb.openChat", () => {
-			openChat(context).catch((err) => {
-				vscode.window.showErrorMessage(`dreb: failed to open chat — ${errorText(err)}`);
-			});
+			registry
+				.open(() => createSession(context))
+				.catch((err) => {
+					vscode.window.showErrorMessage(`dreb: failed to open chat — ${errorText(err)}`);
+				});
 		}),
 	);
 }
 
 export async function deactivate(): Promise<void> {
-	await disposeCurrent();
+	await registry.disposeActive();
 }
 
-async function openChat(context: vscode.ExtensionContext): Promise<void> {
-	if (current) {
-		if (!current.controller.isDisposed()) {
-			current.panel.reveal(vscode.ViewColumn.Active);
-			return;
-		}
-		// The prior session was ended via `/quit` (controller disposed, panel left
-		// open showing the "session ended" banner). Tear down that dead panel and
-		// fall through to build a fresh session instead of revealing the dead one.
-		await disposeCurrent();
-	}
-
+/** Build a fresh chat session: controller, webview panel, and transport wiring.
+ * Called by the registry only when a new session is actually needed. The panel's
+ * `onDidDispose` tears down *this* session specifically (never a newer live one)
+ * via the registry's scoped, idempotent `disposeSession`. */
+function createSession(context: vscode.ExtensionContext): ChatSession {
 	const config = vscode.workspace.getConfiguration("dreb");
 	const cwd = workspaceCwd();
 	const cli = resolveCliPath({ configuredPath: config.get<string>("cliPath") });
@@ -71,32 +78,22 @@ async function openChat(context: vscode.ExtensionContext): Promise<void> {
 	const connection = connectWebview(panel.webview, controller);
 	panel.webview.html = getWebviewHtml(panel.webview, context.extensionUri, makeNonce());
 
-	current = { panel, controller, connection };
+	const session: ChatSession = { panel, controller, connection };
 	panel.onDidDispose(() => {
-		void disposeCurrent();
+		void registry.disposeSession(session);
 	});
 
 	if (!cli.ok) {
 		// Surface an actionable error into the transcript; the webview shows it
 		// once it hydrates. No child is spawned.
 		controller.reportFatal(cli.error);
-		return;
+	} else {
+		// start() surfaces its own host_error + status into the transcript on
+		// failure, so a rejection here is already reflected in the UI.
+		void controller.start().catch(() => {});
 	}
 
-	try {
-		await controller.start();
-	} catch {
-		// start() already surfaced a host_error + status to the transcript.
-	}
-}
-
-async function disposeCurrent(): Promise<void> {
-	if (!current) return;
-	const session = current;
-	current = undefined;
-	session.connection.dispose();
-	await session.controller.dispose();
-	session.panel.dispose();
+	return session;
 }
 
 function workspaceCwd(): string {
