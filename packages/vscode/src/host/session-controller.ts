@@ -146,9 +146,13 @@ export class SessionController {
 	private unsubExit: (() => void) | undefined;
 	private disposed = false;
 	/** Serializes status refreshes: coalesces an overlapping request into one
-	 * trailing re-run so a new turn starting mid-refresh still ends up current. */
+	 * trailing re-run so a new turn starting mid-refresh still ends up current.
+	 * `statusAgainIncludeDaily` accumulates the daily-cost intent of every
+	 * coalesced caller so the trailing re-run doesn't drop a requested daily
+	 * refresh (e.g. an `agent_end` refresh coalesced into a cheaper one). */
 	private statusBusy = false;
 	private statusAgain = false;
+	private statusAgainIncludeDaily = false;
 
 	constructor(options: SessionControllerOptions) {
 		this.options = options;
@@ -438,6 +442,9 @@ export class SessionController {
 		if (!client || !this.status.connected) return;
 		if (this.statusBusy) {
 			this.statusAgain = true;
+			// Preserve the strongest pending intent: if any coalesced caller wants
+			// the daily cost, the trailing re-run must fetch it (finding 2).
+			if (includeDailyCost) this.statusAgainIncludeDaily = true;
 			return;
 		}
 		this.statusBusy = true;
@@ -445,7 +452,9 @@ export class SessionController {
 			const [state, stats, daily] = await Promise.all([
 				client.getState(),
 				client.getSessionStats(),
-				includeDailyCost ? client.getDailyCost() : Promise.resolve<number | undefined>(undefined),
+				// When not refetching, preserve the last-known daily total rather
+				// than wiping the chip on every /name, /reload, or picker (finding 6).
+				includeDailyCost ? client.getDailyCost() : Promise.resolve<number | undefined>(this.status.cost?.daily),
 			]);
 			const model = state.model
 				? { provider: state.model.provider, id: state.model.id, name: state.model.name }
@@ -473,7 +482,11 @@ export class SessionController {
 			this.statusBusy = false;
 			if (this.statusAgain) {
 				this.statusAgain = false;
-				void this.refreshStatus(includeDailyCost);
+				// Serve coalesced callers with their accumulated daily intent, not
+				// this finishing call's parameter (finding 2).
+				const again = this.statusAgainIncludeDaily;
+				this.statusAgainIncludeDaily = false;
+				void this.refreshStatus(again);
 			}
 		}
 	}
@@ -507,6 +520,7 @@ export class SessionController {
 	}
 
 	async dispose(): Promise<void> {
+		if (this.disposed) return;
 		this.disposed = true;
 		this.unsubEvent?.();
 		this.unsubExit?.();
@@ -516,6 +530,12 @@ export class SessionController {
 		} catch (err) {
 			this.logger(`stop failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
+	}
+
+	/** Whether this controller has been torn down (e.g. via `/quit`). A disposed
+	 * controller cannot be restarted; the host must build a fresh one. */
+	isDisposed(): boolean {
+		return this.disposed;
 	}
 
 	private handleEvent(event: unknown): void {

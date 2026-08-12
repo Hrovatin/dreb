@@ -40,8 +40,14 @@ export async function deactivate(): Promise<void> {
 
 async function openChat(context: vscode.ExtensionContext): Promise<void> {
 	if (current) {
-		current.panel.reveal(vscode.ViewColumn.Active);
-		return;
+		if (!current.controller.isDisposed()) {
+			current.panel.reveal(vscode.ViewColumn.Active);
+			return;
+		}
+		// The prior session was ended via `/quit` (controller disposed, panel left
+		// open showing the "session ended" banner). Tear down that dead panel and
+		// fall through to build a fresh session instead of revealing the dead one.
+		await disposeCurrent();
 	}
 
 	const config = vscode.workspace.getConfiguration("dreb");

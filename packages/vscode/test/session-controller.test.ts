@@ -37,6 +37,21 @@ class FakeClient implements RpcClientLike {
 	} = { cost: 0 };
 	getStateCalls = 0;
 	dailyCostCalls = 0;
+	/** Optional gate: when set, `getState` blocks until `releaseState()` is
+	 * called, letting a test hold a refreshStatus() in flight and interleave a
+	 * second (coalesced) refresh before the first resolves. */
+	private stateGate: Promise<void> | undefined;
+	private stateGateResolve: (() => void) | undefined;
+	blockState(): void {
+		this.stateGate = new Promise<void>((resolve) => {
+			this.stateGateResolve = resolve;
+		});
+	}
+	releaseState(): void {
+		this.stateGateResolve?.();
+		this.stateGate = undefined;
+		this.stateGateResolve = undefined;
+	}
 
 	// Model / thinking.
 	availableModels: Array<{ provider: string; id: string; name?: string }> = [];
@@ -97,6 +112,7 @@ class FakeClient implements RpcClientLike {
 	}
 	async getState() {
 		this.getStateCalls += 1;
+		if (this.stateGate) await this.stateGate;
 		return this.state;
 	}
 	async getDailyCost(): Promise<number> {
@@ -234,6 +250,59 @@ describe("SessionController", () => {
 
 		expect(fake.getStateCalls).toBeGreaterThan(afterStart);
 		expect(controller.getStatus().cost?.session).toBe(0.9);
+	});
+
+	it("preserves the last-known daily cost across a non-daily refresh (finding 6)", async () => {
+		const fake = new FakeClient();
+		fake.dailyCost = 2.5;
+		const controller = makeController(fake);
+		await controller.start(); // connect does a full refresh incl. daily
+		expect(controller.getStatus().cost?.daily).toBe(2.5);
+		const dailyCallsAfterConnect = fake.dailyCostCalls;
+
+		// A cheaper refresh (e.g. /reload → refreshStatus(false)) must NOT refetch
+		// the daily cost, and must NOT wipe the previously-known value to undefined.
+		fake.dailyCost = 999; // would be wrong if refetched
+		await controller.submit("/reload");
+
+		expect(controller.getStatus().cost?.daily).toBe(2.5); // preserved, not wiped
+		expect(fake.dailyCostCalls).toBe(dailyCallsAfterConnect); // not refetched
+	});
+
+	it("coalesces an overlapping refresh and honors the strongest daily intent (findings 2, 3)", async () => {
+		const flush = async () => {
+			for (let i = 0; i < 8; i++) await Promise.resolve();
+		};
+		const fake = new FakeClient();
+		fake.dailyCost = 1.0;
+		const controller = makeController(fake);
+		await controller.start(); // daily = 1.0
+		expect(controller.getStatus().cost?.daily).toBe(1.0);
+		const stateCallsAfterConnect = fake.getStateCalls;
+		const dailyCallsAfterConnect = fake.dailyCostCalls;
+
+		// Hold a cheap refresh (includeDailyCost=false) in flight by gating getState.
+		fake.blockState();
+		fake.dailyCost = 5.0; // the value a daily-including refresh should fetch
+		const reloadPromise = controller.submit("/reload"); // → refreshStatus(false), blocks
+		await flush();
+
+		// While the false-refresh is in flight, an agent_end fires a true refresh.
+		// It must coalesce (not run concurrently) but its daily intent must survive.
+		fake.emit({ type: "agent_end" });
+		await flush();
+
+		fake.releaseState();
+		await reloadPromise;
+		await flush();
+
+		// Trailing re-run ran exactly once (finding 3 — not concurrently): one
+		// getState for the in-flight false refresh + one for the trailing re-run.
+		expect(fake.getStateCalls).toBe(stateCallsAfterConnect + 2);
+		// The coalesced agent_end's daily intent was honored: the trailing re-run
+		// fetched the fresh daily cost (finding 2 — not the false call's intent).
+		expect(fake.dailyCostCalls).toBe(dailyCallsAfterConnect + 1);
+		expect(controller.getStatus().cost?.daily).toBe(5.0);
 	});
 
 	it("applies events to the transcript and notifies listeners", async () => {
@@ -408,7 +477,7 @@ describe("SessionController", () => {
 		expect(updates.some((u) => u.kind === "resync")).toBe(true);
 	});
 
-	it("/quit stops the client and reports a disconnected status", async () => {
+	it("/quit stops the client, reports a disconnected status, and disposes idempotently", async () => {
 		const fake = new FakeClient();
 		const controller = makeController(fake);
 		await controller.start();
@@ -419,6 +488,15 @@ describe("SessionController", () => {
 		expect(fake.stopped).toBe(1);
 		expect(controller.getStatus().connected).toBe(false);
 		expect(updates.some((u) => u.kind === "status")).toBe(true);
+		// The host uses isDisposed() to detect an ended session and rebuild a
+		// fresh controller on reopen (finding 1 — otherwise reopen reveals a dead
+		// panel). /quit must mark the controller disposed.
+		expect(controller.isDisposed()).toBe(true);
+
+		// dispose() is idempotent: a later teardown (e.g. panel close after quit)
+		// must not stop the client a second time.
+		await controller.dispose();
+		expect(fake.stopped).toBe(1);
 	});
 
 	it("pickModel lists models, applies the choice, and refreshes status", async () => {
@@ -427,14 +505,34 @@ describe("SessionController", () => {
 			{ provider: "anthropic", id: "claude", name: "Claude" },
 			{ provider: "openai", id: "gpt", name: "GPT" },
 		];
+		fake.state = { model: { provider: "openai", id: "gpt", name: "GPT" } };
 		const ui = new FakeUi();
 		ui.pickReturn = "openai\u0000gpt";
 		const controller = makeController(fake, { ui });
 		await controller.start();
+		const stateCallsBefore = fake.getStateCalls;
 
 		await controller.pickModel();
 		expect(ui.pickItems).toHaveLength(2);
 		expect(fake.setModelCalls).toEqual([{ provider: "openai", modelId: "gpt" }]);
+		// The mandated quickPick→setModel→refresh flow: assert the refresh ran and
+		// the applied model is reflected (finding 5 — otherwise a dropped refresh
+		// would go unnoticed).
+		expect(fake.getStateCalls).toBeGreaterThan(stateCallsBefore);
+		expect(controller.getStatus().model).toEqual({ provider: "openai", id: "gpt", name: "GPT" });
+	});
+
+	it("pickModel surfaces an RPC rejection as a bespoke notice", async () => {
+		const fake = new FakeClient();
+		fake.availableModels = [{ provider: "anthropic", id: "claude", name: "Claude" }];
+		const ui = new FakeUi();
+		ui.pickReturn = "anthropic\u0000claude";
+		fake.callError = new Error("setModel boom");
+		const controller = makeController(fake, { ui });
+		await controller.start();
+
+		await controller.pickModel();
+		expect(controller.getTranscript().statusText).toMatch(/Model selection failed: setModel boom/);
 	});
 
 	it("pickModel does nothing when the picker is dismissed", async () => {
@@ -448,15 +546,55 @@ describe("SessionController", () => {
 		expect(fake.setModelCalls).toHaveLength(0);
 	});
 
-	it("pickThinking applies the selected level", async () => {
+	it("pickModel surfaces a notice and skips the picker when no models are available", async () => {
 		const fake = new FakeClient();
+		fake.availableModels = []; // none
+		const ui = new FakeUi();
+		const controller = makeController(fake, { ui });
+		await controller.start();
+
+		await controller.pickModel();
+		expect(ui.pickItems).toBeUndefined(); // quickPick never invoked
+		expect(fake.setModelCalls).toHaveLength(0);
+		expect(controller.getTranscript().statusText).toMatch(/No models are available/);
+	});
+
+	it("pickThinking applies the selected level and refreshes status", async () => {
+		const fake = new FakeClient();
+		fake.state = { thinkingLevel: "high" };
 		const ui = new FakeUi();
 		ui.pickReturn = "high";
 		const controller = makeController(fake, { ui });
 		await controller.start();
+		const stateCallsBefore = fake.getStateCalls;
 
 		await controller.pickThinking();
 		expect(fake.thinkingLevels).toEqual(["high"]);
+		// Assert the refresh ran and the applied level is reflected (finding 5).
+		expect(fake.getStateCalls).toBeGreaterThan(stateCallsBefore);
+		expect(controller.getStatus().thinkingLevel).toBe("high");
+	});
+
+	it("pickThinking does nothing when the picker is dismissed", async () => {
+		const fake = new FakeClient();
+		const ui = new FakeUi(); // pickReturn undefined
+		const controller = makeController(fake, { ui });
+		await controller.start();
+
+		await controller.pickThinking();
+		expect(fake.thinkingLevels).toHaveLength(0);
+	});
+
+	it("pickThinking surfaces an RPC rejection as a bespoke notice", async () => {
+		const fake = new FakeClient();
+		const ui = new FakeUi();
+		ui.pickReturn = "high";
+		fake.callError = new Error("setThinking boom");
+		const controller = makeController(fake, { ui });
+		await controller.start();
+
+		await controller.pickThinking();
+		expect(controller.getTranscript().statusText).toMatch(/Thinking-level change failed: setThinking boom/);
 	});
 
 	it("dispatching /model opens the model picker", async () => {
