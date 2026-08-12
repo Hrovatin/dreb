@@ -37,7 +37,7 @@
  * of the guard.
  */
 
-import { isEscaped, splitCommandSegments, stripShellPrefixes } from "./forbidden-commands.js";
+import { containsAnsiCQuoting, isEscaped, splitCommandSegments, stripShellPrefixes } from "./forbidden-commands.js";
 
 /**
  * The base set of allowed command "heads". Entries are space-separated
@@ -138,35 +138,23 @@ const DANGEROUS_ARG_PATTERNS: Record<string, RegExp[]> = {
  * would otherwise flip the scanner "inside quotes" for the rest of the string
  * and hide a real, live `>` or `<(` from detection.
  *
- * Bash's ANSI-C `$'...'` quoting is modeled too (kept in lockstep with
- * `maskQuotedContent`): inside `$'...'` a `\'` is an escaped literal that does
- * NOT close, so treating it like a plain single-quote (unconditional close)
- * would desync parity and mask a following live `>`/`<(`. (The read-only gate
- * additionally rejects any `$'` outright — see `hasAnsiCQuoting` — so this is
- * defense in depth, and keeps both scanners' semantics identical.)
+ * This scanner models plain `'...'` and `"..."` only. It does NOT try to model
+ * bash ANSI-C `$'...'` quoting: `isAllowedReadOnlyCommand` rejects any command
+ * containing `$'` outright (via `containsAnsiCQuoting`) BEFORE this scanner
+ * runs, so a `$'...'` never reaches it.
  */
 function scanOutsideQuotes(command: string, detect: (ch: string, i: number, cmd: string) => boolean): boolean {
 	let inSingle = false;
 	let inDouble = false;
-	// Whether the open single-quote region is an ANSI-C `$'...'` string.
-	let singleAnsiC = false;
 
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
 		if (ch === "'" && !inDouble) {
-			// Plain `'...'`: a `'` always closes (backslash is inert inside).
-			// ANSI-C `$'...'`: only an unescaped `'` closes (`\'` is literal).
-			// Outside any quote, a backslash-escaped `\'` is literal and must NOT
-			// open a single-quoted region.
-			if (inSingle) {
-				if (!singleAnsiC || !isEscaped(command, i)) {
-					inSingle = false;
-					singleAnsiC = false;
-				}
-			} else if (!isEscaped(command, i)) {
-				inSingle = true;
-				singleAnsiC = i > 0 && command[i - 1] === "$" && !isEscaped(command, i - 1);
-			}
+			// Bash performs no escaping inside single quotes, so a `'` always
+			// closes. Outside any quote, a backslash-escaped `\'` is literal and
+			// must NOT open a single-quoted region.
+			if (inSingle) inSingle = false;
+			else if (!isEscaped(command, i)) inSingle = true;
 		} else if (ch === '"' && !inSingle) {
 			// A backslash-escaped `\"` is a literal quote, not a delimiter.
 			if (!isEscaped(command, i)) inDouble = !inDouble;
@@ -213,45 +201,6 @@ function hasOutputRedirection(command: string): boolean {
  */
 function hasProcessSubstitution(command: string): boolean {
 	return scanOutsideQuotes(command, (ch, i, cmd) => (ch === "<" || ch === ">") && cmd[i + 1] === "(");
-}
-
-/**
- * Detect bash ANSI-C quoting (`$'...'`) outside of any existing quote.
- *
- * `$'...'` is NOT a plain single-quoted string: backslash is an escape inside
- * it, so `$'a\'b'` is one token containing a literal apostrophe. Our quote
- * scanners model this, but rather than trust that modeling for the read-only
- * gate, we reject `$'` outright — the read-only allowlist has no legitimate use
- * for ANSI-C quoting, and failing CLOSED here removes an entire class of
- * quote-desync bypass regardless of any subtlety in the escape handling.
- *
- * Only a `$'` that would *open* a quote counts: a `$'` inside a double-quoted
- * region (`"a $'b"`) or after an escaped `\$` is ordinary text, not ANSI-C
- * quoting, and is not flagged.
- */
-function hasAnsiCQuoting(command: string): boolean {
-	let inSingle = false;
-	let inDouble = false;
-
-	for (let i = 0; i < command.length; i++) {
-		const ch = command[i];
-		if (ch === "'" && !inDouble) {
-			if (inSingle) {
-				inSingle = false;
-			} else if (!isEscaped(command, i)) {
-				// An unescaped `$` immediately before an opening `'` is `$'` —
-				// ANSI-C quoting. Fail closed.
-				if (i > 0 && command[i - 1] === "$" && !isEscaped(command, i - 1)) {
-					return true;
-				}
-				inSingle = true;
-			}
-		} else if (ch === '"' && !inSingle) {
-			if (!isEscaped(command, i)) inDouble = !inDouble;
-		}
-	}
-
-	return false;
 }
 
 /**
@@ -391,14 +340,18 @@ export function isAllowedReadOnlyCommand(command: string, allowlist?: string[]):
 	if (typeof command !== "string") return false;
 	if (command.trim().length === 0) return false;
 
+	// Reject bash ANSI-C `$'...'` quoting outright, BEFORE any quote-sensitive
+	// scan below. It has no legitimate use in a read-only command, and its
+	// escaping rules differ from a plain single-quoted string in ways the
+	// scanners here deliberately do not model — failing CLOSED on it removes an
+	// entire class of quote-desync bypass (a `\'` inside `$'...'` that would
+	// otherwise mask a following operator/redirect/process-substitution). This
+	// must run first so `hasOutputRedirection`/`hasProcessSubstitution`/
+	// `splitCommandSegments` never have to reason about a `$'...'` token.
+	if (containsAnsiCQuoting(command)) return false;
+
 	// A read-only mode must never write files — reject output redirection.
 	if (hasOutputRedirection(command)) return false;
-
-	// Reject bash ANSI-C `$'...'` quoting outright. It has no legitimate use in
-	// a read-only command, and rejecting it fails CLOSED against an entire class
-	// of quote-desync bypass (a `\'` inside `$'...'` that would otherwise mask a
-	// following operator/redirect/process-substitution from the scanners).
-	if (hasAnsiCQuoting(command)) return false;
 
 	// Reject process substitution `<(...)`/`>(...)` — it executes its inner
 	// command unconditionally. (Also enforced per-segment/inner below; this
