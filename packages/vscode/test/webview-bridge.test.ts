@@ -230,4 +230,66 @@ describe("connectWebview", () => {
 
 		expect(posted.length).toBe(afterReady); // nothing new posted post-dispose
 	});
+
+	it("posts the current review state on ready (so review survives reload)", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		vi.spyOn(controller, "getReviewState").mockReturnValue({
+			enabled: true,
+			files: [{ path: "src/a.ts", status: "modified", hunkCount: 2 }],
+		});
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+
+		const review = posted.find((m) => m.type === "review") as Extract<HostToWebview, { type: "review" }> | undefined;
+		expect(review).toBeDefined();
+		expect(review?.review).toEqual({
+			enabled: true,
+			files: [{ path: "src/a.ts", status: "modified", hunkCount: 2 }],
+		});
+	});
+
+	it("forwards a review update as a review message when live", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+		const before = posted.filter((m) => m.type === "review").length;
+
+		(controller as any).emit({
+			kind: "review",
+			review: { enabled: true, files: [{ path: "x.ts", status: "added", hunkCount: 1 }] },
+		});
+
+		const reviews = posted.filter((m) => m.type === "review") as Array<Extract<HostToWebview, { type: "review" }>>;
+		expect(reviews.length).toBe(before + 1);
+		expect(reviews.at(-1)?.review.files).toEqual([{ path: "x.ts", status: "added", hunkCount: 1 }]);
+	});
+
+	it("re-posts review state on a resync update", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+		const before = posted.filter((m) => m.type === "review").length;
+
+		await controller.submit("/new");
+		const after = posted.filter((m) => m.type === "review").length;
+		expect(after).toBeGreaterThan(before);
+	});
+
+	it("routes a review-open-diff message to the controller", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const openDiff = vi.spyOn(controller, "reviewOpenDiff").mockResolvedValue();
+		const { webview, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+
+		send({ type: "review-open-diff", path: "src/a.ts" });
+		expect(openDiff).toHaveBeenCalledWith("src/a.ts");
+	});
 });
