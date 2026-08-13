@@ -82,6 +82,22 @@ export interface ReviewStateDto {
 	files: ReviewFileDto[];
 }
 
+/** An editor selection tagged into the chat (Phase 4). Shown as a removable
+ * composer chip and folded into the next prompt as located context. */
+export interface TaggedContextDto {
+	/** Workspace-relative source path (forward slashes), or basename when the
+	 * file is outside the workspace. */
+	path: string;
+	/** 1-based inclusive start line of the selection. */
+	startLine: number;
+	/** 1-based inclusive end line of the selection. */
+	endLine: number;
+	/** Document language id, for the fenced block (may be empty). */
+	language: string;
+	/** The selected text, captured at tag time. */
+	text: string;
+}
+
 /** Messages sent from the host to the webview. */
 export type HostToWebview =
 	| { type: "snapshot"; state: TranscriptState; commands: SlashCommandDto[]; status: HostStatus }
@@ -89,12 +105,14 @@ export type HostToWebview =
 	| { type: "commands"; commands: SlashCommandDto[] }
 	| { type: "status"; status: HostStatus }
 	/** Change-review set changed (per-turn detection, accept/revert). */
-	| { type: "review"; review: ReviewStateDto };
+	| { type: "review"; review: ReviewStateDto }
+	/** An editor selection was tagged into the chat — add it as a composer chip. */
+	| { type: "tag-context"; context: TaggedContextDto };
 
 /** Messages sent from the webview to the host. */
 export type WebviewToHost =
 	| { type: "ready" }
-	| { type: "submit"; text: string }
+	| { type: "submit"; text: string; attachments?: TaggedContextDto[] }
 	| { type: "abort" }
 	| { type: "refresh-commands" }
 	| { type: "ui-response"; response: UiResponse }

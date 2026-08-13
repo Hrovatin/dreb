@@ -319,6 +319,47 @@ body {
 	align-items: flex-end;
 }
 
+.dreb-attachments {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-bottom: 8px;
+}
+.dreb-attachment {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 100%;
+	padding: 1px 4px 1px 8px;
+	font-size: 0.8em;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	background: var(--vscode-badge-background, rgba(128, 128, 128, 0.18));
+	color: var(--vscode-foreground);
+}
+.dreb-attachment-icon {
+	font-family: var(--vscode-editor-font-family, monospace);
+	opacity: 0.7;
+}
+.dreb-attachment-label {
+	font-family: var(--vscode-editor-font-family, monospace);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.dreb-attachment-remove {
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	padding: 0 2px;
+	font-size: 1.1em;
+	line-height: 1;
+}
+.dreb-attachment-remove:hover {
+	color: var(--vscode-foreground);
+}
+
 .dreb-input {
 	flex: 1;
 	resize: vertical;

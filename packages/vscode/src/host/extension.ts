@@ -16,6 +16,7 @@ import { resolveCliPath } from "./cli-path.js";
 import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
 import { SessionRegistry } from "./session-registry.js";
+import { tagSelectionToChat } from "./tag-selection.js";
 import { createVscodeHostUi } from "./vscode-host-ui.js";
 import { createVscodeReviewUi } from "./vscode-review-ui.js";
 import { connectWebview, getWebviewHtml } from "./webview-bridge.js";
@@ -44,12 +45,34 @@ const registry = new SessionRegistry<ChatSession>({
 export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand("dreb.openChat", () => {
-			registry
-				.open(() => createSession(context))
-				.catch((err) => {
-					vscode.window.showErrorMessage(`dreb: failed to open chat — ${errorText(err)}`);
-				});
+			void openChatOrNotify(context);
 		}),
+		vscode.commands.registerCommand("dreb.tagSelectionToChat", () =>
+			tagSelectionToChat({
+				captureSelection: () => {
+					const editor = vscode.window.activeTextEditor;
+					if (!editor || editor.selection.isEmpty) return undefined;
+					const { selection, document } = editor;
+					return {
+						fsPath: document.uri.fsPath,
+						startLine: selection.start.line + 1,
+						endLine: selection.end.line + 1,
+						language: document.languageId,
+						text: document.getText(selection),
+					};
+				},
+				openTarget: async () => {
+					const session = await openChatOrNotify(context);
+					if (!session) return undefined;
+					return {
+						cwd: session.controller.cwd,
+						tagContext: (ctx) => session.controller.tagContext(ctx),
+						reveal: () => session.panel.reveal(vscode.ViewColumn.Active),
+					};
+				},
+				onNoSelection: () => vscode.window.showInformationMessage("dreb: select some code to add to the chat."),
+			}),
+		),
 		vscode.commands.registerCommand("dreb.review.openDiff", (arg?: unknown) => {
 			const resolved = resolveReviewTarget(arg);
 			if (resolved) void resolved.controller.reviewOpenDiff(resolved.path);
@@ -108,6 +131,19 @@ function toRepoRelative(cwd: string, uri: vscode.Uri): string | undefined {
 
 export async function deactivate(): Promise<void> {
 	await registry.disposeActive();
+}
+
+/** Open (or reveal) the chat panel, surfacing any failure as an error message.
+ * Returns the live session, or undefined when opening failed. Shared by the
+ * `dreb.openChat` and `dreb.tagSelectionToChat` commands. */
+async function openChatOrNotify(context: vscode.ExtensionContext): Promise<ChatSession | undefined> {
+	try {
+		await registry.open(() => createSession(context));
+		return registry.active;
+	} catch (err) {
+		vscode.window.showErrorMessage(`dreb: failed to open chat — ${errorText(err)}`);
+		return undefined;
+	}
 }
 
 /** Build a fresh chat session: controller, webview panel, and transport wiring.
