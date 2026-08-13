@@ -13,7 +13,7 @@
  */
 
 import * as vscode from "vscode";
-import type { HostToWebview, WebviewToHost } from "../shared/protocol.js";
+import type { HostToWebview, TaggedContextDto, WebviewToHost } from "../shared/protocol.js";
 import type { SessionController } from "./session-controller.js";
 
 /** Build the webview HTML shell referencing the vite-built assets. */
@@ -48,6 +48,10 @@ export function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri
 /** Wire a controller to a webview. Returns a disposable that tears down both. */
 export function connectWebview(webview: vscode.Webview, controller: SessionController): vscode.Disposable {
 	let live = false;
+	// Selections tagged before the webview announced `ready` (e.g. tagging into a
+	// freshly opened chat) — buffered here and flushed once live so they aren't
+	// dropped by the pre-ready gate.
+	const pendingTags: TaggedContextDto[] = [];
 	const post = (message: HostToWebview): void => {
 		void webview.postMessage(message);
 	};
@@ -56,6 +60,14 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 	};
 
 	const unsubscribe = controller.onUpdate((update) => {
+		// Tagged selections are buffered before `ready` (unlike streamed events,
+		// which the snapshot already captures), so handle them ahead of the
+		// pre-ready gate below.
+		if (update.kind === "tag-context") {
+			if (live) post({ type: "tag-context", context: update.context });
+			else pendingTags.push(update.context);
+			return;
+		}
 		if (!live) return;
 		switch (update.kind) {
 			case "event":
@@ -97,11 +109,13 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				});
 				live = true;
 				post({ type: "review", review: controller.getReviewState() });
+				// Deliver any selections tagged before the webview was live.
+				for (const context of pendingTags.splice(0)) post({ type: "tag-context", context });
 				pushCommands();
 				return;
 			}
 			case "submit":
-				void controller.submit(raw.text);
+				void controller.submit(raw.text, raw.attachments);
 				return;
 			case "abort":
 				void controller.abort();

@@ -170,10 +170,58 @@ describe("connectWebview", () => {
 		send({ type: "ui-response", response: { id: "u1", confirmed: true } });
 		send({ type: "refresh-commands" });
 
-		expect(submit).toHaveBeenCalledWith("hi there");
+		expect(submit).toHaveBeenCalledWith("hi there", undefined);
 		expect(abort).toHaveBeenCalledTimes(1);
 		expect(respondUi).toHaveBeenCalledWith({ id: "u1", confirmed: true });
 		expect(refresh).toHaveBeenCalled();
+	});
+
+	it("forwards submit attachments to the controller", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const submit = vi.spyOn(controller, "submit").mockResolvedValue();
+		const { webview, send } = makeWebview();
+		connectWebview(webview as any, controller);
+
+		const attachments = [{ path: "a.ts", startLine: 1, endLine: 2, language: "ts", text: "A" }];
+		send({ type: "submit", text: "explain", attachments });
+		expect(submit).toHaveBeenCalledWith("explain", attachments);
+	});
+
+	it("forwards a live tag-context update as a tag-context message", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+
+		const context = { path: "src/a.ts", startLine: 3, endLine: 5, language: "ts", text: "x" };
+		controller.tagContext(context);
+
+		const tags = posted.filter((m) => m.type === "tag-context") as Array<
+			Extract<HostToWebview, { type: "tag-context" }>
+		>;
+		expect(tags).toHaveLength(1);
+		expect(tags[0].context).toEqual(context);
+	});
+
+	it("buffers a tag-context tagged before ready and flushes it once live", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+
+		// Tag BEFORE the webview announces ready (e.g. tagging into a fresh chat).
+		const context = { path: "src/a.ts", startLine: 1, endLine: 1, language: "ts", text: "x" };
+		controller.tagContext(context);
+		expect(posted.filter((m) => m.type === "tag-context")).toHaveLength(0);
+
+		send({ type: "ready" });
+		const tags = posted.filter((m) => m.type === "tag-context") as Array<
+			Extract<HostToWebview, { type: "tag-context" }>
+		>;
+		expect(tags).toHaveLength(1);
+		expect(tags[0].context).toEqual(context);
 	});
 
 	it("routes pick-model / pick-thinking messages to the controller", async () => {
