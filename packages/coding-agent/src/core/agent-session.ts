@@ -146,6 +146,28 @@ You are in a read-only exploration/brainstorming mode. You CANNOT modify files o
 - This is NOT a formal planning mode; do not produce a persisted plan document unless explicitly asked.
 - If the user wants to implement changes or run arbitrary shell commands, tell them to turn this off with \`/ask off\`.`;
 
+/**
+ * Transition system-reminders injected into the message stream when Ask mode
+ * flips, symmetric in both directions (opencode's "build-switch" pattern). The
+ * steady-state ASK_MODE_SYSTEM_PROMPT persona carries the durable rules; these
+ * mark the *edge* with a high-salience, positively-stated assertion of the new
+ * state placed next to the latest turn — so the model never has to infer its
+ * mode from the absence of a marker, and anchors to its tool list as ground truth.
+ */
+const ASK_MODE_ENTER_REMINDER =
+	"<system-reminder>\n" +
+	"Your operational mode just changed to read-only Ask mode. The edit, write, and " +
+	"bash tools have been REMOVED from your available tools — your tool list is the " +
+	"ground truth for what you can do. You are read-only: investigate, explain, and " +
+	"brainstorm, but describe changes instead of applying them. Turn this off with " +
+	"/ask off to make changes.\n</system-reminder>";
+
+const ASK_MODE_EXIT_REMINDER =
+	"<system-reminder>\n" +
+	"Read-only Ask mode is now OFF. You are no longer read-only — the edit, write, and " +
+	"bash tools are back in your available tools and permitted. Proceed normally; act " +
+	"on requests rather than only describing them.\n</system-reminder>";
+
 // ============================================================================
 // Skill Block Parsing
 // ============================================================================
@@ -1503,6 +1525,14 @@ export class AgentSession {
 	}
 
 	/**
+	 * Snapshot of messages queued for delivery alongside the next user prompt
+	 * (context-only injections such as Ask-mode transition reminders). Read-only.
+	 */
+	get pendingNextTurnMessages(): readonly CustomMessage[] {
+		return [...this._pendingNextTurnMessages];
+	}
+
+	/**
 	 * Enable read-only Ask mode: snapshot the current active tools, then scope the
 	 * active set to read-only tools (dropping edit/write/bash, keeping the typed
 	 * `git` tool and `subagent`, which is separately scoped to read-only agents).
@@ -1517,6 +1547,7 @@ export class AgentSession {
 		this._askModeEnabled = true;
 		// setActiveToolsByName triggers _rebuildSystemPrompt, which now injects the persona.
 		this.setActiveToolsByName(scoped);
+		this.emitAskModeTransition(ASK_MODE_ENTER_REMINDER);
 	}
 
 	/**
@@ -1530,6 +1561,29 @@ export class AgentSession {
 		this._askModePreviousToolNames = null;
 		this._askModeEnabled = false;
 		this.setActiveToolsByName(restore);
+		this.emitAskModeTransition(ASK_MODE_EXIT_REMINDER);
+	}
+
+	/**
+	 * Inject a read-only Ask mode transition reminder into the message stream.
+	 * Symmetric — fired on both enable and disable so the model always sees a
+	 * positive assertion of the resulting mode next to the latest turn (mirrors
+	 * opencode's build-switch reminder). Delivered as context-only (`display:
+	 * false`); the TUI surfaces the mode change separately via the /ask command.
+	 */
+	private emitAskModeTransition(reminder: string): void {
+		const message: CustomMessage = {
+			role: "custom",
+			customType: "ask_mode_transition",
+			content: reminder,
+			display: false,
+			timestamp: Date.now(),
+		};
+		if (this.isStreaming) {
+			this.agent.steer(message);
+		} else {
+			this._pendingNextTurnMessages.push(message);
+		}
 	}
 
 	/** Set Ask mode on/off. Returns the resulting state. */
