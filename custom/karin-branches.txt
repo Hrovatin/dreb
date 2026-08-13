@@ -15,3 +15,4 @@ feature/issue-13-vscode-foundation-chat
 feature/issue-10-ask-mode
 feature/issue-1-architecture-section-push-comments
 feature/issue-6-mach6mini-skills
+feature/focused-system-prompt                      # PR #19 — more focused default system prompt
