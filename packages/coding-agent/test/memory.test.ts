@@ -261,6 +261,17 @@ describe("getMemoryInstructions", () => {
 		});
 		expect(instructions).toContain(".dreb/CONTEXT.md");
 	});
+
+	test("frames saving as opt-in restraint while preserving explicit-save line", () => {
+		const instructions = getMemoryInstructions({
+			globalMemoryDir: "/home/user/.dreb/memory",
+			projectMemoryDir: "/project/.dreb/memory",
+		});
+		expect(instructions).toContain("Memory is available but not a default action");
+		expect(instructions).toContain("don't interrupt task work to record something");
+		expect(instructions).toContain("If the user explicitly asks you to remember something, save it immediately.");
+		expect(instructions).not.toContain("When you learn about the user's role");
+	});
 });
 
 describe("encodeClaudeProjectPath", () => {
