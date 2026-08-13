@@ -100,11 +100,12 @@ export function createTasksToolDefinition(
 		promptSnippet: "Create or update session task list for multi-step work",
 
 		promptGuidelines: [
-			"For work requiring 3 or more steps, use tasks_update to organize your plan and show progress",
+			"For genuinely multi-step work, use tasks_update to organize your plan and show progress; skip it for simple one- or two-step tasks",
 			"Send the complete task list each time (full replacement, not a patch)",
 			"At most one task can be in_progress at a time",
 			"Keep task lists concise: typically 3-10 items. Never exceed 20 tasks.",
 			'Use short, action-oriented titles (e.g. "Read existing tests", "Fix auth handler")',
+			"Don't add tasks mid-run that go beyond the agreed scope of the work",
 		],
 
 		async execute(_toolCallId, { tasks }: TasksToolInput, _signal?, _onUpdate?, _ctx?) {
