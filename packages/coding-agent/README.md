@@ -177,7 +177,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from the current branch |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
-| `/ask [on\|off]` | Toggle read-only Ask mode — no edits/writes, `bash`/shell disabled (use the read-only tools + the typed `git` tool), `subagent` limited to read-only agent types. Bare `/ask` shows current state. See [Read-only Ask mode](#read-only-ask-mode) |
+| `/ask [on\|off\|status]` | Toggle read-only Ask mode — no edits/writes, `bash`/shell disabled (use the read-only tools + the typed `git` tool), `subagent` limited to read-only agent types. Bare `/ask` toggles the mode; `/ask status` shows current state. See [Read-only Ask mode](#read-only-ask-mode) |
 | `/copy` | Open multi-select message picker to copy any messages to clipboard. Assistant reasoning is excluded by default and offered as a separate, selectable `Thinking` row. |
 | `/dream` | Consolidate and prune memories — backs up, merges duplicates, scans sessions for patterns |
 | `/export [file]` | Export session to HTML file |
@@ -260,7 +260,7 @@ Compaction is lossy. The full history remains in the JSONL file; use `/tree` to 
 
 ### Read-only Ask mode
 
-`/ask on` puts the current session into a **read-only Ask mode** for questions, code understanding, and brainstorming — without any risk of modifying your project. `/ask off` returns to normal. A bare `/ask` reports the current state, and the footer status line shows an `ASK` indicator while it's active. The mode is per-session and defaults to off.
+`/ask on` puts the current session into a **read-only Ask mode** for questions, code understanding, and brainstorming — without any risk of modifying your project. `/ask off` returns to normal. A bare `/ask` toggles between the two, `/ask status` reports the current state, and the footer status line shows an `ASK` indicator while it's active. The mode is per-session and defaults to off.
 
 While Ask mode is on:
 

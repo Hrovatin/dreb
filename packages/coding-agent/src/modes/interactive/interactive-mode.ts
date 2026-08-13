@@ -5399,12 +5399,17 @@ ${cycleModelForward || cycleModelBackward ? `| \`${cycleModelForward}\` / \`${cy
 			enable = true;
 		} else if (arg === "off") {
 			enable = false;
-		} else if (arg === "" || arg === "status") {
-			// Bare `/ask` reports current state without changing it.
+		} else if (arg === "") {
+			// Bare `/ask` toggles the current state.
+			enable = !this.session.askModeEnabled;
+		} else if (arg === "status") {
+			// `/ask status` reports current state without changing it.
 			this.showWarning(`Read-only Ask mode is currently ${this.session.askModeEnabled ? "ON" : "OFF"}.`);
 			return;
 		} else {
-			this.showWarning(`Usage: /ask on | /ask off (currently ${this.session.askModeEnabled ? "ON" : "OFF"}).`);
+			this.showWarning(
+				`Usage: /ask [on | off | status] (bare /ask toggles; currently ${this.session.askModeEnabled ? "ON" : "OFF"}).`,
+			);
 			return;
 		}
 
