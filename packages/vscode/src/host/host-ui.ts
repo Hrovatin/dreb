@@ -16,6 +16,14 @@ export interface HostUiPickItem {
 	value: string;
 }
 
+/** A file or folder chosen via the native workspace picker (`@` context tag). */
+export interface PickedFile {
+	/** Absolute filesystem path. */
+	fsPath: string;
+	/** True when the picked path is a directory. */
+	isDirectory: boolean;
+}
+
 export interface HostUi {
 	/** Show a quick pick; resolves to the chosen item's `value`, or undefined if dismissed. */
 	quickPick(items: HostUiPickItem[], options?: { placeholder?: string }): Promise<string | undefined>;
@@ -25,6 +33,9 @@ export interface HostUi {
 	saveDialog(options?: { defaultName?: string; filters?: Record<string, string[]> }): Promise<string | undefined>;
 	/** Show an open dialog (single file); resolves to the chosen path, or undefined. */
 	openDialog(options?: { filters?: Record<string, string[]> }): Promise<string | undefined>;
+	/** Show the native file/folder picker (multi-select) for tagging context;
+	 * resolves to the chosen files/folders, or undefined if dismissed. */
+	pickWorkspaceFiles(): Promise<PickedFile[] | undefined>;
 }
 
 /** No-op HostUi: every prompt resolves to undefined (as if dismissed). Used as
@@ -41,6 +52,9 @@ export const noopHostUi: HostUi = {
 		return undefined;
 	},
 	async openDialog() {
+		return undefined;
+	},
+	async pickWorkspaceFiles() {
 		return undefined;
 	},
 };
