@@ -1,0 +1,17 @@
+# karin integration manifest
+# ---------------------------------------------------------------------------
+# karin = master + these component branches, merged in the listed order.
+# karin is a BRANCH, never a worktree (see rebuild-karin.sh).
+#
+# Rebuild:  ./rebuild-karin.sh
+# Push:     git push --force-with-lease Hrovatin karin
+#
+# Blank lines and #-comments are ignored; inline "# ..." comments are stripped.
+# ---------------------------------------------------------------------------
+
+feature/issue-439-fork-from-current-state
+worktree-cleaned                                   # consolidates #233 worktree isolation + #4 parallel-mode + #8 test coverage
+feature/issue-13-vscode-foundation-chat
+feature/issue-10-ask-mode
+feature/issue-1-architecture-section-push-comments
+feature/issue-6-mach6mini-skills
