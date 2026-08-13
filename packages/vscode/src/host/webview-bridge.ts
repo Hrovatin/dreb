@@ -67,6 +67,9 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 			case "commands":
 				post({ type: "commands", commands: update.commands });
 				break;
+			case "review":
+				post({ type: "review", review: update.review });
+				break;
 			case "resync":
 				// Transcript was replaced host-side (/new, /import) — re-snapshot.
 				post({
@@ -75,6 +78,7 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 					commands: controller.getCommandList(),
 					status: controller.getStatus(),
 				});
+				post({ type: "review", review: controller.getReviewState() });
 				break;
 		}
 	});
@@ -92,6 +96,7 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 					status: controller.getStatus(),
 				});
 				live = true;
+				post({ type: "review", review: controller.getReviewState() });
 				pushCommands();
 				return;
 			}
@@ -109,6 +114,9 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				return;
 			case "pick-thinking":
 				void controller.pickThinking();
+				return;
+			case "review-open-diff":
+				void controller.reviewOpenDiff(raw.path);
 				return;
 			case "ui-response":
 				controller.respondUi(raw.response);
