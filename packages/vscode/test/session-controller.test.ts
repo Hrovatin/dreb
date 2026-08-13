@@ -346,6 +346,37 @@ describe("SessionController", () => {
 		expect(fake.prompts).toEqual(["`src/a.ts` (lines 5-7):\n```typescript\nconst y = 2;\n```\n\nexplain this"]);
 	});
 
+	it("sends the folded context for an attachment-only submit (empty text)", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		// The composer allows sending with only chips and no typed text; the
+		// context must still reach the agent rather than being silently dropped.
+		await controller.submit("", [
+			{ path: "src/a.ts", startLine: 5, endLine: 5, language: "typescript", text: "const y = 2;" },
+		]);
+		await controller.submit("   ", [
+			{ path: "src/b.ts", startLine: 1, endLine: 2, language: "typescript", text: "B" },
+		]);
+
+		expect(fake.prompts).toEqual([
+			"`src/a.ts` (line 5):\n```typescript\nconst y = 2;\n```",
+			"`src/b.ts` (lines 1-2):\n```typescript\nB\n```",
+		]);
+	});
+
+	it("does not prompt on a truly empty submit (no text, no attachments)", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("");
+		await controller.submit("   ", []);
+
+		expect(fake.prompts).toHaveLength(0);
+	});
+
 	it("ignores attachments for a slash builtin (only prompts get context)", async () => {
 		const fake = new FakeClient();
 		const controller = makeController(fake);

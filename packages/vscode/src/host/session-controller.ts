@@ -320,9 +320,17 @@ export class SessionController {
 			return;
 		}
 		const decision = routeInput(text, this.commands);
-		if (decision.kind === "empty") return;
+		// An attachment-only submit (chips attached, no typed text) is deliberately
+		// allowed by the composer; with no attachments there is genuinely nothing
+		// to send, so short-circuit only then.
+		if (decision.kind === "empty" && (!attachments || attachments.length === 0)) return;
 		try {
 			switch (decision.kind) {
+				case "empty":
+					// Reached only with attachments present (see guard above): send the
+					// folded context so a chips-only submit isn't silently dropped.
+					await this.client.prompt(buildPromptWithContext(text, attachments));
+					return;
 				case "prompt":
 					// Fold any tagged editor selections into the prompt as located
 					// context (attachments only apply to prompts, not slash builtins).
