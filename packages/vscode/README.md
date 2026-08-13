@@ -4,7 +4,7 @@ A native chat client for the [dreb](https://github.com/aebrer/dreb) coding agent
 
 This package is modeled on `@dreb/dashboard`: an extension **host** owns the RPC child and the authoritative transcript state, and a **webview** renders it. The only transport difference is that the dashboard's HTTP+SSE layer is replaced by VS Code's `postMessage` bridge.
 
-> Status: **Phase 4** (editor context tagging — tag a selection into the current chat) on top of Phase 3 (change review — per-turn git snapshot + per-hunk keep/reject), Phase 2 (built-in slash commands + TUI-parity status header), and the Phase 0 + 1 foundation. See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
+> Status: **Phase 4b** (context tagging — tag an editor selection or a file/folder into the current chat) on top of Phase 3 (change review — per-turn git snapshot + per-hunk keep/reject), Phase 2 (built-in slash commands + TUI-parity status header), and the Phase 0 + 1 foundation. See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
 
 ## Architecture
 
@@ -30,7 +30,7 @@ src/
     vscode-review-ui.ts the real `ReviewUi` backed by `vscode.scm`
   shared/
     format.ts           status-header + `/session` display formatters (pure, tested)
-    tagged-context.ts   editor-selection context DTO + chip label + prompt fold (pure, tested)
+    tagged-context.ts   selection + file/folder context DTOs, chip label, prompt fold + threshold (pure, tested)
   webview/       # SolidJS UI — bundled with Vite → dist/webview
     app.tsx             transcript, collapsible activity box, composer, needs-input,
                         the status header (model · thinking · cost · ctx), and the
@@ -76,9 +76,15 @@ Review is host-authoritative, so it survives webview reload. Outside a git repos
 
 ## Editor integration
 
-Tag a code selection into the chat as removable context. Select any range (a whole line or part of one) and run **dreb: Add Selection to Chat** — from the command palette or the editor right-click menu (shown only when there is a selection, `when: editorHasSelection`). The selection is added to the composer as a **removable chip** labelled `basename:line` (or `basename:start-end`); multiple selections accumulate. On send, each chip is folded into the prompt as a located, fenced code block (workspace-relative path + line range) so the agent knows exactly where the code came from — dreb's agent accepts text + images only, so there is no separate structured-context channel. Sending with only chips and no typed text is allowed. Tagging with no chat open opens one first, then attaches.
+Tag context into the chat as removable chips. Two kinds of context can be tagged, and both accumulate as chips in the composer that you can remove before sending:
 
-The selection is captured **at tag time** (a pre-resolved snapshot, not a lazy reference). The orchestration lives in the vscode-free, unit-tested `host/tag-selection.ts`; the DTO builder, chip label, and prompt formatter are pure functions in `shared/tagged-context.ts`; delivery to the composer is queued until the webview is `ready` so tagging into a freshly opened chat still lands.
+**Editor selection.** Select any range (a whole line or part of one) and run **dreb: Add Selection to Chat** — from the command palette or the editor right-click menu (shown only when there is a selection, `when: editorHasSelection`). The selection is added as a **removable chip** labelled `basename:line` (or `basename:start-end`). On send, a small selection is folded into the prompt as a located, fenced code block (workspace-relative path + line range) so the agent knows exactly where the code came from. A **large** selection (over `MAX_INLINE_SELECTION_LINES` = 40 lines, or `MAX_INLINE_SELECTION_CHARS` = 2000 characters) instead folds as a `` `path` (lines a-b) `` reference only, to keep the prompt short. The selection is captured **at tag time** (a pre-resolved snapshot, not a lazy reference).
+
+**File / folder.** Type `@` in the composer to open the native VS Code file/folder picker (`showOpenDialog` with files and folders selectable, multi-select). Each chosen path is added as a **removable chip** (`basename`, or `basename/` for a folder). On send, a file/folder tag folds into the prompt as a **path reference only — never the contents** (e.g. `` `src/app.ts` `` or `` `src/host/` (directory) ``), so the agent can open and explore it as needed without bloating the prompt.
+
+dreb's agent accepts text + images only, so there is no separate structured-context channel: all tags are folded into the prompt text. Sending with only chips and no typed text is allowed. Tagging with no chat open opens one first, then attaches.
+
+The pure DTO builders, chip label/title, threshold logic, and prompt formatter are unit-tested in `shared/tagged-context.ts`; the selection command orchestration lives in the vscode-free `host/tag-selection.ts`; the file picker is driven through the `HostUi` port (`pickWorkspaceFiles`), so the controller stays vscode-free. Delivery to the composer is queued until the webview is `ready` so tagging into a freshly opened chat still lands.
 
 
 ## Requirements

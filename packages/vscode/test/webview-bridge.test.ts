@@ -183,7 +183,9 @@ describe("connectWebview", () => {
 		const { webview, send } = makeWebview();
 		connectWebview(webview as any, controller);
 
-		const attachments = [{ path: "a.ts", startLine: 1, endLine: 2, language: "ts", text: "A" }];
+		const attachments = [
+			{ kind: "selection" as const, path: "a.ts", startLine: 1, endLine: 2, language: "ts", text: "A" },
+		];
 		send({ type: "submit", text: "explain", attachments });
 		expect(submit).toHaveBeenCalledWith("explain", attachments);
 	});
@@ -195,7 +197,14 @@ describe("connectWebview", () => {
 		connectWebview(webview as any, controller);
 		send({ type: "ready" });
 
-		const context = { path: "src/a.ts", startLine: 3, endLine: 5, language: "ts", text: "x" };
+		const context = {
+			kind: "selection" as const,
+			path: "src/a.ts",
+			startLine: 3,
+			endLine: 5,
+			language: "ts",
+			text: "x",
+		};
 		controller.tagContext(context);
 
 		const tags = posted.filter((m) => m.type === "tag-context") as Array<
@@ -212,7 +221,14 @@ describe("connectWebview", () => {
 		connectWebview(webview as any, controller);
 
 		// Tag BEFORE the webview announces ready (e.g. tagging into a fresh chat).
-		const context = { path: "src/a.ts", startLine: 1, endLine: 1, language: "ts", text: "x" };
+		const context = {
+			kind: "selection" as const,
+			path: "src/a.ts",
+			startLine: 1,
+			endLine: 1,
+			language: "ts",
+			text: "x",
+		};
 		controller.tagContext(context);
 		expect(posted.filter((m) => m.type === "tag-context")).toHaveLength(0);
 
@@ -238,6 +254,19 @@ describe("connectWebview", () => {
 
 		expect(pickModel).toHaveBeenCalledTimes(1);
 		expect(pickThinking).toHaveBeenCalledTimes(1);
+	});
+
+	it("routes a pick-file message to the controller", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const tagFileFromPicker = vi.spyOn(controller, "tagFileFromPicker").mockResolvedValue();
+
+		const { webview, send } = makeWebview();
+		connectWebview(webview as any, controller);
+
+		send({ type: "pick-file" });
+
+		expect(tagFileFromPicker).toHaveBeenCalledTimes(1);
 	});
 
 	it("forwards a commands update as a commands message", async () => {
