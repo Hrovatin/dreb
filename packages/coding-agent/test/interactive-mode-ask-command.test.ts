@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 /**
- * Unit tests for InteractiveMode.handleAskCommand — the `/ask on|off|status`
- * dispatch. Uses the `fakeThis` prototype-call pattern (see
+ * Unit tests for InteractiveMode.handleAskCommand — the `/ask [on|off|status]`
+ * dispatch (bare `/ask` toggles). Uses the `fakeThis` prototype-call pattern (see
  * interactive-mode-status.test.ts) so the method is exercised without building
  * the full TUI.
  */
@@ -57,13 +57,29 @@ describe("InteractiveMode.handleAskCommand", () => {
 		expect(warnings.join("\n")).toContain("Ask mode OFF");
 	});
 
-	it("bare /ask and /ask status report state without changing it", () => {
-		for (const arg of ["", "status"]) {
-			const { fakeThis, session, warnings } = makeFakeThis(true);
-			dispatch(fakeThis, arg);
-			expect(session.setAskMode).not.toHaveBeenCalled();
-			expect(warnings.join("\n")).toContain("currently ON");
-		}
+	it("bare /ask toggles the current state", () => {
+		// Starting ON → bare /ask turns it OFF.
+		const off = makeFakeThis(true);
+		dispatch(off.fakeThis, "");
+		expect(off.session.setAskMode).toHaveBeenCalledWith(false);
+		expect(off.state.askModeEnabled).toBe(false);
+		expect(off.footer.setAskModeEnabled).toHaveBeenCalledWith(false);
+		expect(off.warnings.join("\n")).toContain("Ask mode OFF");
+
+		// Starting OFF → bare /ask turns it ON.
+		const on = makeFakeThis(false);
+		dispatch(on.fakeThis, "");
+		expect(on.session.setAskMode).toHaveBeenCalledWith(true);
+		expect(on.state.askModeEnabled).toBe(true);
+		expect(on.footer.setAskModeEnabled).toHaveBeenCalledWith(true);
+		expect(on.warnings.join("\n")).toContain("Ask mode ON");
+	});
+
+	it("/ask status reports state without changing it", () => {
+		const { fakeThis, session, warnings } = makeFakeThis(true);
+		dispatch(fakeThis, "status");
+		expect(session.setAskMode).not.toHaveBeenCalled();
+		expect(warnings.join("\n")).toContain("currently ON");
 	});
 
 	it("is a no-op when already in the requested state", () => {
@@ -78,6 +94,6 @@ describe("InteractiveMode.handleAskCommand", () => {
 		const { fakeThis, session, warnings } = makeFakeThis(false);
 		dispatch(fakeThis, "maybe");
 		expect(session.setAskMode).not.toHaveBeenCalled();
-		expect(warnings.join("\n")).toContain("Usage: /ask on | /ask off");
+		expect(warnings.join("\n")).toContain("Usage: /ask [on | off | status]");
 	});
 });
