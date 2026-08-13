@@ -129,6 +129,9 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 			case "pick-thinking":
 				void controller.pickThinking();
 				return;
+			case "pick-file":
+				void controller.tagFileFromPicker();
+				return;
 			case "review-open-diff":
 				void controller.reviewOpenDiff(raw.path);
 				return;

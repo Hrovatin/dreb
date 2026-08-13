@@ -177,6 +177,8 @@ class FakeUi implements HostUi {
 	inputReturn: string | undefined;
 	saveReturn: string | undefined;
 	openReturn: string | undefined;
+	filesReturn: Array<{ fsPath: string; isDirectory: boolean }> | undefined;
+	filesCalls = 0;
 	async quickPick(items: HostUiPickItem[]): Promise<string | undefined> {
 		this.pickItems = items;
 		return this.pickReturn;
@@ -189,6 +191,10 @@ class FakeUi implements HostUi {
 	}
 	async openDialog(): Promise<string | undefined> {
 		return this.openReturn;
+	}
+	async pickWorkspaceFiles(): Promise<Array<{ fsPath: string; isDirectory: boolean }> | undefined> {
+		this.filesCalls += 1;
+		return this.filesReturn;
 	}
 }
 
@@ -340,7 +346,14 @@ describe("SessionController", () => {
 		await controller.start();
 
 		await controller.submit("explain this", [
-			{ path: "src/a.ts", startLine: 5, endLine: 7, language: "typescript", text: "const y = 2;" },
+			{
+				kind: "selection",
+				path: "src/a.ts",
+				startLine: 5,
+				endLine: 7,
+				language: "typescript",
+				text: "const y = 2;",
+			},
 		]);
 
 		expect(fake.prompts).toEqual(["`src/a.ts` (lines 5-7):\n```typescript\nconst y = 2;\n```\n\nexplain this"]);
@@ -354,10 +367,17 @@ describe("SessionController", () => {
 		// The composer allows sending with only chips and no typed text; the
 		// context must still reach the agent rather than being silently dropped.
 		await controller.submit("", [
-			{ path: "src/a.ts", startLine: 5, endLine: 5, language: "typescript", text: "const y = 2;" },
+			{
+				kind: "selection",
+				path: "src/a.ts",
+				startLine: 5,
+				endLine: 5,
+				language: "typescript",
+				text: "const y = 2;",
+			},
 		]);
 		await controller.submit("   ", [
-			{ path: "src/b.ts", startLine: 1, endLine: 2, language: "typescript", text: "B" },
+			{ kind: "selection", path: "src/b.ts", startLine: 1, endLine: 2, language: "typescript", text: "B" },
 		]);
 
 		expect(fake.prompts).toEqual([
@@ -382,7 +402,9 @@ describe("SessionController", () => {
 		const controller = makeController(fake);
 		await controller.start();
 
-		await controller.submit("/compact tidy", [{ path: "a.ts", startLine: 1, endLine: 1, language: "ts", text: "x" }]);
+		await controller.submit("/compact tidy", [
+			{ kind: "selection", path: "a.ts", startLine: 1, endLine: 1, language: "ts", text: "x" },
+		]);
 
 		expect(fake.prompts).toHaveLength(0);
 		expect(fake.compactions).toEqual(["tidy"]);
@@ -395,13 +417,69 @@ describe("SessionController", () => {
 
 		const updates: Array<{ kind: string }> = [];
 		controller.onUpdate((u) => updates.push(u));
-		const context = { path: "src/a.ts", startLine: 3, endLine: 5, language: "ts", text: "x" };
+		const context = {
+			kind: "selection" as const,
+			path: "src/a.ts",
+			startLine: 3,
+			endLine: 5,
+			language: "ts",
+			text: "x",
+		};
 		controller.tagContext(context);
 
 		const tag = updates.find((u) => u.kind === "tag-context") as
 			| { kind: "tag-context"; context: unknown }
 			| undefined;
 		expect(tag?.context).toEqual(context);
+	});
+
+	it("tagFileFromPicker tags each picked file/folder as a path-reference chip", async () => {
+		const fake = new FakeClient();
+		const ui = new FakeUi();
+		ui.filesReturn = [
+			{ fsPath: "/tmp/project/src/app.ts", isDirectory: false },
+			{ fsPath: "/tmp/project/src/host", isDirectory: true },
+		];
+		const controller = makeController(fake, { ui });
+		await controller.start();
+
+		const updates: Array<{ kind: string; context?: unknown }> = [];
+		controller.onUpdate((u) => updates.push(u));
+		await controller.tagFileFromPicker();
+
+		const tags = updates.filter((u) => u.kind === "tag-context").map((u) => u.context);
+		expect(tags).toEqual([
+			{ kind: "file", path: "src/app.ts" },
+			{ kind: "file", path: "src/host", isDirectory: true },
+		]);
+	});
+
+	it("tagFileFromPicker no-ops when the picker is dismissed", async () => {
+		const fake = new FakeClient();
+		const ui = new FakeUi();
+		ui.filesReturn = undefined; // dismissed
+		const controller = makeController(fake, { ui });
+		await controller.start();
+
+		const updates: Array<{ kind: string }> = [];
+		controller.onUpdate((u) => updates.push(u));
+		await controller.tagFileFromPicker();
+
+		expect(ui.filesCalls).toBe(1);
+		expect(updates.some((u) => u.kind === "tag-context")).toBe(false);
+	});
+
+	it("folds a file tag into the prompt as a path reference with no contents", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("what does this do?", [
+			{ kind: "file", path: "src/app.ts" },
+			{ kind: "file", path: "src", isDirectory: true },
+		]);
+
+		expect(fake.prompts).toEqual(["`src/app.ts`\n\n`src/` (directory)\n\nwhat does this do?"]);
 	});
 
 	it("forwards registered agent commands through prompt", async () => {

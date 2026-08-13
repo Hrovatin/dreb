@@ -83,8 +83,10 @@ export interface ReviewStateDto {
 }
 
 /** An editor selection tagged into the chat (Phase 4). Shown as a removable
- * composer chip and folded into the next prompt as located context. */
-export interface TaggedContextDto {
+ * composer chip and folded into the next prompt as located context — inlined as
+ * a fenced code block when small, or a path + line-span reference when large. */
+export interface SelectionContextDto {
+	kind: "selection";
 	/** Workspace-relative source path (forward slashes), or basename when the
 	 * file is outside the workspace. */
 	path: string;
@@ -97,6 +99,23 @@ export interface TaggedContextDto {
 	/** The selected text, captured at tag time. */
 	text: string;
 }
+
+/** A file or folder tagged into the chat (Phase 4b) via the `@` picker. Shown as
+ * a removable composer chip and folded into the next prompt as a **path
+ * reference only** (never the contents) so the agent can explore it as needed. */
+export interface FileContextDto {
+	kind: "file";
+	/** Workspace-relative path (forward slashes), or basename when outside the
+	 * workspace. */
+	path: string;
+	/** True when the tagged path is a directory. */
+	isDirectory?: boolean;
+}
+
+/** A context attachment tagged into the chat: an editor selection or a
+ * file/folder reference. Carried across the host↔webview boundary and folded
+ * into the next prompt. */
+export type TaggedContextDto = SelectionContextDto | FileContextDto;
 
 /** Messages sent from the host to the webview. */
 export type HostToWebview =
@@ -120,5 +139,7 @@ export type WebviewToHost =
 	| { type: "pick-model" }
 	/** Open the native thinking-level picker (header click). */
 	| { type: "pick-thinking" }
+	/** Open the native file/folder picker to tag context (composer `@`). */
+	| { type: "pick-file" }
 	/** Open the baseline→current diff for a reviewed file (indicator click). */
 	| { type: "review-open-diff"; path: string };
