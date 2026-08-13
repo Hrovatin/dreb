@@ -11,7 +11,7 @@ import {
 	type UiRequest,
 } from "../shared/projection.js";
 import type { HostStatus, ReviewStateDto, SlashCommandDto, TaggedContextDto, UiResponse } from "../shared/protocol.js";
-import { taggedContextLabel } from "../shared/tagged-context.js";
+import { taggedContextLabel, taggedContextTitle } from "../shared/tagged-context.js";
 import { renderMarkdown } from "./markdown.js";
 import { onHostMessage, postToHost } from "./vscode-api.js";
 
@@ -179,6 +179,7 @@ export function App() {
 					setAttachments([]);
 				}}
 				onAbort={() => postToHost({ type: "abort" })}
+				onPickFile={() => postToHost({ type: "pick-file" })}
 			/>
 		</div>
 	);
@@ -428,6 +429,7 @@ function Composer(props: {
 	onRemoveAttachment: (index: number) => void;
 	onSubmit: (text: string) => void;
 	onAbort: () => void;
+	onPickFile: () => void;
 }) {
 	const [text, setText] = createSignal("");
 
@@ -437,6 +439,17 @@ function Composer(props: {
 		const query = value.slice(1).toLowerCase();
 		return props.commands.filter((c) => c.name.toLowerCase().startsWith(query)).slice(0, 8);
 	});
+
+	// Typing a lone `@` opens the native file/folder picker (Phase 4b) rather than
+	// entering the character — mirroring the `/` command affordance.
+	const onInput = (value: string) => {
+		if (value === "@") {
+			setText("");
+			props.onPickFile();
+			return;
+		}
+		setText(value);
+	};
 
 	const submit = () => {
 		const value = text();
@@ -476,11 +489,8 @@ function Composer(props: {
 				<div class="dreb-attachments">
 					<For each={props.attachments}>
 						{(attachment, index) => (
-							<span
-								class="dreb-attachment"
-								title={`${attachment.path} (lines ${attachment.startLine}-${attachment.endLine})`}
-							>
-								<span class="dreb-attachment-icon">{"{}"}</span>
+							<span class="dreb-attachment" title={taggedContextTitle(attachment)}>
+								<span class="dreb-attachment-icon">{attachment.kind === "file" ? "@" : "{}"}</span>
 								<span class="dreb-attachment-label">{taggedContextLabel(attachment)}</span>
 								<button
 									type="button"
@@ -500,9 +510,9 @@ function Composer(props: {
 				<textarea
 					class="dreb-input"
 					rows={2}
-					placeholder="Message dreb…  (/ for commands)"
+					placeholder="Message dreb…  (/ for commands, @ for files)"
 					value={text()}
-					onInput={(e) => setText(e.currentTarget.value)}
+					onInput={(e) => onInput(e.currentTarget.value)}
 					onKeyDown={onKeyDown}
 				/>
 				<Show

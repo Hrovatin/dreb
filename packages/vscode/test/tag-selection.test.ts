@@ -49,7 +49,14 @@ describe("tagSelectionToChat", () => {
 		});
 
 		expect(tagged).toEqual([
-			{ path: "src/app.ts", startLine: 10, endLine: 12, language: "typescript", text: "const x = 1;" },
+			{
+				kind: "selection",
+				path: "src/app.ts",
+				startLine: 10,
+				endLine: 12,
+				language: "typescript",
+				text: "const x = 1;",
+			},
 		]);
 		expect(revealed()).toBe(1);
 	});
