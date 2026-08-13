@@ -8,6 +8,7 @@
 import { spawnSync } from "node:child_process";
 import {
 	existsSync,
+	linkSync,
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
@@ -277,6 +278,31 @@ describe("git-snapshot", () => {
 			expect(lstatSync(join(repo, "file.txt")).isSymbolicLink()).toBe(false);
 			expect(read(repo, "file.txt")).toEqual(lines());
 			// …and the outside file was NOT clobbered by writing through the link.
+			expect(readFileSync(outside, "utf-8")).toBe("OUTSIDE-DATA");
+		} finally {
+			rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not truncate a hard link's shared inode outside the repo", () => {
+		const base = captureTree(repo) as string;
+		const outsideDir = mkdtempSync(join(tmpdir(), "dreb-outside-"));
+		const outside = join(outsideDir, "victim.txt");
+		writeFileSync(outside, "OUTSIDE-DATA");
+		try {
+			// The agent's turn replaced the tracked file with a HARD LINK to that
+			// outside file. lstat reports it as a regular file (isFile() === true),
+			// so an in-place `writeFileSync` would truncate the shared inode and
+			// corrupt the outside file.
+			rmSync(join(repo, "file.txt"));
+			linkSync(outside, join(repo, "file.txt"));
+			expect(lstatSync(join(repo, "file.txt")).nlink).toBe(2);
+
+			expect(revertFile(repo, base, "file.txt")).toBe(true);
+			// The tracked path is a fresh, unshared regular file with baseline content…
+			expect(read(repo, "file.txt")).toEqual(lines());
+			expect(lstatSync(join(repo, "file.txt")).nlink).toBe(1);
+			// …and the outside file it used to share an inode with is untouched.
 			expect(readFileSync(outside, "utf-8")).toBe("OUTSIDE-DATA");
 		} finally {
 			rmSync(outsideDir, { recursive: true, force: true });
