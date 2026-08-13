@@ -7,6 +7,7 @@
 
 import { spawnSync } from "node:child_process";
 import {
+	chmodSync,
 	existsSync,
 	linkSync,
 	lstatSync,
@@ -307,6 +308,26 @@ describe("git-snapshot", () => {
 		} finally {
 			rmSync(outsideDir, { recursive: true, force: true });
 		}
+	});
+
+	it("preserves the mode bits (e.g. the exec bit) when reverting an ordinary file", () => {
+		const script = join(repo, "script.sh");
+		writeFileSync(script, "#!/bin/sh\necho hi\n");
+		chmodSync(script, 0o755);
+		git(["add", "script.sh"], repo);
+		git(["commit", "-m", "add script"], repo);
+		const base = captureTree(repo) as string;
+		// The agent edited only the script's content; the working-tree mode is
+		// unchanged (755) and the entry is an ordinary single-link regular file.
+		writeFileSync(script, "#!/bin/sh\necho AGENT\n");
+		expect(lstatSync(script).mode & 0o777).toBe(0o755);
+
+		expect(revertFile(repo, base, "script.sh")).toBe(true);
+		// Content is restored AND the exec bit is not silently stripped: an
+		// ordinary file must be overwritten in place, not unlinked-then-recreated
+		// (which would reset the mode to the umask default).
+		expect(readFileSync(script, "utf-8")).toBe("#!/bin/sh\necho hi\n");
+		expect(lstatSync(script).mode & 0o777).toBe(0o755);
 	});
 
 	it("revertFile removes a dangling symlink when reverting an agent-created path", () => {

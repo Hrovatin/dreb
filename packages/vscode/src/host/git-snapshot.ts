@@ -270,15 +270,15 @@ function lstatSafe(p: string): ReturnType<typeof lstatSync> | undefined {
  * (git error, non-blob, or truncated read) — a failed read must never be
  * mistaken for "absent from baseline" and trigger a destructive delete/truncate.
  *
- * The working-tree entry is inspected with `lstat` (never following symlinks)
- * and removed before we recreate it, so `writeFileSync` always creates a fresh
- * regular file rather than writing in place. This matters when the agent's turn
- * replaced the path with a symlink (whose `'w'` write would otherwise follow the
- * link and clobber its target — possibly a file outside the repository) or with
- * a hard link (an in-place `'w'` truncate would corrupt every other name sharing
- * that inode, again possibly outside the repository). In the "absent" branch we
- * likewise remove any lingering entry (including a broken symlink, which
- * `existsSync` would have mis-reported as already gone).
+ * The working-tree entry is inspected with `lstat` (never following symlinks).
+ * We remove it before recreating the file only when leaving it in place would
+ * be unsafe: a symlink (whose `'w'` write would follow the link and clobber its
+ * target — possibly a file outside the repository) or a hard link (`nlink > 1`,
+ * whose in-place `'w'` truncate would corrupt every other name sharing that
+ * inode, again possibly outside the repository). An ordinary, singly-linked
+ * regular file is overwritten in place so its mode bits (e.g. the exec bit) are
+ * preserved. In the "absent" branch we remove any lingering entry (including a
+ * broken symlink, which `existsSync` would have mis-reported as already gone).
  */
 export function revertFile(cwd: string, baselineTree: string, path: string): boolean {
 	const root = findGitRoot(cwd);
@@ -292,10 +292,11 @@ export function revertFile(cwd: string, baselineTree: string, path: string): boo
 			if (entry) unlinkSync(abs);
 			return true;
 		}
-		// Always drop the existing entry first so we write a fresh regular file
-		// in place: this avoids following a symlink to (or truncating a hard link
-		// shared with) a file outside the repository.
-		if (entry) unlinkSync(abs);
+		// Drop the entry first only when writing in place would be unsafe: a
+		// symlink (would follow the link) or a hard link (would truncate a shared
+		// inode). An ordinary single-link regular file is overwritten in place so
+		// its mode bits are preserved.
+		if (entry && (!entry.isFile() || entry.nlink > 1)) unlinkSync(abs);
 		writeFileSync(abs, read.buf);
 		return true;
 	} catch {
