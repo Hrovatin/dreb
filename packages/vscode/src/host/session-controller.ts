@@ -22,7 +22,7 @@ import type {
 	TaggedContextDto,
 	UiResponse,
 } from "../shared/protocol.js";
-import { buildPromptWithContext } from "../shared/tagged-context.js";
+import { buildFileContext, buildPromptWithContext } from "../shared/tagged-context.js";
 import { hunkIndexForLine, parseFileDiff } from "./diff-hunks.js";
 import {
 	baselineContent,
@@ -603,6 +603,18 @@ export class SessionController {
 	 * the webview is live, so tagging into a freshly opened chat still lands). */
 	tagContext(context: TaggedContextDto): void {
 		this.emit({ kind: "tag-context", context });
+	}
+
+	/** Open the native file/folder picker and tag each chosen path into the chat
+	 * as a path-reference chip (Phase 4b). No-ops when the picker is dismissed.
+	 * Mirrors `pickModel()`: the vscode picker is injected via the `HostUi` port,
+	 * so this method stays vscode-free and unit-testable. */
+	async tagFileFromPicker(): Promise<void> {
+		const picks = await this.ui.pickWorkspaceFiles();
+		if (!picks) return;
+		for (const pick of picks) {
+			this.tagContext(buildFileContext({ fsPath: pick.fsPath, cwd: this.cwd, isDirectory: pick.isDirectory }));
+		}
 	}
 
 	// ── Change review ──────────────────────────────────────────────────────
