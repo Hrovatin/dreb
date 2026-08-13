@@ -4,7 +4,7 @@ A native chat client for the [dreb](https://github.com/aebrer/dreb) coding agent
 
 This package is modeled on `@dreb/dashboard`: an extension **host** owns the RPC child and the authoritative transcript state, and a **webview** renders it. The only transport difference is that the dashboard's HTTP+SSE layer is replaced by VS Code's `postMessage` bridge.
 
-> Status: **Phase 2** (built-in slash commands + TUI-parity status header) on top of the Phase 0 + 1 foundation and MVP chat. See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
+> Status: **Phase 3** (change review — per-turn git snapshot + per-hunk keep/reject) on top of Phase 2 (built-in slash commands + TUI-parity status header) and the Phase 0 + 1 foundation. See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
 
 ## Architecture
 
@@ -14,7 +14,7 @@ src/
     protocol.ts       host ↔ webview message envelopes (no @dreb import)
     projection.ts     RPC events → transcript render model (pure, tested)
   host/          # extension host (Node, ESM) — compiled with tsgo
-    extension.ts        activate(): registers `dreb.openChat`, owns the panel
+    extension.ts        activate(): registers `dreb.openChat` + review commands
     session-controller.ts  one RpcClient + authoritative transcript per session
     webview-bridge.ts   postMessage wiring + webview HTML/CSP
     cli-path.ts         resolve the dreb CLI (setting → dependency)
@@ -22,11 +22,17 @@ src/
     session-registry.ts single-live-panel lifecycle (reentrancy-safe, pure, tested)
     host-ui.ts          native-prompt port (quick pick / input / dialogs); vscode-free
     vscode-host-ui.ts   the real `HostUi` backed by `vscode.window`
+    git-snapshot.ts     per-turn baseline capture + diff + `git apply -R` (pure node, tested)
+    diff-hunks.ts       unified-diff hunk parsing / slicing (pure, tested)
+    review-model.ts     change-review cycle + accept state (pure, tested)
+    review-ui.ts        SCM / quick-diff / diff-viewer port; vscode-free
+    vscode-review-ui.ts the real `ReviewUi` backed by `vscode.scm`
   shared/
     format.ts           status-header + `/session` display formatters (pure, tested)
   webview/       # SolidJS UI — bundled with Vite → dist/webview
     app.tsx             transcript, collapsible activity box, composer, needs-input,
-                        and the status header (model · thinking · cost · ctx)
+                        the status header (model · thinking · cost · ctx), and the
+                        change-review bar
 ```
 
 - The host keeps the authoritative `TranscriptState`. On (re)load the webview announces `ready` and receives a full snapshot, so recreating the webview never loses the conversation.
@@ -55,6 +61,17 @@ Commands owned by later phases (`/settings`, `/scoped-models`, `/fork`, `/tree`,
 ## Status header
 
 The webview renders a compact header mirroring the TUI: **model · thinking level · cost · context usage**. Cost shows the session total (`$0.123`, `+ (sub)` on a subscription) and, when known, the larger daily total (`, today $1.23`); context usage shows `ctx 42%`. All formatting lives in the pure `shared/format.ts` so the header renders costs consistently.
+
+## Change review
+
+Because the agent runs out-of-process and writes edits straight to disk, the extension can't hold changes in an unsaved overlay. Instead it **snapshots a git baseline before each turn** and reviews the working tree against it (the non-interactive analogue of `git restore -p`):
+
+- **Baseline** — before the first turn of a review cycle, `git-snapshot.ts` captures the working tree into a git tree object via a *throwaway index*, so neither your real index nor working tree is touched. Because it snapshots the tree *as-is* (including your own uncommitted edits), later diffs isolate **only** what the agent changed. Changes **compound** across turns until you accept or revert.
+- **Detection** — after each turn (`agent_end`), a baseline→current tree diff lists the changed files (adds/mods/deletes, git-detected — so `bash`-tool writes count too), shown in a **change-review bar** in the webview and an SCM group **"dreb — pending review"** with inline change gutters (via a `QuickDiffProvider` pointed at the baseline).
+- **Keep / reject** — the `dreb.review.*` commands accept a file (clear its marker — **no commit**), accept/revert all, revert a whole file to baseline, or **reject the hunk at the cursor** (`dreb.review.rejectHunkAtCursor`, which drives `git apply --reverse` on exactly that hunk). Rejecting a hunk restores only that region and never clobbers your own pre-existing edits.
+
+Review is host-authoritative, so it survives webview reload. Outside a git repository it degrades gracefully (disabled, no snapshots). The pure logic (`review-model.ts`, `diff-hunks.ts`) and the git plumbing (`git-snapshot.ts`, against real temp repos) are unit-tested; all `vscode` SCM/diff calls are isolated behind the `ReviewUi` port.
+
 
 ## Requirements
 
