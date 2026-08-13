@@ -261,7 +261,8 @@ describe("git tool — timeout, abort, and output cap (round-10 findings 1/2/3/5
 	const sleeperSpawn = ((_cmd: string, _args: readonly string[], opts: object) =>
 		spawn(process.execPath, ["-e", "setTimeout(() => {}, 600000)"], opts as never)) as typeof spawn;
 
-	const textOf = (result: { content: Array<{ text?: string }> }) => result.content.map((c) => c.text ?? "").join("");
+	const textOf = (result: { content: Array<{ type?: string; text?: string }> }) =>
+		result.content.map((c) => c.text ?? "").join("");
 
 	it("rejects immediately when the abort signal is already aborted (no spawn)", async () => {
 		const def = createGitToolDefinition(repo);

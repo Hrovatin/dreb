@@ -89,6 +89,38 @@ describe("AgentSession — read-only Ask mode", () => {
 		session.disableAskMode();
 		expect(session.state.systemPrompt).not.toContain(marker);
 	});
+
+	it("injects a symmetric transition reminder into the message stream on both edges", async () => {
+		const session = await makeSession(tempDir, agentDir);
+		// No transition reminders before any toggle.
+		expect(session.pendingNextTurnMessages.filter((m) => m.customType === "ask_mode_transition")).toHaveLength(0);
+
+		// Enabling emits a positive "you are now read-only" reminder into the stream.
+		session.enableAskMode();
+		const afterEnable = session.pendingNextTurnMessages.filter((m) => m.customType === "ask_mode_transition");
+		expect(afterEnable).toHaveLength(1);
+		expect(String(afterEnable[0].content)).toContain("changed to read-only Ask mode");
+		expect(String(afterEnable[0].content)).toContain("REMOVED from your available tools");
+		// Context-only, not a visible transcript line.
+		expect(afterEnable[0].display).toBe(false);
+
+		// Disabling emits the symmetric "you are no longer read-only" reminder.
+		session.disableAskMode();
+		const afterDisable = session.pendingNextTurnMessages.filter((m) => m.customType === "ask_mode_transition");
+		expect(afterDisable).toHaveLength(2);
+		expect(String(afterDisable[1].content)).toContain("Ask mode is now OFF");
+		expect(String(afterDisable[1].content)).toContain("back in your available tools");
+	});
+
+	it("no-op toggles do not emit spurious transition reminders", async () => {
+		const session = await makeSession(tempDir, agentDir);
+		session.setAskMode(false); // already off — no-op
+		expect(session.pendingNextTurnMessages.filter((m) => m.customType === "ask_mode_transition")).toHaveLength(0);
+
+		session.setAskMode(true);
+		session.setAskMode(true); // already on — no-op, must not re-emit
+		expect(session.pendingNextTurnMessages.filter((m) => m.customType === "ask_mode_transition")).toHaveLength(1);
+	});
 });
 
 /**
