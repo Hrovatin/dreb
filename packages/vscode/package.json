@@ -22,6 +22,11 @@
 				"category": "dreb"
 			},
 			{
+				"command": "dreb.tagSelectionToChat",
+				"title": "Add Selection to Chat",
+				"category": "dreb"
+			},
+			{
 				"command": "dreb.review.openDiff",
 				"title": "Open Diff",
 				"category": "dreb",
@@ -89,9 +94,14 @@
 			],
 			"editor/context": [
 				{
+					"command": "dreb.tagSelectionToChat",
+					"when": "editorHasSelection",
+					"group": "dreb@1"
+				},
+				{
 					"command": "dreb.review.rejectHunkAtCursor",
 					"when": "editorTextFocus",
-					"group": "dreb@1"
+					"group": "dreb@2"
 				}
 			]
 		},

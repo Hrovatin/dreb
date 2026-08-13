@@ -12,6 +12,7 @@
 import { homedir } from "node:os";
 import { relative, sep } from "node:path";
 import * as vscode from "vscode";
+import { buildTaggedContext } from "../shared/tagged-context.js";
 import { resolveCliPath } from "./cli-path.js";
 import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
@@ -49,6 +50,34 @@ export function activate(context: vscode.ExtensionContext): void {
 				.catch((err) => {
 					vscode.window.showErrorMessage(`dreb: failed to open chat — ${errorText(err)}`);
 				});
+		}),
+		vscode.commands.registerCommand("dreb.tagSelectionToChat", async () => {
+			const editor = vscode.window.activeTextEditor;
+			if (!editor || editor.selection.isEmpty) {
+				vscode.window.showInformationMessage("dreb: select some code to add to the chat.");
+				return;
+			}
+			// Capture the selection synchronously — opening/revealing the panel may
+			// shift editor focus, so read everything before the first await.
+			const selection = editor.selection;
+			const document = editor.document;
+			const captured = {
+				fsPath: document.uri.fsPath,
+				startLine: selection.start.line + 1,
+				endLine: selection.end.line + 1,
+				language: document.languageId,
+				text: document.getText(selection),
+			};
+			try {
+				await registry.open(() => createSession(context));
+			} catch (err) {
+				vscode.window.showErrorMessage(`dreb: failed to open chat — ${errorText(err)}`);
+				return;
+			}
+			const session = registry.active;
+			if (!session) return;
+			session.controller.tagContext(buildTaggedContext({ ...captured, cwd: session.controller.cwd }));
+			session.panel.reveal(vscode.ViewColumn.Active);
 		}),
 		vscode.commands.registerCommand("dreb.review.openDiff", (arg?: unknown) => {
 			const resolved = resolveReviewTarget(arg);

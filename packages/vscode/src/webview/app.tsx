@@ -10,7 +10,8 @@ import {
 	type TranscriptState,
 	type UiRequest,
 } from "../shared/projection.js";
-import type { HostStatus, ReviewStateDto, SlashCommandDto, UiResponse } from "../shared/protocol.js";
+import type { HostStatus, ReviewStateDto, SlashCommandDto, TaggedContextDto, UiResponse } from "../shared/protocol.js";
+import { taggedContextLabel } from "../shared/tagged-context.js";
 import { renderMarkdown } from "./markdown.js";
 import { onHostMessage, postToHost } from "./vscode-api.js";
 
@@ -22,6 +23,9 @@ export function App() {
 	// "unavailable" notice before the first review message arrives; the host
 	// publishes the authoritative enabled/files state on connect and on reload.
 	const [review, setReview] = createSignal<ReviewStateDto>({ enabled: true, files: [] });
+	// Editor selections tagged into the chat (Phase 4), shown as removable chips
+	// above the composer and folded into the next submitted message.
+	const [attachments, setAttachments] = createSignal<TaggedContextDto[]>([]);
 	const [tick, setTick] = createSignal(0);
 
 	let scrollEl: HTMLDivElement | undefined;
@@ -48,6 +52,9 @@ export function App() {
 					break;
 				case "review":
 					setReview(msg.review);
+					break;
+				case "tag-context":
+					setAttachments((current) => [...current, msg.context]);
 					break;
 			}
 			setTick((t) => t + 1);
@@ -165,7 +172,12 @@ export function App() {
 			<Composer
 				streaming={state.streaming}
 				commands={commands()}
-				onSubmit={(text) => postToHost({ type: "submit", text })}
+				attachments={attachments()}
+				onRemoveAttachment={(index) => setAttachments((current) => current.filter((_, i) => i !== index))}
+				onSubmit={(text) => {
+					postToHost({ type: "submit", text, attachments: attachments() });
+					setAttachments([]);
+				}}
 				onAbort={() => postToHost({ type: "abort" })}
 			/>
 		</div>
@@ -412,6 +424,8 @@ function AskResponse(props: { request: UiRequest; onRespond: (response: UiRespon
 function Composer(props: {
 	streaming: boolean;
 	commands: SlashCommandDto[];
+	attachments: TaggedContextDto[];
+	onRemoveAttachment: (index: number) => void;
 	onSubmit: (text: string) => void;
 	onAbort: () => void;
 }) {
@@ -426,7 +440,9 @@ function Composer(props: {
 
 	const submit = () => {
 		const value = text();
-		if (value.trim().length === 0) return;
+		// Allow sending with only attachments (no typed text), but never a
+		// completely empty message.
+		if (value.trim().length === 0 && props.attachments.length === 0) return;
 		props.onSubmit(value);
 		setText("");
 	};
@@ -452,6 +468,30 @@ function Composer(props: {
 									<span class="dreb-menu-desc">{command.description}</span>
 								</Show>
 							</button>
+						)}
+					</For>
+				</div>
+			</Show>
+			<Show when={props.attachments.length > 0}>
+				<div class="dreb-attachments">
+					<For each={props.attachments}>
+						{(attachment, index) => (
+							<span
+								class="dreb-attachment"
+								title={`${attachment.path} (lines ${attachment.startLine}-${attachment.endLine})`}
+							>
+								<span class="dreb-attachment-icon">{"{}"}</span>
+								<span class="dreb-attachment-label">{taggedContextLabel(attachment)}</span>
+								<button
+									type="button"
+									class="dreb-attachment-remove"
+									title="Remove from chat"
+									aria-label="Remove from chat"
+									onClick={() => props.onRemoveAttachment(index())}
+								>
+									×
+								</button>
+							</span>
 						)}
 					</For>
 				</div>

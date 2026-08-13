@@ -14,7 +14,15 @@
 
 import { formatSessionStats } from "../shared/format.js";
 import { applyEvent, createTranscriptState, type TranscriptState } from "../shared/projection.js";
-import type { HostStatus, ReviewFileDto, ReviewStateDto, SlashCommandDto, UiResponse } from "../shared/protocol.js";
+import type {
+	HostStatus,
+	ReviewFileDto,
+	ReviewStateDto,
+	SlashCommandDto,
+	TaggedContextDto,
+	UiResponse,
+} from "../shared/protocol.js";
+import { buildPromptWithContext } from "../shared/tagged-context.js";
 import { hunkIndexForLine, parseFileDiff } from "./diff-hunks.js";
 import {
 	baselineContent,
@@ -133,6 +141,8 @@ export type ControllerUpdate =
 	| { kind: "commands"; commands: SlashCommandDto[] }
 	/** The change-review set changed (per-turn detection, accept/revert). */
 	| { kind: "review"; review: ReviewStateDto }
+	/** An editor selection was tagged into the chat (Phase 4). */
+	| { kind: "tag-context"; context: TaggedContextDto }
 	/** Transcript was replaced host-side (e.g. `/new`, `/import`); the bridge
 	 * re-sends a fresh snapshot. */
 	| { kind: "resync" };
@@ -300,7 +310,7 @@ export class SessionController {
 	 * child crash) surfaces a notice instead of dispatching into a client that
 	 * isn't ready, and every awaited RPC call is wrapped so a rejection becomes
 	 * a visible notice rather than an unhandled promise rejection. */
-	async submit(text: string): Promise<void> {
+	async submit(text: string, attachments?: TaggedContextDto[]): Promise<void> {
 		if (!this.client || !this.status.connected) {
 			this.emitNotice(
 				this.status.error
@@ -314,7 +324,9 @@ export class SessionController {
 		try {
 			switch (decision.kind) {
 				case "prompt":
-					await this.client.prompt(decision.message);
+					// Fold any tagged editor selections into the prompt as located
+					// context (attachments only apply to prompts, not slash builtins).
+					await this.client.prompt(buildPromptWithContext(decision.message, attachments));
 					return;
 				case "builtin":
 					await this.runBuiltin(decision.command, decision.arg);
@@ -576,6 +588,13 @@ export class SessionController {
 	/** Answer a blocking extension-UI request. */
 	respondUi(response: UiResponse): void {
 		this.client?.sendExtensionUIResponse({ type: "extension_ui_response", ...response });
+	}
+
+	/** Tag an editor selection into the chat (Phase 4). Emits an update the
+	 * bridge forwards to the webview as a removable composer chip (queued until
+	 * the webview is live, so tagging into a freshly opened chat still lands). */
+	tagContext(context: TaggedContextDto): void {
+		this.emit({ kind: "tag-context", context });
 	}
 
 	// ── Change review ──────────────────────────────────────────────────────
