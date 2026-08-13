@@ -6,7 +6,17 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -248,5 +258,41 @@ describe("git-snapshot", () => {
 		expect(existsSync(join(repo, "file.txt"))).toBe(true);
 		// baselineContent likewise reports null (not "") on a genuine read error.
 		expect(baselineContent(repo, bogusTree, "file.txt")).toBeNull();
+	});
+
+	it("revertFile does not write through a symlink to a file outside the repo", () => {
+		const base = captureTree(repo) as string;
+		// A file outside the repo whose content must never be touched by a revert.
+		const outsideDir = mkdtempSync(join(tmpdir(), "dreb-outside-"));
+		const outside = join(outsideDir, "victim.txt");
+		writeFileSync(outside, "OUTSIDE-DATA");
+		try {
+			// The agent's turn replaced the tracked file with a symlink to that
+			// outside file (surfaces as a type change → "modified" in the review set).
+			rmSync(join(repo, "file.txt"));
+			symlinkSync(outside, join(repo, "file.txt"));
+
+			expect(revertFile(repo, base, "file.txt")).toBe(true);
+			// The tracked path is restored as a REGULAR file with baseline content…
+			expect(lstatSync(join(repo, "file.txt")).isSymbolicLink()).toBe(false);
+			expect(read(repo, "file.txt")).toEqual(lines());
+			// …and the outside file was NOT clobbered by writing through the link.
+			expect(readFileSync(outside, "utf-8")).toBe("OUTSIDE-DATA");
+		} finally {
+			rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	it("revertFile removes a dangling symlink when reverting an agent-created path", () => {
+		const base = captureTree(repo) as string;
+		// The agent created `link.txt` (absent from baseline) as a broken symlink.
+		// `existsSync` follows symlinks and would report a broken link as absent,
+		// skipping cleanup; the lstat-based check must still remove it.
+		symlinkSync(join(repo, "no-such-target"), join(repo, "link.txt"));
+		expect(lstatSync(join(repo, "link.txt")).isSymbolicLink()).toBe(true);
+
+		expect(revertFile(repo, base, "link.txt")).toBe(true);
+		// The dangling link is gone from disk (lstat throws ENOENT).
+		expect(() => lstatSync(join(repo, "link.txt"))).toThrow();
 	});
 });

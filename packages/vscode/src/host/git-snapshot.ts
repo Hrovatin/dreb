@@ -24,7 +24,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseFileDiff, sliceHunkPatch } from "./diff-hunks.js";
@@ -252,12 +252,30 @@ export function revertHunk(cwd: string, baselineTree: string, path: string, hunk
 	return res.status === 0;
 }
 
+/** `lstatSync` that returns undefined instead of throwing on a missing entry.
+ * Uses `lstat` (not `stat`) so a symlink — including a broken/dangling one — is
+ * reported as a present entry rather than being followed or mistaken for absent. */
+function lstatSafe(p: string): ReturnType<typeof lstatSync> | undefined {
+	try {
+		return lstatSync(p);
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Restore a path to its baseline content: rewrite the file with the baseline
  * bytes, or delete it when it did not exist in the baseline. Returns true on
  * success, false without touching the working file when the baseline read fails
  * (git error, non-blob, or truncated read) — a failed read must never be
  * mistaken for "absent from baseline" and trigger a destructive delete/truncate.
+ *
+ * The working-tree entry is inspected with `lstat` (never following symlinks):
+ * if the agent's turn replaced the path with a symlink, we remove the link
+ * itself before writing, so `writeFileSync`'s `'w'` flag can never follow it and
+ * clobber the link's target — which could be a file outside the repository. In
+ * the "absent" branch we likewise remove any lingering entry (including a broken
+ * symlink, which `existsSync` would have mis-reported as already gone).
  */
 export function revertFile(cwd: string, baselineTree: string, path: string): boolean {
 	const root = findGitRoot(cwd);
@@ -266,10 +284,14 @@ export function revertFile(cwd: string, baselineTree: string, path: string): boo
 	if (read.kind === "error") return false;
 	const abs = join(root, path);
 	try {
+		const entry = lstatSafe(abs);
 		if (read.kind === "absent") {
-			if (existsSync(abs)) unlinkSync(abs);
+			if (entry) unlinkSync(abs);
 			return true;
 		}
+		// Never write through a symlink: if the entry is anything other than a
+		// regular file, drop it first so we create a fresh regular file in place.
+		if (entry && !entry.isFile()) unlinkSync(abs);
 		writeFileSync(abs, read.buf);
 		return true;
 	} catch {

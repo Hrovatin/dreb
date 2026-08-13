@@ -190,7 +190,16 @@ export class SessionController {
 		this.reviewUi = options.review ?? noopReviewUi;
 		this.logger = options.logger ?? (() => {});
 		this.status = { connected: false, cwd: options.cwd };
-		this.reviewRoot = options.cwd;
+		// Resolve the git-repo state synchronously up front (findGitRoot is a cheap
+		// upward directory walk) so `getReviewState()` returns the correct enabled
+		// flag the instant the webview announces `ready` — which can happen before
+		// the slow `start()` RPC handshake completes. Deferring this to `start()`
+		// would answer that early `ready` with a stale `enabled: false` and flash a
+		// spurious "change review unavailable" notice in an ordinary git repo.
+		const root = findGitRoot(options.cwd);
+		this.reviewEnabled = root !== null;
+		this.reviewRoot = root ?? options.cwd;
+		this.reviewState = { enabled: this.reviewEnabled, files: [] };
 	}
 
 	get cwd(): string {
@@ -247,13 +256,11 @@ export class SessionController {
 			throw err;
 		}
 		this.setStatus({ ...this.status, connected: true, error: undefined });
-		const root = findGitRoot(this.options.cwd);
-		this.reviewEnabled = root !== null;
-		this.reviewRoot = root ?? this.options.cwd;
-		this.reviewState = { enabled: this.reviewEnabled, files: [] };
-		// Publish the (possibly disabled) review state so the webview can show a
-		// clear "change review unavailable" notice when this isn't a git repo
-		// (acceptance criterion: degrade gracefully with a clear notice).
+		// Review enablement was resolved synchronously in the constructor (see
+		// there); re-publish it now so any webview that went live before this
+		// point receives the authoritative state via the push path too. Outside a
+		// git repo this drives the "change review unavailable" notice (acceptance
+		// criterion: degrade gracefully with a clear notice).
 		this.emit({ kind: "review", review: this.reviewState });
 		await this.refreshCommands();
 		await this.refreshStatus(true);

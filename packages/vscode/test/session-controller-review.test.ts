@@ -6,7 +6,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -129,6 +129,15 @@ async function startController(
 const flush = async () => {
 	for (let i = 0; i < 8; i++) await Promise.resolve();
 };
+
+/** Extract host_notice messages from captured controller updates. */
+function hostNotices(updates: ControllerUpdate[]): string[] {
+	return updates
+		.filter((u): u is Extract<ControllerUpdate, { kind: "event" }> => u.kind === "event")
+		.map((u) => u.event as { type?: unknown; message?: unknown })
+		.filter((e) => e?.type === "host_notice")
+		.map((e) => String(e.message ?? ""));
+}
 
 describe("SessionController change review", () => {
 	let repo: string;
@@ -276,5 +285,91 @@ describe("SessionController change review", () => {
 		expect(readFileSync(join(repo, "file.txt"), "utf-8")).toBe(editedA);
 		expect(git(["rev-parse", "HEAD"], repo)).toBe(headBefore);
 		expect(git(["status", "--porcelain"], repo)).not.toBe(""); // still uncommitted
+	});
+
+	it("reports a notice and keeps the file pending when reviewRevertFile fails", async () => {
+		const review = new RecordingReviewUi();
+		const { controller, client, updates } = await startController(repo, review);
+
+		client.emit({ type: "turn_start" });
+		writeFileSync(join(repo, "file.txt"), body().replace("line3", "AGENT3"));
+		client.emit({ type: "agent_end", messages: [] });
+		await flush();
+		expect(controller.getReviewState().files).toHaveLength(1);
+
+		// Replace the working-tree file with a directory so revertFile's write
+		// throws (EISDIR) and returns false — deterministically forcing the
+		// failure branch regardless of the test user's permissions.
+		rmSync(join(repo, "file.txt"));
+		mkdirSync(join(repo, "file.txt"));
+
+		await controller.reviewRevertFile("file.txt");
+
+		// The failed file is NOT silently dropped — it stays pending…
+		expect(controller.getReviewState().files.map((f) => f.path)).toContain("file.txt");
+		// …and a host_notice was emitted.
+		expect(hostNotices(updates).some((m) => /could not revert/i.test(m))).toBe(true);
+	});
+
+	it("reverts what it can, keeps failures pending, and notices them on a partial reviewRevertAll", async () => {
+		writeFileSync(join(repo, "file2.txt"), body());
+		git(["add", "file2.txt"], repo);
+		git(["commit", "-m", "add file2"], repo);
+
+		const review = new RecordingReviewUi();
+		const { controller, client, updates } = await startController(repo, review);
+
+		client.emit({ type: "turn_start" });
+		writeFileSync(join(repo, "file.txt"), body().replace("line3", "AGENT3"));
+		writeFileSync(join(repo, "file2.txt"), body().replace("line5", "AGENT5"));
+		client.emit({ type: "agent_end", messages: [] });
+		await flush();
+		expect(controller.getReviewState().files).toHaveLength(2);
+
+		// Sabotage only file2.txt's revert (directory → EISDIR on write).
+		rmSync(join(repo, "file2.txt"));
+		mkdirSync(join(repo, "file2.txt"));
+
+		await controller.reviewRevertAll();
+
+		// file.txt reverted successfully and dropped out; file2.txt failed and
+		// remains pending (not silently cleared while its edit persists on disk).
+		expect(readFileSync(join(repo, "file.txt"), "utf-8")).toBe(body());
+		expect(controller.getReviewState().files.map((f) => f.path)).toEqual(["file2.txt"]);
+		// The failure was surfaced to the user.
+		expect(hostNotices(updates).some((m) => /could not revert.*file2\.txt/i.test(m))).toBe(true);
+	});
+
+	it("reports review enabled synchronously at construction (before start) in a git repo", () => {
+		// getReviewState() must reflect the real git state immediately — before the
+		// slow start() handshake — so an early webview `ready` isn't answered with a
+		// spurious "change review unavailable" notice.
+		const controller = new SessionController({ cwd: repo, cliPath: "unused", clientFactory: () => new MiniClient() });
+		expect(controller.getReviewState()).toEqual({ enabled: true, files: [] });
+	});
+
+	it("reports review disabled synchronously at construction outside a git repo", () => {
+		const plain = mkdtempSync(join(tmpdir(), "dreb-ctrl-plain-ctor-"));
+		try {
+			const controller = new SessionController({
+				cwd: plain,
+				cliPath: "unused",
+				clientFactory: () => new MiniClient(),
+			});
+			expect(controller.getReviewState()).toEqual({ enabled: false, files: [] });
+		} finally {
+			rmSync(plain, { recursive: true, force: true });
+		}
+	});
+
+	it("emits the review state during start() so a webview live before start is updated", async () => {
+		const review = new RecordingReviewUi();
+		const { updates } = await startController(repo, review);
+		const reviewUpdate = updates.find((u) => u.kind === "review");
+		expect(reviewUpdate).toBeDefined();
+		expect((reviewUpdate as Extract<ControllerUpdate, { kind: "review" }>).review).toEqual({
+			enabled: true,
+			files: [],
+		});
 	});
 });
