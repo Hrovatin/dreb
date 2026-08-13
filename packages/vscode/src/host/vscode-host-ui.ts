@@ -7,7 +7,7 @@
  */
 
 import * as vscode from "vscode";
-import type { HostUi, HostUiPickItem } from "./host-ui.js";
+import type { HostUi, HostUiPickItem, PickedFile } from "./host-ui.js";
 
 /** A quick-pick item carrying our opaque `value` alongside vscode's fields. */
 interface ValuedQuickPickItem extends vscode.QuickPickItem {
@@ -52,5 +52,32 @@ export function createVscodeHostUi(): HostUi {
 			});
 			return uris?.[0]?.fsPath;
 		},
+		async pickWorkspaceFiles(): Promise<PickedFile[] | undefined> {
+			const uris = await vscode.window.showOpenDialog({
+				canSelectFiles: true,
+				canSelectFolders: true,
+				canSelectMany: true,
+				openLabel: "Add to chat",
+				defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+			});
+			if (!uris || uris.length === 0) return undefined;
+			return Promise.all(
+				uris.map(async (uri) => ({
+					fsPath: uri.fsPath,
+					isDirectory: await isDirectory(uri),
+				})),
+			);
+		},
 	};
+}
+
+/** Whether `uri` points at a directory (defaults to false when it can't be
+ * stat'd, so the tag still folds as a plain file reference). */
+async function isDirectory(uri: vscode.Uri): Promise<boolean> {
+	try {
+		const stat = await vscode.workspace.fs.stat(uri);
+		return (stat.type & vscode.FileType.Directory) !== 0;
+	} catch {
+		return false;
+	}
 }
