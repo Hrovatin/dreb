@@ -43,7 +43,7 @@ describe("buildTaggedContext", () => {
 		expect(dto.path).toBe("src/a.ts");
 	});
 
-	it("falls back to the basename for a file outside the workspace", () => {
+	it("uses the absolute path for a file outside the workspace", () => {
 		const dto = buildTaggedContext({
 			fsPath: "/etc/hosts",
 			cwd: "/home/me/proj",
@@ -52,10 +52,10 @@ describe("buildTaggedContext", () => {
 			language: "plaintext",
 			text: "127.0.0.1",
 		});
-		expect(dto.path).toBe("hosts");
+		expect(dto.path).toBe("/etc/hosts");
 	});
 
-	it("labels the workspace root file itself by basename", () => {
+	it("labels the workspace root itself as '.'", () => {
 		const dto = buildTaggedContext({
 			fsPath: "/home/me/proj",
 			cwd: "/home/me/proj",
@@ -64,7 +64,7 @@ describe("buildTaggedContext", () => {
 			language: "",
 			text: "",
 		});
-		expect(dto.path).toBe("proj");
+		expect(dto.path).toBe(".");
 	});
 });
 
@@ -79,9 +79,14 @@ describe("buildFileContext", () => {
 		expect(dto).toEqual({ kind: "file", path: "src", isDirectory: true });
 	});
 
-	it("falls back to the basename outside the workspace", () => {
+	it("uses the absolute path outside the workspace (unambiguous, not a bare basename)", () => {
 		const dto = buildFileContext({ fsPath: "/etc/hosts", cwd: "/home/me/proj" });
-		expect(dto.path).toBe("hosts");
+		expect(dto.path).toBe("/etc/hosts");
+	});
+
+	it("tags the workspace root folder as '.' rather than a project-named subdir", () => {
+		const dto = buildFileContext({ fsPath: "/home/me/proj", cwd: "/home/me/proj", isDirectory: true });
+		expect(dto).toEqual({ kind: "file", path: ".", isDirectory: true });
 	});
 });
 
@@ -195,6 +200,14 @@ describe("formatTaggedContext", () => {
 		expect(formatTaggedContext({ kind: "file", path: "src/host", isDirectory: true })).toBe(
 			"`src/host/` (directory)",
 		);
+	});
+
+	it("folds a workspace-root folder tag as './' (directory), not a project-named subdir", () => {
+		expect(formatTaggedContext({ kind: "file", path: ".", isDirectory: true })).toBe("`./` (directory)");
+	});
+
+	it("folds an out-of-workspace file tag as its absolute path (unambiguous)", () => {
+		expect(formatTaggedContext({ kind: "file", path: "/etc/hosts" })).toBe("`/etc/hosts`");
 	});
 });
 

@@ -58,14 +58,17 @@ function basename(path: string): string {
 	return parts.at(-1) ?? path;
 }
 
-/** `fsPath` relative to `cwd` with forward slashes; falls back to the basename
- * when the file is outside the workspace (so the chip still has a sane label). */
+/** `fsPath` relative to `cwd` with forward slashes. Returns `.` for the
+ * workspace root itself, and the **absolute** path (not a bare basename) when
+ * the file is outside the workspace — so an out-of-workspace or ambiguously
+ * same-named file still resolves unambiguously and the root doesn't masquerade
+ * as a nonexistent subdirectory named after the project. */
 function toWorkspaceRelative(fsPath: string, cwd: string): string {
 	const file = fsPath.replace(/\\/g, "/").replace(/\/+$/, "");
 	const root = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
-	if (root.length > 0 && file === root) return basename(file);
+	if (root.length > 0 && file === root) return ".";
 	if (root.length > 0 && file.startsWith(`${root}/`)) return file.slice(root.length + 1);
-	return basename(file);
+	return file;
 }
 
 /** Build a selection context DTO carried across the host↔webview boundary and
