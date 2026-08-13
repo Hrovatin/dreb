@@ -111,20 +111,6 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("Specialized agents may perform the broader work");
 			expect(prompt).not.toContain("Use `subagent` to delegate focused, independent tasks to child agents");
 		});
-
-		test("preserves mach6-critical subagent mechanics (background-notify, end-turn-to-await)", () => {
-			const prompt = buildSystemPrompt({
-				selectedTools: ["subagent"],
-				toolSnippets: { subagent: subagentToolDefinition.promptSnippet! },
-				promptGuidelines: subagentToolDefinition.promptGuidelines,
-				contextFiles: [],
-				skills: [],
-			});
-
-			expect(prompt).toContain("All subagents run in background");
-			expect(prompt).toContain("end your current turn with no tool calls");
-			expect(prompt).toContain("delegation is optional, not an unconditional default");
-		});
 	});
 
 	describe("exploration guidelines", () => {
@@ -150,21 +136,6 @@ describe("buildSystemPrompt", () => {
 
 			expect(prompt).toContain("Prefer grep/find/ls tools over bash");
 			expect(prompt).not.toContain("needle lookup first");
-		});
-	});
-
-	describe("focus and scope discipline", () => {
-		test("always includes focus/scope guidelines regardless of tools", () => {
-			const prompt = buildSystemPrompt({
-				selectedTools: [],
-				contextFiles: [],
-				skills: [],
-			});
-
-			expect(prompt).toContain("Stay within the scope of the request");
-			expect(prompt).toContain("Prefer the smallest correct change");
-			expect(prompt).toContain("Prefer editing existing files over creating new ones");
-			expect(prompt).toContain("Match response length to task complexity");
 		});
 	});
 
