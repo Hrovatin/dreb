@@ -10,17 +10,21 @@
  */
 
 import { homedir } from "node:os";
+import { relative, sep } from "node:path";
 import * as vscode from "vscode";
 import { resolveCliPath } from "./cli-path.js";
+import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
 import { SessionRegistry } from "./session-registry.js";
 import { createVscodeHostUi } from "./vscode-host-ui.js";
+import { createVscodeReviewUi } from "./vscode-review-ui.js";
 import { connectWebview, getWebviewHtml } from "./webview-bridge.js";
 
 interface ChatSession {
 	panel: vscode.WebviewPanel;
 	controller: SessionController;
 	connection: vscode.Disposable;
+	reviewUi: ReviewUi & vscode.Disposable;
 }
 
 /** Enforces the single-live-panel invariant and the reentrancy-safe open /
@@ -32,6 +36,7 @@ const registry = new SessionRegistry<ChatSession>({
 	teardown: async (s) => {
 		s.connection.dispose();
 		await s.controller.dispose();
+		s.reviewUi.dispose();
 		s.panel.dispose();
 	},
 });
@@ -45,7 +50,60 @@ export function activate(context: vscode.ExtensionContext): void {
 					vscode.window.showErrorMessage(`dreb: failed to open chat — ${errorText(err)}`);
 				});
 		}),
+		vscode.commands.registerCommand("dreb.review.openDiff", (arg?: unknown) => {
+			const resolved = resolveReviewTarget(arg);
+			if (resolved) void resolved.controller.reviewOpenDiff(resolved.path);
+		}),
+		vscode.commands.registerCommand("dreb.review.acceptFile", (arg?: unknown) => {
+			const resolved = resolveReviewTarget(arg);
+			if (resolved) void resolved.controller.reviewAcceptFile(resolved.path);
+		}),
+		vscode.commands.registerCommand("dreb.review.revertFile", (arg?: unknown) => {
+			const resolved = resolveReviewTarget(arg);
+			if (resolved) void resolved.controller.reviewRevertFile(resolved.path);
+		}),
+		vscode.commands.registerCommand("dreb.review.acceptAll", () => {
+			void registry.active?.controller.reviewAcceptAll();
+		}),
+		vscode.commands.registerCommand("dreb.review.revertAll", () => {
+			void registry.active?.controller.reviewRevertAll();
+		}),
+		vscode.commands.registerCommand("dreb.review.rejectHunkAtCursor", async () => {
+			const editor = vscode.window.activeTextEditor;
+			const controller = registry.active?.controller;
+			if (!editor || !controller) return;
+			const path = toRepoRelative(controller.gitRoot, editor.document.uri);
+			if (path === undefined) {
+				vscode.window.showInformationMessage("dreb: the active file is not under change review.");
+				return;
+			}
+			const line = editor.selection.active.line + 1;
+			const ok = await controller.reviewRejectHunkAtLine(path, line);
+			if (!ok) vscode.window.showInformationMessage("dreb: no reviewable hunk at the cursor.");
+		}),
 	);
+}
+
+/** Resolve a review command argument (a repo-relative path string from the
+ * webview / SCM `command`, or a `SourceControlResourceState` from an SCM menu)
+ * to the active controller + repo-relative path. */
+function resolveReviewTarget(arg: unknown): { controller: SessionController; path: string } | undefined {
+	const controller = registry.active?.controller;
+	if (!controller) return undefined;
+	if (typeof arg === "string") return { controller, path: arg };
+	const uri = (arg as { resourceUri?: vscode.Uri })?.resourceUri;
+	if (!uri) return undefined;
+	const path = toRepoRelative(controller.gitRoot, uri);
+	return path === undefined ? undefined : { controller, path };
+}
+
+/** A file URI's path relative to `cwd` (forward slashes), or undefined if it is
+ * not under `cwd`. */
+function toRepoRelative(cwd: string, uri: vscode.Uri): string | undefined {
+	if (uri.scheme !== "file") return undefined;
+	const rel = relative(cwd, uri.fsPath);
+	if (rel.length === 0 || rel.startsWith("..")) return undefined;
+	return rel.split(sep).join("/");
 }
 
 export async function deactivate(): Promise<void> {
@@ -61,11 +119,13 @@ function createSession(context: vscode.ExtensionContext): ChatSession {
 	const cwd = workspaceCwd();
 	const cli = resolveCliPath({ configuredPath: config.get<string>("cliPath") });
 
+	const reviewUi = createVscodeReviewUi(cwd);
 	const controller = new SessionController({
 		cwd,
 		cliPath: cli.ok ? cli.path : "",
 		args: buildArgs(config),
 		ui: createVscodeHostUi(),
+		review: reviewUi,
 		logger: (line) => console.warn(`[dreb] ${line}`),
 	});
 
@@ -78,7 +138,7 @@ function createSession(context: vscode.ExtensionContext): ChatSession {
 	const connection = connectWebview(panel.webview, controller);
 	panel.webview.html = getWebviewHtml(panel.webview, context.extensionUri, makeNonce());
 
-	const session: ChatSession = { panel, controller, connection };
+	const session: ChatSession = { panel, controller, connection, reviewUi };
 	panel.onDidDispose(() => {
 		void registry.disposeSession(session);
 	});
