@@ -18,6 +18,17 @@ Inspired by [mach10](https://github.com/LeanAndMean/mach10) (MIT, by Kevin Ryan)
 /skill:mach6-publish 53        # Docs update, merge, tag, release
 ```
 
+### Streamlined Workflow (mach6mini)
+
+For quick iterations without formal issue tracking:
+
+```
+/skill:mach6mini-plan          # Discuss, plan, open PR (no issue)
+/skill:mach6mini-implement 53  # Implement and push in one step
+/skill:mach6-review 53         # Review (same as full workflow)
+/skill:mach6-publish 53        # Merge and release
+```
+
 ## Skills
 
 ### mach6-issue
@@ -116,6 +127,42 @@ Pre-merge checks, version bump, docs update, merge, tag, and release.
 - Merges with `--squash --delete-branch`
 - Optionally creates a git tag and GitHub release
 
+## Streamlined Skills (mach6mini)
+
+For quick iterations where formal issue tracking is unnecessary, two "mini" variants combine multiple steps:
+
+### mach6mini-plan
+
+Streamlined planning that skips issue creation — discuss with user, align on implementation, open PR directly.
+
+```
+/skill:mach6mini-plan                    # Interactive — asks what to build
+/skill:mach6mini-plan add caching layer  # Start from description
+```
+
+- Gathers requirements through discussion (replaces issue creation)
+- Explores codebase with parallel subagents
+- Drafts plan and gets user alignment before proceeding
+- Creates branch `feature/<slug>` (no issue number)
+- Opens draft PR with plan as comment
+
+Use when you want to skip formal issue tracking and go straight to implementation.
+
+### mach6mini-implement
+
+Streamlined implementation that pushes automatically after completion.
+
+```
+/skill:mach6mini-implement 53
+```
+
+- Reads plan and ALL PR comments to build effective requirements
+- **Latest comments win** — if discussion modifies the plan, follows the latest instructions
+- Implements using `feature-dev` subagents
+- Automatically commits, pushes, and posts progress comment
+
+Combines `mach6-implement` + `mach6-push` into one step.
+
 ## Agents
 
 ### feature-dev
@@ -148,7 +195,7 @@ The two advocates intentionally pull in different directions: one challenges the
 
 ## Design Principles
 
-- **GitHub as shared memory** — Plans, reviews, assessments, and progress are posted as PR/issue comments with HTML markers (`<!-- mach6-plan -->`, `<!-- mach6-review -->`, etc.) so any future session can pick up context.
+- **GitHub as shared memory** — Plans, reviews, assessments, and progress are posted as PR/issue comments with HTML markers (`<!-- mach6-plan -->`, `<!-- mach6-review -->`, `<!-- mach6mini-plan -->`, `<!-- mach6mini-progress -->`, etc.) so any future session can pick up context.
 - **Three-gate independent assessment** — Findings must be factual, authorized, and materially practical before becoming merge blockers.
 - **Deliberate counter-pressure** — Later rounds focus on the delta and pair practical-value skepticism with adversarial acceptance evidence to resist ceremonial review work.
 - **Durable accountability checkpoint** — Implementation and fixes are committed, pushed, and recorded before formal review so work cannot be lost or repeatedly rewritten while still local.
