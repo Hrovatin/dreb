@@ -15,15 +15,18 @@
 #   merged in order with --no-ff. Re-run any time to rebuild karin cleanly on
 #   the latest master + latest components (no hand-stacking, no duplicate
 #   commits). `git rerere` remembers each cross-branch conflict resolution so
-#   later rebuilds replay them automatically.
+#   later rebuilds replay them automatically and this script auto-completes
+#   the merge.
 #
 # Corruption-safety (see aebrer/dreb#461):
-#   Uses ONLY `checkout` and `merge --no-ff`. Neither runs the test-running
-#   pre-commit hook, so the GIT_* env-leak corruption bug cannot fire. This
-#   script never uses `git commit` or `git cherry-pick`.
+#   Uses ONLY `checkout`, `merge --no-ff`, and — to finalize a merge that
+#   rerere has already resolved — `commit --no-edit`. A MERGE commit runs the
+#   `pre-merge-commit` hook (empty in this repo), NOT the test-running
+#   `pre-commit` hook, so the GIT_* env-leak corruption bug cannot fire. This
+#   script never runs `git cherry-pick` or a non-merge `git commit`.
 #
 # Usage:
-#   ./rebuild-karin.sh [manifest]        # rebuild karin locally (default manifest: ./karin-branches.txt)
+#   ./rebuild-karin.sh [manifest]        # rebuild karin locally (default: ./karin-branches.txt)
 # Then review and push explicitly (the script never pushes for you):
 #   git push --force-with-lease Hrovatin karin
 #
@@ -70,9 +73,17 @@ while IFS= read -r line || [ -n "$line" ]; do
 	branch="$(printf '%s' "$branch" | tr -d '[:space:]')"
 	[ -z "$branch" ] && continue
 	echo ">> integrating $branch"
-	if ! git merge --no-ff -m "integrate $branch into karin" "$branch"; then
-		echo "!! conflict integrating $branch." >&2
-		echo "   In $BUILD_WT: resolve, 'git add -A', 'git commit --no-edit', then re-run this script." >&2
+	if git merge --no-ff -m "integrate $branch into karin" "$branch"; then
+		:                                              # clean merge
+	elif [ -z "$(git ls-files --unmerged)" ]; then
+		# rerere auto-resolved and staged every conflict; finalize the merge
+		# commit (pre-merge-commit hook only — no pre-commit, so no corruption).
+		git commit --no-edit >/dev/null
+		echo "   (conflict auto-resolved via rerere)"
+	else
+		echo "!! unresolved conflict integrating $branch:" >&2
+		git ls-files --unmerged | awk '{print $4}' | sort -u | sed 's/^/     /' >&2
+		echo "   In $BUILD_WT: resolve, 'git add -A', 'git commit --no-edit', then re-run." >&2
 		exit 2
 	fi
 	count=$((count + 1))
