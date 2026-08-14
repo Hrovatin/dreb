@@ -26,6 +26,7 @@ class FakeClient implements RpcClientLike {
 		thinkingLevel?: string;
 		usingSubscription?: boolean;
 		contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+		sessionFile?: string;
 	} = {};
 	dailyCost = 0;
 	stats: {
@@ -867,5 +868,111 @@ describe("SessionController", () => {
 		await controller.submit("hello");
 		expect(fake.prompts).toHaveLength(0);
 		expect(controller.getTranscript().statusText).toMatch(/starting up/);
+	});
+
+	it("appends `--session <path>` to the args when resuming a specific session", async () => {
+		const fake = new FakeClient();
+		let capturedArgs: string[] | undefined;
+		const controller = new SessionController({
+			cwd: "/tmp/project",
+			cliPath: "/cli.js",
+			args: ["--provider", "anthropic"],
+			sessionPath: "/abs/sess.jsonl",
+			clientFactory: (opts) => {
+				capturedArgs = opts.args;
+				return fake;
+			},
+		});
+
+		await controller.start();
+
+		// User args come first, then the resume flag appended after them.
+		expect(capturedArgs).toEqual(["--provider", "anthropic", "--session", "/abs/sess.jsonl"]);
+		expect(capturedArgs?.slice(-2)).toEqual(["--session", "/abs/sess.jsonl"]);
+	});
+
+	it("omits `--session` from the args for a fresh session", async () => {
+		const fake = new FakeClient();
+		let capturedArgs: string[] | undefined;
+		const controller = new SessionController({
+			cwd: "/tmp/project",
+			cliPath: "/cli.js",
+			args: ["--provider", "anthropic"],
+			clientFactory: (opts) => {
+				capturedArgs = opts.args;
+				return fake;
+			},
+		});
+
+		await controller.start();
+
+		expect(capturedArgs).toEqual(["--provider", "anthropic"]);
+		expect(capturedArgs).not.toContain("--session");
+	});
+
+	it("rename() forwards the name to the client's setSessionName", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.rename("My name");
+		expect(fake.names).toEqual(["My name"]);
+	});
+
+	it("runState reflects the projected transcript (idle → running → needs-input)", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		// Fresh session, nothing streaming and no pending UI request.
+		expect(controller.runState).toBe("idle");
+
+		// A streaming start moves it to running.
+		fake.emit({ type: "agent_start" });
+		expect(controller.runState).toBe("running");
+
+		// The stream ends, then a blocking extension-UI request arrives → needs-input.
+		fake.emit({ type: "agent_end" });
+		expect(controller.runState).toBe("idle");
+		fake.emit({ type: "extension_ui_request", id: "u1", method: "confirm", title: "Proceed?" });
+		expect(controller.runState).toBe("needs-input");
+	});
+
+	it("sessionPath reflects the live session file from a status refresh", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		fake.state = { sessionFile: "/abs/live.jsonl" };
+		await controller.start(); // connect does a full refresh incl. getState
+
+		expect(controller.sessionPath).toBe("/abs/live.jsonl");
+	});
+
+	it("sessionPath falls back to the resume path before the first refresh", () => {
+		const fake = new FakeClient();
+		const controller = new SessionController({
+			cwd: "/tmp/project",
+			cliPath: "/cli.js",
+			sessionPath: "/abs/resume.jsonl",
+			clientFactory: () => fake,
+		});
+
+		// No start() yet — no live sessionFile, so it falls back to the resume path.
+		expect(controller.sessionPath).toBe("/abs/resume.jsonl");
+	});
+
+	it("does not clobber a known live session file when a later refresh omits it", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		fake.state = { sessionFile: "/abs/live.jsonl" };
+		await controller.start();
+		expect(controller.sessionPath).toBe("/abs/live.jsonl");
+
+		// A later refresh whose state omits sessionFile must preserve the known path.
+		fake.state = {};
+		fake.emit({ type: "agent_end" });
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(controller.sessionPath).toBe("/abs/live.jsonl");
 	});
 });

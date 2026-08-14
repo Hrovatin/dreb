@@ -4,7 +4,7 @@ A native chat client for the [dreb](https://github.com/aebrer/dreb) coding agent
 
 This package is modeled on `@dreb/dashboard`: an extension **host** owns the RPC child and the authoritative transcript state, and a **webview** renders it. The only transport difference is that the dashboard's HTTP+SSE layer is replaced by VS Code's `postMessage` bridge.
 
-> Status: **Phase 4b** (context tagging — tag an editor selection or a file/folder into the current chat) on top of Phase 3 (change review — per-turn git snapshot + per-hunk keep/reject), Phase 2 (built-in slash commands + TUI-parity status header), and the Phase 0 + 1 foundation. See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
+> Status: **Phase 5** (sessions side panel — a Copilot-style sidebar listing sessions with live status, resume, rename, pin, archive, delete; multiple sessions run concurrently) on top of Phase 4b (context tagging — tag an editor selection or a file/folder into the current chat), Phase 3 (change review — per-turn git snapshot + per-hunk keep/reject), Phase 2 (built-in slash commands + TUI-parity status header), and the Phase 0 + 1 foundation. See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
 
 ## Architecture
 
@@ -14,12 +14,16 @@ src/
     protocol.ts       host ↔ webview message envelopes (no @dreb import)
     projection.ts     RPC events → transcript render model (pure, tested)
   host/          # extension host (Node, ESM) — compiled with tsgo
-    extension.ts        activate(): registers `dreb.openChat`, `dreb.tagSelectionToChat` + review commands
-    session-controller.ts  one RpcClient + authoritative transcript per session
+    extension.ts        activate(): registers the chat + sessions sidebar + review commands; owns the session pool
+    session-controller.ts  one RpcClient + authoritative transcript per session (resume via `--session`, live run-state, rename)
     webview-bridge.ts   postMessage wiring + webview HTML/CSP
     cli-path.ts         resolve the dreb CLI (setting → dependency)
     slash-router.ts     route composer text → prompt vs builtin RPC (pure, tested)
-    session-registry.ts single-live-panel lifecycle (reentrancy-safe, pure, tested)
+    session-registry.ts multi-session pool — one live panel per session key, reentrancy-safe (pure, tested)
+    session-inventory.ts on-disk session enumeration via @dreb/coding-agent's SessionManager (vscode-free)
+    session-flags.ts    pin/archive persistence over globalState, keyed by session path (pure seam, tested)
+    sessions-view-model.ts sidebar list-building + action routing (pure, vscode-free, tested)
+    sessions-view.ts    the `dreb.sessions` WebviewView glue (postMessage transport + HTML shell)
     tag-selection.ts    tag-selection-into-chat orchestration (pure, vscode-free, tested)
     host-ui.ts          native-prompt port (quick pick / input / dialogs); vscode-free
     vscode-host-ui.ts   the real `HostUi` backed by `vscode.window`
@@ -31,10 +35,14 @@ src/
   shared/
     format.ts           status-header + `/session` display formatters (pure, tested)
     tagged-context.ts   selection + file/folder context DTOs, chip label, prompt fold + threshold (pure, tested)
-  webview/       # SolidJS UI — bundled with Vite → dist/webview
+    session-list.ts     disk+live session reconciliation, grouping, deterministic ordering, status (pure, tested)
+    sidebar-protocol.ts host ↔ sessions-sidebar message envelopes (no @dreb import)
+  webview/       # SolidJS UI — bundled with Vite → dist/webview (chat) + dist/webview-sidebar (sessions)
     app.tsx             transcript, collapsible activity box, composer, needs-input,
                         the status header (model · thinking · cost · ctx), and the
                         change-review bar
+    sidebar/app.tsx     the sessions side panel — grouped list, live status, resume,
+                        inline rename, pin / archive / delete
 ```
 
 - The host keeps the authoritative `TranscriptState`. On (re)load the webview announces `ready` and receives a full snapshot, so recreating the webview never loses the conversation.
@@ -73,6 +81,18 @@ Because the agent runs out-of-process and writes edits straight to disk, the ext
 - **Keep / reject** — the `dreb.review.*` commands accept a file (clear its marker — **no commit**), accept/revert all, revert a whole file to baseline, or **reject the hunk at the cursor** (`dreb.review.rejectHunkAtCursor`, which drives `git apply --reverse` on exactly that hunk). Rejecting a hunk restores only that region and never clobbers your own pre-existing edits.
 
 Review is host-authoritative, so it survives webview reload. Outside a git repository it degrades gracefully (disabled, no snapshots). The pure logic (`review-model.ts`, `diff-hunks.ts`) and the git plumbing (`git-snapshot.ts`, against real temp repos) are unit-tested; all `vscode` SCM/diff calls are isolated behind the `ReviewUi` port.
+
+## Sessions sidebar
+
+The **dreb** activity-bar container hosts a **Sessions** side panel (a SolidJS `WebviewView`, bundled separately into `dist/webview-sidebar`) that lists your dreb sessions Copilot-style:
+
+- **Grouping & ordering** — sessions in the **current workspace** are listed first ("This workspace"); sessions from **other working directories** appear in collapsible per-project groups below; **archived** sessions collapse into their own section. Ordering is **deterministic** (per this repo's "Determinism Over Recency" rule): pinned first, then most-recently-modified — live run-state never reorders rows, so cards don't jump around while streaming.
+- **Sources** — on-disk sessions are enumerated host-side via `@dreb/coding-agent`'s `SessionManager` (`list` / `listAll`, no RPC child needed); live sessions come from the pool. A live controller and its disk row are the **same** session (reconciled by session-file path) and show as one row — `session-list.ts` owns this pure merge/group/sort.
+- **Live status** — each row shows **running** (agent streaming), **needs input** (awaiting a selection/confirmation prompt), or **idle/done**, derived from the projected transcript (`streaming` / `uiRequests`). The sidebar refreshes (debounced) as controllers stream.
+- **Multiple concurrent sessions** — selecting a session **opens or resumes** it in a chat panel (resume passes `--session <path>` to the RPC child). Several sessions run **at once** and keep running when you switch tabs/focus: the single-slot registry is now a keyed **`SessionPool`** holding one live panel per session key.
+- **Organize** — **rename** (persisted via the `set_session_name` RPC; a closed session is renamed by briefly spawning a headless resume child), **pin**, **archive** (hidden from the main list, not deleted — retained on disk and reachable under "Archived"), and **delete** (behind a modal confirmation; removes the transcript and its flags). Pin/archive flags persist in `globalState`, keyed by session path.
+
+The list-building and action routing live in the vscode-free `sessions-view-model.ts` (unit-tested with fakes); `sessions-view.ts` is the thin `WebviewView` transport, mirroring `webview-bridge.ts`. The concurrency-safe pool core stays in the pure, tested `session-registry.ts`.
 
 ## Editor integration
 
