@@ -1208,4 +1208,64 @@ describe("SessionController session tree (Phase 6)", () => {
 		await expect(controller.fork("a1")).resolves.toBeUndefined();
 		expect(controller.getTranscript().statusText).toMatch(/Couldn't fork: boom/);
 	});
+
+	it("clears checkpoints on /new so a stale prior-session control can't render (finding 2)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const controller = makeController(fake);
+		await controller.start();
+		await controller.fork("a1"); // populate checkpoints from the current session
+		expect(controller.getCheckpoints().length).toBeGreaterThan(0);
+		const updates: Array<{ kind: string }> = [];
+		controller.onUpdate((u) => updates.push(u as never));
+
+		await controller.submit("/new");
+
+		// Durable state is cleared; the resync then re-posts the empty checkpoints
+		// to the webview (bridge-level, covered in webview-bridge.test.ts).
+		expect(controller.getCheckpoints()).toEqual([]);
+		expect(updates.some((u) => u.kind === "resync")).toBe(true);
+	});
+
+	it("clears checkpoints on /import as well (finding 2)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const ui = new FakeUi();
+		ui.openReturn = "/tmp/in.jsonl";
+		const controller = makeController(fake, { ui });
+		await controller.start();
+		await controller.fork("a1");
+		expect(controller.getCheckpoints().length).toBeGreaterThan(0);
+
+		await controller.submit("/import");
+		expect(controller.getCheckpoints()).toEqual([]);
+	});
+
+	it("rebuilds only the branch matching the leaf, not a sibling branch (finding 4)", async () => {
+		// A real fork: a1 has TWO children (two divergent branches). The leaf is in
+		// branch A, so the rebuilt transcript must follow branch A and ignore B.
+		const fake = new FakeClient();
+		fake.treeResult = {
+			roots: [
+				node("u1", "user", "hi", [
+					node("a1", "assistant", "hello", [
+						node("u2a", "user", "ask-A", [node("a2a", "assistant", "answer-A")]),
+						node("u2b", "user", "ask-B", [node("a2b", "assistant", "answer-B")]),
+					]),
+				]),
+			],
+			leafId: "a2a",
+		};
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.navigateTree("a2a");
+
+		const items = controller.getTranscript().items;
+		expect(
+			items.map((i) => (i.kind === "user" ? `u:${i.text}` : i.kind === "response" ? `a:${i.answer}` : i.text)),
+		).toEqual(["u:hi", "a:hello", "u:ask-A", "a:answer-A"]);
+		// Checkpoints key to branch-A entries only (the sibling branch is absent).
+		expect(controller.getCheckpoints().map((c) => c.entryId)).toEqual(["a1", "a2a"]);
+	});
 });

@@ -438,16 +438,22 @@ export function foldBranchIntoState(state: TranscriptState, turns: BranchTurn[])
  * Align assistant session entry ids (the current branch, chronological order) to
  * the transcript's completed response groups, keyed by the stable
  * {@link ResponseGroup.id}. Aligns from the most recent turn backward so the leaf
- * stays anchored even when an interrupted/errored run left a response group with
- * no corresponding session entry; on a length mismatch the unmatched (older)
- * groups simply get no control rather than a wrong one. The latest aligned
- * checkpoint gets `canRestore: false` (restoring to where you already are is a
- * no-op); every earlier one gets `canRestore: true`.
+ * stays anchored on a length mismatch (unmatched older groups simply get no
+ * control rather than a wrong one). The latest aligned checkpoint gets
+ * `canRestore: false` (restoring to where you already are is a no-op); every
+ * earlier one gets `canRestore: true`.
+ *
+ * Only actively-streaming groups are excluded: the in-flight turn has not been
+ * persisted as a session entry yet, so it has no id in `assistantEntryIds`.
+ * Errored groups are deliberately KEPT — a provider-error turn is still persisted
+ * to the session (and therefore present in the tree / `assistantEntryIds`), so
+ * dropping it here would desync the two sequences and shift every older
+ * checkpoint onto the wrong entry id (backward alignment would pair a successful
+ * group with the errored turn's id). Keeping errored groups preserves the 1:1
+ * positional correspondence the {@link foldBranchIntoState} rebuild path relies on.
  */
 export function alignCheckpoints(state: TranscriptState, assistantEntryIds: string[]): Checkpoint[] {
-	const groups = state.items.filter(
-		(item): item is ResponseGroup => item.kind === "response" && !item.streaming && !item.error,
-	);
+	const groups = state.items.filter((item): item is ResponseGroup => item.kind === "response" && !item.streaming);
 	const pairs = Math.min(groups.length, assistantEntryIds.length);
 	const checkpoints: Checkpoint[] = [];
 	for (let k = 0; k < pairs; k++) {

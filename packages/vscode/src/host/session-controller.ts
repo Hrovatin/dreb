@@ -689,6 +689,11 @@ export class SessionController {
 		this.state.statusText = undefined;
 		this.state.hostError = undefined;
 		this.state.nextResponseId = 1;
+		// Drop the prior session's checkpoints so a new/imported session doesn't
+		// render stale Restore/Fork controls on its first turn (the new session's
+		// first response group reuses id 1 and would otherwise match a stale
+		// `{responseId: 1}`). The subsequent `resync` re-posts this empty array.
+		this.checkpoints = [];
 	}
 
 	/** Append a persistent host-side line to the transcript (e.g. `/session`). */

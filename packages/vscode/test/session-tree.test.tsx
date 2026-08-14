@@ -121,4 +121,69 @@ describe("TreePanel (branch-tree view)", () => {
 		overlay.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
 		expect(closed).toBe(1);
 	});
+
+	it("renders BOTH branches of a fork and marks only the true leaf (finding 4)", () => {
+		// a1 forks into two divergent branches; the leaf is in branch A.
+		const forked: SessionTreeDto = {
+			roots: [
+				{
+					id: "u1",
+					parentId: null,
+					type: "message",
+					role: "user",
+					preview: "hi",
+					timestamp: "t",
+					children: [
+						{
+							id: "a1",
+							parentId: "u1",
+							type: "message",
+							role: "assistant",
+							preview: "hello",
+							timestamp: "t",
+							children: [
+								{
+									id: "a2a",
+									parentId: "a1",
+									type: "message",
+									role: "assistant",
+									preview: "answer-A",
+									timestamp: "t",
+									children: [],
+								},
+								{
+									id: "a2b",
+									parentId: "a1",
+									type: "message",
+									role: "assistant",
+									preview: "answer-B",
+									timestamp: "t",
+									children: [],
+								},
+							],
+						},
+					],
+				},
+			],
+			leafId: "a2a",
+		};
+		const navigated: string[] = [];
+		const host = mount(() => <TreePanel tree={forked} onNavigate={(id) => navigated.push(id)} onClose={() => {}} />);
+
+		const nodes = [...host.querySelectorAll("button.dreb-tree-node")] as HTMLButtonElement[];
+		// All four turns render (both sibling branches present).
+		expect(nodes.map((n) => n.textContent)).toEqual(
+			expect.arrayContaining(["hi", "hello", "answer-A", "answer-B"].map((t) => expect.stringContaining(t))),
+		);
+		// Only the true leaf (a2a / "answer-A") is disabled + marked current.
+		const leaf = nodes.find((n) => n.textContent?.includes("answer-A"));
+		const sibling = nodes.find((n) => n.textContent?.includes("answer-B"));
+		expect(leaf?.disabled).toBe(true);
+		expect(sibling?.disabled).toBe(false);
+		expect(host.querySelectorAll(".dreb-tree-current")).toHaveLength(1);
+
+		// Navigating to the sibling branch posts that branch's node id.
+		sibling?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+		expect(navigated).toEqual(["a2b"]);
+	});
 });

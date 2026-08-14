@@ -299,11 +299,34 @@ describe("alignCheckpoints (Phase 6)", () => {
 		]);
 	});
 
-	it("skips streaming/errored groups (no session entry for them)", () => {
+	it("skips only actively-streaming groups (the in-flight turn has no persisted entry yet)", () => {
 		const state = createTranscriptState();
 		state.items.push({ kind: "response", id: 1, activity: [], answer: "ok", streaming: false, collapsed: true });
 		state.items.push({ kind: "response", id: 2, activity: [], answer: "", streaming: true, collapsed: false });
 		expect(alignCheckpoints(state, ["e1"])).toEqual([{ responseId: 1, entryId: "e1", canRestore: false }]);
+	});
+
+	it("KEEPS errored groups aligned to their entry — a provider-error turn is persisted (finding 1)", () => {
+		// [A ok, B error, C ok]: the errored turn B is still a persisted session
+		// entry (present in assistantEntryIds), so it must keep its slot. Dropping
+		// it would pair A with B's id (off-by-one) — the bug this guards.
+		const state = createTranscriptState();
+		state.items.push({ kind: "response", id: 1, activity: [], answer: "a", streaming: false, collapsed: true });
+		state.items.push({
+			kind: "response",
+			id: 2,
+			activity: [],
+			answer: "",
+			streaming: false,
+			collapsed: true,
+			error: "rate limited",
+		});
+		state.items.push({ kind: "response", id: 3, activity: [], answer: "c", streaming: false, collapsed: true });
+		expect(alignCheckpoints(state, ["a", "b", "c"])).toEqual([
+			{ responseId: 1, entryId: "a", canRestore: true },
+			{ responseId: 2, entryId: "b", canRestore: true },
+			{ responseId: 3, entryId: "c", canRestore: false },
+		]);
 	});
 
 	it("degrades gracefully on a length mismatch, anchoring from the most recent turn", () => {
