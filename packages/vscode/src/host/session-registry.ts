@@ -1,18 +1,26 @@
 /**
- * Single-slot session registry enforcing the "one live chat panel" invariant.
+ * Multi-session pool enforcing the "one live chat panel PER SESSION KEY" invariant.
  *
- * The extension keeps exactly one {@link https://code.visualstudio.com/api | vscode}
- * webview panel + `SessionController` at a time. Reopening after `/quit` must
- * tear the dead session down and build a fresh one; revealing a live session
- * must not build a second. Both of those paths, plus panel-close teardown, race
- * against each other because VS Code does not serialize async command handlers.
+ * The extension may keep several {@link https://code.visualstudio.com/api | vscode}
+ * webview panels + `SessionController`s alive at once, one per session key.
+ * Within a single key the same lifecycle rules as the old single-slot registry
+ * apply: reopening a key after `/quit` must tear the dead session down and build
+ * a fresh one; revealing a live session under a key must not build a second
+ * (reveal-not-rebuild per key). Panel-close teardown, `/quit` reopen, and reveal
+ * all race against each other because VS Code does not serialize async command
+ * handlers, so every path is reentrancy-safe per key.
+ *
+ * Distinct keys are independent: opening, revealing, or disposing one key never
+ * affects another. Teardown is scoped and idempotent — a panel-close firing
+ * after an explicit teardown (or a stale session under a key that has since been
+ * replaced) never double-releases resources or clobbers a newer live session.
  *
  * This module holds the vscode-free, unit-testable core of that lifecycle so the
  * concurrency rules can be pinned without a full webview mock. `extension.ts`
  * injects the vscode-specific operations via {@link SessionOps}.
  */
 
-/** vscode-specific operations the registry performs on a session object. */
+/** vscode-specific operations the pool performs on a session object. */
 export interface SessionOps<S extends object> {
 	/** Whether the session's controller has been torn down (e.g. via `/quit`). */
 	isDisposed(session: S): boolean;
@@ -22,66 +30,127 @@ export interface SessionOps<S extends object> {
 	teardown(session: S): Promise<void>;
 }
 
-export class SessionRegistry<S extends object> {
-	private current: S | undefined;
+export class SessionPool<S extends object> {
+	/** Live sessions keyed by session id, in insertion order. */
+	private readonly sessions = new Map<string, S>();
 	/** Sessions already torn down, so a panel-close firing after an explicit
 	 * teardown (or vice versa) doesn't double-release resources. */
 	private readonly tornDown = new WeakSet<S>();
+	/** Key of the currently focused session, if any. */
+	private activeKey: string | undefined;
 
 	constructor(private readonly ops: SessionOps<S>) {}
 
-	/** The currently registered live session, if any (primarily for tests). */
+	/** Number of live sessions in the pool. */
+	get size(): number {
+		return this.sessions.size;
+	}
+
+	/** All live sessions, in Map insertion order. */
+	list(): S[] {
+		return [...this.sessions.values()];
+	}
+
+	/** The live session stored under `key`, if any. */
+	get(key: string): S | undefined {
+		return this.sessions.get(key);
+	}
+
+	/** Whether a live session is stored under `key`. */
+	has(key: string): boolean {
+		return this.sessions.has(key);
+	}
+
+	/** The currently focused live session, if any. */
 	get active(): S | undefined {
-		return this.current;
+		return this.activeKey === undefined ? undefined : this.sessions.get(this.activeKey);
 	}
 
 	/**
-	 * Reveal the live session, or build a fresh one via `create`.
+	 * Set the focused session key. `undefined` clears the focus; a key that is
+	 * not present in the pool is ignored (no-op).
+	 */
+	setActive(key: string | undefined): void {
+		if (key === undefined) {
+			this.activeKey = undefined;
+			return;
+		}
+		if (this.sessions.has(key)) this.activeKey = key;
+	}
+
+	/**
+	 * Reveal the live session under `key`, or build a fresh one via `create`.
 	 *
-	 * Reentrancy-safe: a disposed session is torn down first, and because
-	 * `teardown` is awaited, a concurrent `open` may install a new session during
-	 * that gap — in which case we defer to it rather than orphaning it. Crucially
-	 * there is **no `await` between the final decision to build and the `current`
-	 * assignment**, so two concurrent opens can never both construct a session.
+	 * Reentrancy-safe per key: a disposed session is torn down first, and because
+	 * `teardown` is awaited, a concurrent `open(key)` may install a new session
+	 * during that gap — in which case we defer to it rather than orphaning it.
+	 * Crucially there is **no `await` between the final decision to build and the
+	 * Map assignment**, so two concurrent opens for the same key can never both
+	 * construct a session.
 	 *
 	 * `create` is only ever invoked when a new session is actually needed, so it
 	 * may perform expensive side effects (spawning the RPC child, creating the
 	 * panel) without risk of an immediately-discarded construction.
 	 */
-	async open(create: () => S): Promise<void> {
-		if (this.current !== undefined && !this.ops.isDisposed(this.current)) {
-			this.ops.reveal(this.current);
-			return;
+	async open(key: string, create: () => S): Promise<S> {
+		const existing = this.sessions.get(key);
+		if (existing !== undefined && !this.ops.isDisposed(existing)) {
+			this.ops.reveal(existing);
+			return existing;
 		}
-		if (this.current !== undefined) {
+		if (existing !== undefined) {
 			// Stale session ended via `/quit` (disposed controller, panel left open
 			// showing its "session ended" banner). Tear it down before rebuilding.
-			await this.disposeSession(this.current);
-			// The await above yielded: a concurrent open() may have installed a new
-			// live session. Defer to it instead of building a duplicate/orphan.
-			if (this.current !== undefined) {
-				this.ops.reveal(this.current);
-				return;
+			await this.disposeSession(existing);
+			// The await above yielded: a concurrent open(key) may have installed a
+			// new live session. Defer to it instead of building a duplicate/orphan.
+			const concurrent = this.sessions.get(key);
+			if (concurrent !== undefined) {
+				this.ops.reveal(concurrent);
+				return concurrent;
 			}
 		}
-		this.current = create();
+		const s = create();
+		this.sessions.set(key, s);
+		return s;
+	}
+
+	/** Tear down the session stored under `key`, if any. */
+	async disposeKey(key: string): Promise<void> {
+		const session = this.sessions.get(key);
+		if (session !== undefined) await this.disposeSession(session);
 	}
 
 	/**
-	 * Tear down a specific session. Only clears `current` if it still points at
-	 * this session, so closing an older/orphaned panel never disposes a newer
-	 * live session. Idempotent: safe to call from both an explicit `/quit`-driven
-	 * path and the panel's `onDidDispose`.
+	 * Tear down a specific session. Only removes the map entry (and clears the
+	 * active key) if it still points at this session, so closing an older/orphaned
+	 * panel never disposes a newer live session under the same key. Idempotent:
+	 * safe to call from both an explicit `/quit`-driven path and the panel's
+	 * `onDidDispose`.
 	 */
 	async disposeSession(session: S): Promise<void> {
 		if (this.tornDown.has(session)) return;
 		this.tornDown.add(session);
-		if (this.current === session) this.current = undefined;
+		// Find the key that still points at THIS exact session (a newer session
+		// installed under the same key must survive).
+		let foundKey: string | undefined;
+		for (const [k, v] of this.sessions) {
+			if (v === session) {
+				foundKey = k;
+				break;
+			}
+		}
+		if (foundKey !== undefined && this.sessions.get(foundKey) === session) {
+			this.sessions.delete(foundKey);
+			if (foundKey === this.activeKey) this.activeKey = undefined;
+		}
 		await this.ops.teardown(session);
 	}
 
-	/** Tear down the live session, if any (used on extension deactivate). */
-	async disposeActive(): Promise<void> {
-		if (this.current !== undefined) await this.disposeSession(this.current);
+	/** Tear down every live session (used on extension deactivate). */
+	async disposeAll(): Promise<void> {
+		const snapshot = this.list();
+		for (const session of snapshot) await this.disposeSession(session);
+		this.activeKey = undefined;
 	}
 }
