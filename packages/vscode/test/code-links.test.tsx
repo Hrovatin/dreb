@@ -124,4 +124,25 @@ describe("linkifyAnswer", () => {
 		expect(out).toContain("&amp;");
 		expect(links(out)).toHaveLength(1);
 	});
+
+	it("prefers the file link over an overlapping grounded symbol in the same text", () => {
+		// `widget` is a grounded symbol AND a substring of the grounded file token
+		// `src/widget.ts:42`. The file hit must win the overlap: one link, carrying
+		// the line number, with no stray/duplicate text or nested anchor.
+		const refs = {
+			paths: new Set(["src/widget.ts"]),
+			symbols: new Map([["widget", { path: "src/widget.ts", line: 7 }]]),
+		};
+		const out = linkifyAnswer("<p>See src/widget.ts:42 here</p>", refs);
+		const all = links(out);
+		expect(all).toHaveLength(1);
+		expect(all[0].dataset.path).toBe("src/widget.ts");
+		expect(all[0].dataset.line).toBe("42");
+		expect(all[0].dataset.symbol).toBeUndefined();
+		expect(all[0].textContent).toBe("src/widget.ts:42");
+		// No text was dropped or duplicated around the single link.
+		const div = document.createElement("div");
+		div.innerHTML = out;
+		expect(div.textContent).toBe("See src/widget.ts:42 here");
+	});
 });

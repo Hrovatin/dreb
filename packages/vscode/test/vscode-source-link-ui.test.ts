@@ -12,6 +12,8 @@ const hoisted = vi.hoisted(() => ({
 	exists: new Set<string>(),
 	symbolHits: [] as any[],
 	pickResult: undefined as any,
+	pickCount: 0,
+	openThrows: false,
 	shown: [] as { uri: any; selection?: any; revealed: boolean }[],
 	info: [] as string[],
 }));
@@ -50,7 +52,10 @@ vi.mock("vscode", () => {
 			executeCommand: vi.fn(async () => hoisted.symbolHits),
 		},
 		window: {
-			showQuickPick: vi.fn(async () => hoisted.pickResult),
+			showQuickPick: vi.fn(async () => {
+				hoisted.pickCount++;
+				return hoisted.pickResult;
+			}),
 			showInformationMessage: vi.fn(async (m: string) => {
 				hoisted.info.push(m);
 			}),
@@ -72,7 +77,10 @@ vi.mock("vscode", () => {
 			}),
 		},
 		workspace: {
-			openTextDocument: vi.fn(async (uri: any) => ({ uri })),
+			openTextDocument: vi.fn(async (uri: any) => {
+				if (hoisted.openThrows) throw new Error("cannot open binary file");
+				return { uri };
+			}),
 			asRelativePath: (uri: any) => uri.fsPath,
 		},
 	};
@@ -84,6 +92,8 @@ function reset() {
 	hoisted.exists = new Set();
 	hoisted.symbolHits = [];
 	hoisted.pickResult = undefined;
+	hoisted.pickCount = 0;
+	hoisted.openThrows = false;
 	hoisted.shown = [];
 	hoisted.info = [];
 }
@@ -111,6 +121,21 @@ describe("createVscodeSourceLinkUi", () => {
 
 		expect(hoisted.shown).toHaveLength(0);
 		expect(hoisted.info[0]).toContain("not found");
+	});
+
+	it("surfaces a notice (not a silent no-op) when opening the document fails", async () => {
+		reset();
+		// File exists at check time but openTextDocument rejects (binary file, or
+		// deleted between existsSync and open). Must degrade to a notice, and must
+		// not reject — the bridge calls openSource fire-and-forget.
+		hoisted.exists.add("/proj/assets/logo.png");
+		hoisted.openThrows = true;
+		const ui = createVscodeSourceLinkUi("/proj");
+
+		await expect(ui.openSource({ path: "assets/logo.png", line: 1 })).resolves.toBeUndefined();
+
+		expect(hoisted.shown).toHaveLength(0);
+		expect(hoisted.info[0]).toContain("couldn't open");
 	});
 
 	it("prefers a symbol's definition (workspace symbol provider) over the grounded path", async () => {
@@ -155,6 +180,39 @@ describe("createVscodeSourceLinkUi", () => {
 
 		expect(hoisted.shown).toHaveLength(1);
 		expect(hoisted.shown[0].uri.fsPath).toBe("/proj/b.ts");
+		expect(hoisted.pickCount).toBe(1);
+	});
+
+	it("uses the exact-name match directly, without a quick pick, amid fuzzy hits", async () => {
+		reset();
+		// Fuzzy workspace-symbol search commonly returns substring matches
+		// (WidgetFactory, MyWidget) alongside the exact one. The exact name must
+		// win directly — no disambiguation prompt, no fuzzy definition.
+		hoisted.symbolHits = [
+			{
+				name: "WidgetFactory",
+				kind: 4,
+				location: { uri: { fsPath: "/proj/factory.ts" }, range: { start: { line: 0, character: 0 } } },
+			},
+			{
+				name: "Widget",
+				kind: 4,
+				location: { uri: { fsPath: "/proj/widget.ts" }, range: { start: { line: 9, character: 4 } } },
+			},
+			{
+				name: "MyWidget",
+				kind: 4,
+				location: { uri: { fsPath: "/proj/my.ts" }, range: { start: { line: 2, character: 0 } } },
+			},
+		];
+		const ui = createVscodeSourceLinkUi("/proj");
+
+		await ui.openSource({ symbol: "Widget" });
+
+		expect(hoisted.pickCount).toBe(0);
+		expect(hoisted.shown).toHaveLength(1);
+		expect(hoisted.shown[0].uri.fsPath).toBe("/proj/widget.ts");
+		expect(hoisted.shown[0].selection.active.line).toBe(9);
 	});
 
 	it("falls back to the grounded path/line when the provider finds nothing", async () => {

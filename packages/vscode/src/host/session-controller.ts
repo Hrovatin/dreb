@@ -697,9 +697,16 @@ export class SessionController {
 		await this.reviewUi.openDiff(path);
 	}
 
-	/** Open a code reference the user clicked in an answer (Phase 5b). */
+	/** Open a code reference the user clicked in an answer (Phase 5b). The
+	 * adapter is best-effort and non-throwing, but guard here too so an
+	 * unexpected failure surfaces a notice instead of an unhandled rejection
+	 * (the bridge calls this fire-and-forget). */
 	async openSource(ref: OpenSourceRef): Promise<void> {
-		await this.sourceLinkUi.openSource(ref);
+		try {
+			await this.sourceLinkUi.openSource(ref);
+		} catch (err) {
+			this.emitNotice(`Couldn't open the reference: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	}
 
 	/** Accept a single file (clear its review marker; no commit). */

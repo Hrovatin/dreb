@@ -1011,4 +1011,20 @@ describe("SessionController.openSource", () => {
 		});
 		await expect(controller.openSource({ path: "src/a.ts", line: 1 })).resolves.toBeUndefined();
 	});
+
+	it("swallows a throwing SourceLinkUi into a notice (bridge calls it fire-and-forget)", async () => {
+		const sourceLink: SourceLinkUi = {
+			async openSource() {
+				throw new Error("boom");
+			},
+		};
+		const controller = new SessionController({
+			cwd: "/tmp/project",
+			cliPath: "/cli.js",
+			clientFactory: () => new FakeClient(),
+			sourceLink,
+		});
+		// Must not reject — an unhandled rejection is exactly what we're guarding.
+		await expect(controller.openSource({ symbol: "Widget" })).resolves.toBeUndefined();
+	});
 });

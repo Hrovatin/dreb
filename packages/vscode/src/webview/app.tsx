@@ -193,7 +193,7 @@ export function App() {
 	);
 }
 
-function ResponseView(props: { group: ResponseGroup }) {
+export function ResponseView(props: { group: ResponseGroup }) {
 	return (
 		<div class="dreb-response">
 			<Show when={props.group.activity.length > 0}>

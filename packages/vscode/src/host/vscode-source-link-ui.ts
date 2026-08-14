@@ -44,13 +44,19 @@ export function createVscodeSourceLinkUi(cwd: string): SourceLinkUi {
 }
 
 /** Resolve a symbol to a definition location via the workspace symbol provider,
- * disambiguating multiple candidates with a quick pick. */
+ * disambiguating multiple candidates with a quick pick. Best-effort: a symbol
+ * provider that throws degrades to `undefined` (caller falls back to the path). */
 async function resolveSymbol(symbol: string): Promise<vscode.Location | undefined> {
-	const hits =
-		(await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
-			"vscode.executeWorkspaceSymbolProvider",
-			symbol,
-		)) ?? [];
+	let hits: vscode.SymbolInformation[];
+	try {
+		hits =
+			(await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+				"vscode.executeWorkspaceSymbolProvider",
+				symbol,
+			)) ?? [];
+	} catch {
+		return undefined;
+	}
 	if (hits.length === 0) return undefined;
 	const exact = hits.filter((h) => h.name === symbol);
 	const pool = exact.length > 0 ? exact : hits;
@@ -78,13 +84,21 @@ async function openPath(cwd: string, path: string, line?: number, column?: numbe
 	await reveal(vscode.Uri.file(abs), line, column);
 }
 
-/** Open the document and, when a 1-based line is given, select+reveal it. */
+/** Open the document and, when a 1-based line is given, select+reveal it. An
+ * open failure (file deleted after the existsSync check, a binary/undecodable
+ * file, permission error) degrades to an unobtrusive notice rather than a silent
+ * no-op — honoring the "never a broken jump" contract. */
 async function reveal(uri: vscode.Uri, line?: number, column?: number): Promise<void> {
-	const doc = await vscode.workspace.openTextDocument(uri);
-	const editor = await vscode.window.showTextDocument(doc, { preview: true });
-	if (line && line > 0) {
-		const pos = new vscode.Position(line - 1, Math.max(0, (column ?? 1) - 1));
-		editor.selection = new vscode.Selection(pos, pos);
-		editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+	try {
+		const doc = await vscode.workspace.openTextDocument(uri);
+		const editor = await vscode.window.showTextDocument(doc, { preview: true });
+		if (line && line > 0) {
+			const pos = new vscode.Position(line - 1, Math.max(0, (column ?? 1) - 1));
+			editor.selection = new vscode.Selection(pos, pos);
+			editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+		}
+	} catch (err) {
+		const detail = err instanceof Error ? `: ${err.message}` : "";
+		void vscode.window.showInformationMessage(`dreb: couldn't open ${uri.fsPath}${detail}.`);
 	}
 }

@@ -47,20 +47,12 @@ function normalizePath(path: string): string {
 	return path.trim().replace(/\\/g, "/");
 }
 
-/** Pull a string `path` field out of a tool's `args` (read/find/grep all carry
- * one), tolerating the `unknown` type. */
-function argsPath(args: unknown): string | undefined {
-	if (args && typeof args === "object" && "path" in args) {
-		const p = (args as { path?: unknown }).path;
-		if (typeof p === "string" && p.length > 0) return p;
-	}
-	return undefined;
-}
-
-function argsPattern(args: unknown): string | undefined {
-	if (args && typeof args === "object" && "pattern" in args) {
-		const p = (args as { pattern?: unknown }).pattern;
-		if (typeof p === "string" && p.length > 0) return p;
+/** Pull a non-empty string field (e.g. `path`/`pattern`) out of a tool's `args`,
+ * tolerating the `unknown` type. */
+function argsField(args: unknown, field: string): string | undefined {
+	if (args && typeof args === "object" && field in args) {
+		const v = (args as Record<string, unknown>)[field];
+		if (typeof v === "string" && v.length > 0) return v;
 	}
 	return undefined;
 }
@@ -76,7 +68,7 @@ export function buildGroundedRefs(activity: readonly ActivityItem[]): GroundedRe
 
 	for (const item of activity) {
 		if (item.kind !== "tool") continue;
-		const callPath = argsPath(item.args);
+		const callPath = argsField(item.args, "path");
 		if (callPath) paths.add(normalizePath(callPath));
 
 		const lines = item.resultText ? item.resultText.split("\n") : [];
@@ -113,7 +105,7 @@ export function buildGroundedRefs(activity: readonly ActivityItem[]): GroundedRe
 
 		// A grep whose pattern is a bare identifier grounds that symbol at its
 		// first hit (a usage site — the host still prefers the LSP definition).
-		const pattern = argsPattern(item.args);
+		const pattern = argsField(item.args, "pattern");
 		if (item.toolName === "grep" && pattern && IDENTIFIER.test(pattern) && firstGrepHit && !symbols.has(pattern)) {
 			symbols.set(pattern, firstGrepHit);
 		}
