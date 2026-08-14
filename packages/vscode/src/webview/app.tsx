@@ -10,8 +10,16 @@ import {
 	type TranscriptState,
 	type UiRequest,
 } from "../shared/projection.js";
-import type { HostStatus, ReviewStateDto, SlashCommandDto, TaggedContextDto, UiResponse } from "../shared/protocol.js";
+import type {
+	HostStatus,
+	OpenSourceRef,
+	ReviewStateDto,
+	SlashCommandDto,
+	TaggedContextDto,
+	UiResponse,
+} from "../shared/protocol.js";
 import { taggedContextLabel, taggedContextTitle } from "../shared/tagged-context.js";
+import { buildGroundedRefs, linkifyAnswer } from "./code-links.js";
 import { renderMarkdown } from "./markdown.js";
 import { onHostMessage, postToHost } from "./vscode-api.js";
 
@@ -185,15 +193,23 @@ export function App() {
 	);
 }
 
-function ResponseView(props: { group: ResponseGroup }) {
+export function ResponseView(props: { group: ResponseGroup }) {
 	return (
 		<div class="dreb-response">
 			<Show when={props.group.activity.length > 0}>
 				<ActivityBox group={props.group} />
 			</Show>
 			<Show when={props.group.answer.length > 0}>
-				{/* Sanitized markdown — see renderMarkdown. */}
-				<div class="dreb-answer" innerHTML={renderMarkdown(props.group.answer)} />
+				{/* Sanitized markdown with grounded, clickable code links. Links are
+				    wired via event delegation (postToHost) rather than href navigation,
+				    so they work under the webview's strict CSP. */}
+				{/* biome-ignore lint/a11y/noStaticElementInteractions: delegates activation of the rendered-markdown <a> links (the anchors are the interactive elements) */}
+				{/* biome-ignore lint/a11y/useKeyWithClickEvents: the links are keyboard-focusable anchors inside innerHTML; delegation only forwards their activation */}
+				<div
+					class="dreb-answer"
+					onClick={onCodeLinkClick}
+					innerHTML={linkifyAnswer(renderMarkdown(props.group.answer), buildGroundedRefs(props.group.activity))}
+				/>
 			</Show>
 			<Show when={props.group.error}>
 				<div class="dreb-banner error">{props.group.error}</div>
@@ -530,6 +546,22 @@ function Composer(props: {
 			</div>
 		</div>
 	);
+}
+
+/** Delegated click handler on a rendered answer: intercept a clicked code link
+ * and ask the host to open it. Uses event delegation (not `href`) so it works
+ * under the webview's `default-src 'none'` CSP. */
+function onCodeLinkClick(event: MouseEvent): void {
+	const target = event.target as HTMLElement | null;
+	const link = target?.closest?.("a.dreb-code-link") as HTMLElement | null;
+	if (!link) return;
+	event.preventDefault();
+	const ref: OpenSourceRef = {};
+	if (link.dataset.path) ref.path = link.dataset.path;
+	if (link.dataset.line) ref.line = Number(link.dataset.line);
+	if (link.dataset.column) ref.column = Number(link.dataset.column);
+	if (link.dataset.symbol) ref.symbol = link.dataset.symbol;
+	if (ref.path || ref.symbol) postToHost({ type: "open-source", ref });
 }
 
 function argPreview(args: unknown): string | undefined {

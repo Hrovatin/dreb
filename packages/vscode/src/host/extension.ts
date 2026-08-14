@@ -27,6 +27,7 @@ import { SessionsViewProvider } from "./sessions-view.js";
 import { tagSelectionToChat } from "./tag-selection.js";
 import { createVscodeHostUi } from "./vscode-host-ui.js";
 import { createVscodeReviewUi } from "./vscode-review-ui.js";
+import { createVscodeSourceLinkUi } from "./vscode-source-link-ui.js";
 import { connectWebview, getWebviewHtml } from "./webview-bridge.js";
 
 interface ChatSession {
@@ -227,6 +228,7 @@ function createSession(context: vscode.ExtensionContext, key: string, sessionPat
 		sessionPath,
 		ui: createVscodeHostUi(),
 		review: reviewUi,
+		sourceLink: createVscodeSourceLinkUi(cwd),
 		logger: (line) => console.warn(`[dreb] ${line}`),
 	});
 
