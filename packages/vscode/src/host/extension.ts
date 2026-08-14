@@ -21,7 +21,7 @@ import { resolveCliPath } from "./cli-path.js";
 import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
-import { createSessionInventory, type SessionInventory } from "./session-inventory.js";
+import { createSessionInventory, deletePersistedSession, type SessionInventory } from "./session-inventory.js";
 import { SessionPool } from "./session-registry.js";
 import { SessionsViewProvider } from "./sessions-view.js";
 import { tagSelectionToChat } from "./tag-selection.js";
@@ -321,16 +321,12 @@ async function deleteSession(key: string): Promise<void> {
 	if (choice !== "Delete") return;
 	if (live) await pool.disposeSession(live);
 	if (path) {
-		// Guard against deleting whatever is active now (a different session after
-		// the target's own controller was disposed just above).
-		const result = await inventory.deleteSession(path, {
-			activeSessionPath: pool.active?.controller.sessionPath,
-		});
-		if (result.ok) {
-			await flags.clear(path);
-		} else {
-			vscode.window.showErrorMessage(`dreb: delete failed — ${result.error ?? "unknown error"}`);
-		}
+		// Delete the transcript and drop its flags only on success. `activeSessionPath`
+		// is read *after* disposing the target above, so the guard only fires for a
+		// genuinely different session that is still active.
+		await deletePersistedSession(inventory, flags, path, pool.active?.controller.sessionPath, (message) =>
+			vscode.window.showErrorMessage(message),
+		);
 	}
 	scheduleSidebarRefresh();
 }

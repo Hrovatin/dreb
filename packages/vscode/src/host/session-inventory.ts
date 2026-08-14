@@ -120,3 +120,35 @@ export function createSessionInventory(): SessionInventory {
 		},
 	};
 }
+
+/** Minimal port over the persisted pin/archive flags a delete needs to drop. */
+export interface DeletableFlags {
+	clear(path: string): Promise<void>;
+}
+
+/**
+ * Delete a persisted session's transcript and drop its flags **only when the
+ * delete succeeds**. On failure (e.g. the active-session guard or `.jsonl`
+ * validation rejecting) the flags are deliberately left intact — clearing them
+ * would leave a "ghost" pinned/archived entry whose transcript still exists on
+ * disk — and the error is reported through the injected `reportError` sink.
+ *
+ * This is the vscode-free core of the host's delete flow, extracted so the
+ * flags-only-on-success contract (the substance of the recoverable-delete fix)
+ * is unit-testable without the `vscode` module. Returns the underlying result.
+ */
+export async function deletePersistedSession(
+	inventory: Pick<SessionInventory, "deleteSession">,
+	flags: DeletableFlags,
+	path: string,
+	activeSessionPath: string | undefined,
+	reportError: (message: string) => void,
+): Promise<DeleteSessionResult> {
+	const result = await inventory.deleteSession(path, { activeSessionPath });
+	if (result.ok) {
+		await flags.clear(path);
+	} else {
+		reportError(`dreb: delete failed — ${result.error ?? "unknown error"}`);
+	}
+	return result;
+}

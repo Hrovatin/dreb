@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	deletePersistedSession,
 	inventoryFrom,
 	type RawSessionInfo,
 	type SessionManagerLike,
@@ -143,5 +144,75 @@ describe("inventoryFrom.deleteSession", () => {
 
 		expect(result.ok).toBe(false);
 		expect(result.error).toMatch(/active session/);
+	});
+});
+
+describe("deletePersistedSession", () => {
+	function makeInventory(result: { ok: boolean; method: "trash" | "unlink"; error?: string }) {
+		const calls: Array<{ path: string; opts?: { activeSessionPath?: string } }> = [];
+		return {
+			calls,
+			inventory: {
+				deleteSession: async (path: string, opts?: { activeSessionPath?: string }) => {
+					calls.push({ path, opts });
+					return result;
+				},
+			},
+		};
+	}
+
+	it("clears flags and does NOT report an error when the delete succeeds", async () => {
+		const { inventory, calls } = makeInventory({ ok: true, method: "trash" });
+		const cleared: string[] = [];
+		const errors: string[] = [];
+
+		const result = await deletePersistedSession(
+			inventory,
+			{ clear: async (p) => void cleared.push(p) },
+			"/proj/a.jsonl",
+			"/proj/b.jsonl",
+			(m) => errors.push(m),
+		);
+
+		expect(result).toEqual({ ok: true, method: "trash" });
+		// Passes the active-session path through to the guard.
+		expect(calls).toEqual([{ path: "/proj/a.jsonl", opts: { activeSessionPath: "/proj/b.jsonl" } }]);
+		expect(cleared).toEqual(["/proj/a.jsonl"]);
+		expect(errors).toEqual([]);
+	});
+
+	it("does NOT clear flags and reports the error when the delete fails (regression guard: no ghost pinned/archived entry)", async () => {
+		const { inventory } = makeInventory({
+			ok: false,
+			method: "unlink",
+			error: "Cannot delete the currently active session",
+		});
+		const cleared: string[] = [];
+		const errors: string[] = [];
+
+		const result = await deletePersistedSession(
+			inventory,
+			{ clear: async (p) => void cleared.push(p) },
+			"/proj/a.jsonl",
+			undefined,
+			(m) => errors.push(m),
+		);
+
+		expect(result.ok).toBe(false);
+		// Flags must survive a failed delete — clearing them would leave a ghost
+		// entry whose transcript still exists on disk (round-1 finding-4 regression).
+		expect(cleared).toEqual([]);
+		expect(errors).toEqual(["dreb: delete failed — Cannot delete the currently active session"]);
+	});
+
+	it("falls back to a generic message when a failed result carries no error string", async () => {
+		const { inventory } = makeInventory({ ok: false, method: "unlink" });
+		const errors: string[] = [];
+
+		await deletePersistedSession(inventory, { clear: async () => {} }, "/proj/a.jsonl", undefined, (m) =>
+			errors.push(m),
+		);
+
+		expect(errors).toEqual(["dreb: delete failed — unknown error"]);
 	});
 });
