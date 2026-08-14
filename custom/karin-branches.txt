@@ -10,8 +10,7 @@
 # ---------------------------------------------------------------------------
 
 feature/issue-439-fork-from-current-state
-worktree-cleaned                                   # consolidates #233 worktree isolation + #4 parallel-mode + #8 test coverage
-vscode-cleaned                                     # full VS Code extension Phases 0-4 (PRs #14/#16/#18/#21), de-tangled from worktree work — replaces issue-13
+vscode                                             # the full vscode branch: VS Code extension Phases 0-4b (PRs #14/#16/#18/#21/#23) + worktree isolation (#233) + parallel-mode (#4) + test coverage (#8). Contains worktree-cleaned's domain, so worktree-cleaned is NOT listed separately.
 feature/issue-10-ask-mode
 feature/issue-1-architecture-section-push-comments
 feature/issue-6-mach6mini-skills
