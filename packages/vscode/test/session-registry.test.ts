@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type SessionOps, SessionRegistry } from "../src/host/session-registry.js";
+import { type SessionOps, SessionPool } from "../src/host/session-registry.js";
 
 /** A fake session with controllable disposed-state and an observable teardown
  * whose completion a test can gate to simulate slow/racing `/quit` reopen. */
@@ -27,8 +27,8 @@ class FakeSession {
 	}
 }
 
-/** Build a registry over FakeSession with observable ops. */
-function makeRegistry() {
+/** Build a pool over FakeSession with observable ops. */
+function makePool() {
 	const ops: SessionOps<FakeSession> = {
 		isDisposed: (s) => s.disposed,
 		reveal: (s) => {
@@ -39,35 +39,36 @@ function makeRegistry() {
 			if (s.gate) await s.gate;
 		},
 	};
-	return new SessionRegistry<FakeSession>(ops);
+	return new SessionPool<FakeSession>(ops);
 }
 
 const flush = async () => {
 	for (let i = 0; i < 8; i++) await Promise.resolve();
 };
 
-describe("SessionRegistry", () => {
-	it("builds a session on first open and reveals (not rebuilds) a live one", async () => {
-		const registry = makeRegistry();
+describe("SessionPool", () => {
+	it("builds a session on first open(key) and reveals (not rebuilds) a live one", async () => {
+		const pool = makePool();
 		let built = 0;
 		const create = () => {
 			built += 1;
 			return new FakeSession(`s${built}`);
 		};
 
-		await registry.open(create);
+		const first = await pool.open("k", create);
 		expect(built).toBe(1);
-		const first = registry.active;
-		expect(first?.id).toBe("s1");
+		expect(first.id).toBe("s1");
+		expect(pool.get("k")).toBe(first);
 
-		await registry.open(create);
+		const again = await pool.open("k", create);
 		expect(built).toBe(1); // not rebuilt
-		expect(registry.active).toBe(first); // same session
-		expect(first?.revealed).toBe(1); // revealed instead
+		expect(again).toBe(first); // same session returned
+		expect(pool.get("k")).toBe(first); // same session stored
+		expect(first.revealed).toBe(1); // revealed instead
 	});
 
-	it("tears down a disposed session and builds a fresh one on reopen", async () => {
-		const registry = makeRegistry();
+	it("tears down a disposed session and builds a fresh one on reopen(key)", async () => {
+		const pool = makePool();
 		const sessions: FakeSession[] = [];
 		const create = () => {
 			const s = new FakeSession(`s${sessions.length + 1}`);
@@ -75,18 +76,19 @@ describe("SessionRegistry", () => {
 			return s;
 		};
 
-		await registry.open(create); // s1 live
+		await pool.open("k", create); // s1 live
 		sessions[0].disposed = true; // ended via /quit
 
-		await registry.open(create); // should tear down s1, build s2
+		const fresh = await pool.open("k", create); // tear down s1, build s2
 		expect(sessions).toHaveLength(2);
 		expect(sessions[0].teardownCalls).toBe(1); // dead panel torn down
-		expect(registry.active).toBe(sessions[1]); // fresh session live
+		expect(fresh).toBe(sessions[1]);
+		expect(pool.get("k")).toBe(sessions[1]); // fresh session live
 		expect(sessions[1].revealed).toBe(0); // brand new, not revealed
 	});
 
-	it("defers to a concurrent open() instead of orphaning it (reentrancy race)", async () => {
-		const registry = makeRegistry();
+	it("defers to a concurrent open() for the SAME key instead of orphaning it (reentrancy race)", async () => {
+		const pool = makePool();
 		const sessions: FakeSession[] = [];
 		const create = () => {
 			const s = new FakeSession(`s${sessions.length + 1}`);
@@ -94,70 +96,146 @@ describe("SessionRegistry", () => {
 			return s;
 		};
 
-		await registry.open(create); // s1 live
+		await pool.open("k", create); // s1 live
 		const s1 = sessions[0];
 		s1.disposed = true; // ended via /quit
 		s1.gateTeardown(); // hold s1's teardown mid-flight
 
 		// Invocation A: sees s1 disposed, starts tearing it down, suspends on the gate.
 		const createSpyBefore = sessions.length;
-		const pA = registry.open(create);
+		const pA = pool.open("k", create);
 		await flush();
-		// s1's teardown is in flight; current has been cleared during the await.
+		// s1's teardown is in flight; the key has been cleared during the await.
 		expect(s1.teardownCalls).toBe(1);
-		expect(registry.active).toBeUndefined();
+		expect(pool.get("k")).toBeUndefined();
 		// A has NOT yet built its session (it's suspended before the create call).
 		expect(sessions.length).toBe(createSpyBefore);
 
-		// Invocation B fires while A is suspended: current is undefined, so it
-		// builds a brand-new live session (s2) and installs it.
-		await registry.open(create); // resolves synchronously past the awaits
-		const s2 = registry.active;
-		expect(s2?.id).toBe("s2");
+		// Invocation B fires while A is suspended: the key is empty, so it builds a
+		// brand-new live session (s2) and installs it under the same key.
+		const s2 = await pool.open("k", create); // resolves synchronously past the awaits
+		expect(s2.id).toBe("s2");
+		expect(pool.get("k")).toBe(s2);
 
 		// Release s1's teardown so A resumes. A must DEFER to s2, not orphan it.
 		s1.releaseTeardown();
-		await pA;
+		const aResult = await pA;
 		await flush();
 
-		expect(registry.active).toBe(s2); // s2 still the one-and-only live session
+		expect(aResult).toBe(s2); // A deferred to s2 and returned it
+		expect(pool.get("k")).toBe(s2); // s2 still the one-and-only live session for k
 		expect(sessions).toHaveLength(2); // A never built a third (orphan) session
-		expect(s2?.revealed).toBe(1); // A revealed the concurrent session instead
+		expect(s2.revealed).toBe(1); // A revealed the concurrent session instead
 	});
 
-	it("scopes teardown to its own session — closing an old panel never disposes the live one", async () => {
-		const registry = makeRegistry();
-		const live = new FakeSession("live");
-		await registry.open(() => live); // live is current
-
-		// An orphaned/older session's panel closes and fires disposeSession(old).
+	it("scopes teardown to its own session — closing an old session never disposes a newer live one under the same key", async () => {
+		const pool = makePool();
 		const old = new FakeSession("old");
-		await registry.disposeSession(old);
+		await pool.open("k", () => old); // old is live under k
+		old.disposed = true;
 
-		expect(old.teardownCalls).toBe(1); // the old session IS torn down…
-		expect(live.teardownCalls).toBe(0); // …but the live one is untouched
-		expect(registry.active).toBe(live); // current not clobbered
+		// Reopen k: tears down old, installs a fresh live session under the same key.
+		const live = new FakeSession("live");
+		await pool.open("k", () => live);
+		expect(pool.get("k")).toBe(live);
+
+		// A late panel-close for the OLD session fires. It must not clobber `live`.
+		await pool.disposeSession(old);
+		expect(old.teardownCalls).toBe(1); // old torn down exactly once
+		expect(live.teardownCalls).toBe(0); // live one untouched
+		expect(pool.get("k")).toBe(live); // key not clobbered
 	});
 
 	it("disposeSession is idempotent (explicit /quit + panel onDidDispose)", async () => {
-		const registry = makeRegistry();
+		const pool = makePool();
 		const s = new FakeSession("s");
-		await registry.open(() => s);
+		await pool.open("k", () => s);
 
-		await registry.disposeSession(s);
-		await registry.disposeSession(s); // e.g. panel.onDidDispose firing after
+		await pool.disposeSession(s);
+		await pool.disposeSession(s); // e.g. panel.onDidDispose firing after
 		expect(s.teardownCalls).toBe(1); // torn down exactly once
-		expect(registry.active).toBeUndefined();
+		expect(pool.get("k")).toBeUndefined();
 	});
 
-	it("disposeActive tears down the live session, if any", async () => {
-		const registry = makeRegistry();
-		await registry.disposeActive(); // no-op when empty
-		const s = new FakeSession("s");
-		await registry.open(() => s);
+	it("keeps multiple keyed sessions alive concurrently", async () => {
+		const pool = makePool();
+		const a = new FakeSession("a");
+		const b = new FakeSession("b");
 
-		await registry.disposeActive();
-		expect(s.teardownCalls).toBe(1);
-		expect(registry.active).toBeUndefined();
+		const ra = await pool.open("a", () => a);
+		const rb = await pool.open("b", () => b);
+		expect(ra).toBe(a);
+		expect(rb).toBe(b);
+		expect(pool.size).toBe(2);
+		expect(pool.get("a")).toBe(a);
+		expect(pool.get("b")).toBe(b);
+		expect(pool.has("a")).toBe(true);
+		expect(pool.has("b")).toBe(true);
+		expect(pool.list()).toEqual([a, b]); // insertion order
+	});
+
+	it("tracks the active key via setActive/active", async () => {
+		const pool = makePool();
+		const a = new FakeSession("a");
+		const b = new FakeSession("b");
+		await pool.open("a", () => a);
+		await pool.open("b", () => b);
+
+		expect(pool.active).toBeUndefined(); // nothing focused yet
+
+		pool.setActive("a");
+		expect(pool.active).toBe(a);
+
+		pool.setActive("b");
+		expect(pool.active).toBe(b);
+
+		pool.setActive("nope"); // absent key -> no-op, focus unchanged
+		expect(pool.active).toBe(b);
+
+		pool.setActive(undefined); // clears focus
+		expect(pool.active).toBeUndefined();
+	});
+
+	it("clears active when the active session is disposed", async () => {
+		const pool = makePool();
+		const a = new FakeSession("a");
+		const b = new FakeSession("b");
+		await pool.open("a", () => a);
+		await pool.open("b", () => b);
+		pool.setActive("a");
+		expect(pool.active).toBe(a);
+
+		await pool.disposeSession(a);
+		expect(pool.active).toBeUndefined(); // active cleared
+		expect(pool.get("a")).toBeUndefined();
+		expect(pool.get("b")).toBe(b); // other session untouched
+	});
+
+	it("disposeKey tears down the session under a key", async () => {
+		const pool = makePool();
+		const a = new FakeSession("a");
+		await pool.open("a", () => a);
+
+		await pool.disposeKey("missing"); // no-op when absent
+		await pool.disposeKey("a");
+		expect(a.teardownCalls).toBe(1);
+		expect(pool.get("a")).toBeUndefined();
+		expect(pool.size).toBe(0);
+	});
+
+	it("disposeAll tears down every session and empties the pool", async () => {
+		const pool = makePool();
+		const a = new FakeSession("a");
+		const b = new FakeSession("b");
+		await pool.open("a", () => a);
+		await pool.open("b", () => b);
+		pool.setActive("a");
+
+		await pool.disposeAll();
+		expect(a.teardownCalls).toBe(1);
+		expect(b.teardownCalls).toBe(1);
+		expect(pool.size).toBe(0);
+		expect(pool.list()).toEqual([]);
+		expect(pool.active).toBeUndefined();
 	});
 });

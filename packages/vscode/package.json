@@ -13,13 +13,43 @@
 		"vscode": "^1.100.0"
 	},
 	"categories": ["AI", "Chat", "Other"],
-	"activationEvents": [],
+	"activationEvents": ["onView:dreb.sessions"],
 	"contributes": {
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "dreb",
+					"title": "dreb",
+					"icon": "$(comment-discussion)"
+				}
+			]
+		},
+		"views": {
+			"dreb": [
+				{
+					"type": "webview",
+					"id": "dreb.sessions",
+					"name": "Sessions"
+				}
+			]
+		},
 		"commands": [
 			{
 				"command": "dreb.openChat",
 				"title": "Open Chat",
 				"category": "dreb"
+			},
+			{
+				"command": "dreb.sessions.newSession",
+				"title": "New Session",
+				"category": "dreb",
+				"icon": "$(add)"
+			},
+			{
+				"command": "dreb.sessions.refresh",
+				"title": "Refresh Sessions",
+				"category": "dreb",
+				"icon": "$(refresh)"
 			},
 			{
 				"command": "dreb.tagSelectionToChat",
@@ -63,6 +93,18 @@
 			}
 		],
 		"menus": {
+			"view/title": [
+				{
+					"command": "dreb.sessions.newSession",
+					"when": "view == dreb.sessions",
+					"group": "navigation@1"
+				},
+				{
+					"command": "dreb.sessions.refresh",
+					"when": "view == dreb.sessions",
+					"group": "navigation@2"
+				}
+			],
 			"scm/title": [
 				{
 					"command": "dreb.review.acceptAll",
@@ -128,7 +170,7 @@
 	},
 	"scripts": {
 		"clean": "shx rm -rf dist *.vsix",
-		"build": "tsgo -p tsconfig.build.json && vite build",
+		"build": "tsgo -p tsconfig.build.json && vite build && vite build -c vite.sidebar.config.mts",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"dev:webview": "vite build --watch",
 		"typecheck:webview": "tsgo -p tsconfig.webview.json",
