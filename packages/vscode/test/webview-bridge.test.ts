@@ -269,6 +269,22 @@ describe("connectWebview", () => {
 		expect(tagFileFromPicker).toHaveBeenCalledTimes(1);
 	});
 
+	it("routes an open-source message to the controller with the parsed ref", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const openSource = vi.spyOn(controller, "openSource").mockResolvedValue();
+
+		const { webview, send } = makeWebview();
+		connectWebview(webview as any, controller);
+
+		send({ type: "open-source", ref: { path: "src/a.ts", line: 12, column: 3 } });
+		send({ type: "open-source", ref: { symbol: "Widget", path: "src/a.ts", line: 5 } });
+
+		expect(openSource).toHaveBeenCalledTimes(2);
+		expect(openSource).toHaveBeenNthCalledWith(1, { path: "src/a.ts", line: 12, column: 3 });
+		expect(openSource).toHaveBeenNthCalledWith(2, { symbol: "Widget", path: "src/a.ts", line: 5 });
+	});
+
 	it("forwards a commands update as a commands message", async () => {
 		const fake = new BridgeFakeClient();
 		const controller = await makeController(fake);
