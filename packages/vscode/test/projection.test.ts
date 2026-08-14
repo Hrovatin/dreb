@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
 	activitySummary,
+	alignCheckpoints,
 	applyEvent,
+	type BranchTurn,
 	createTranscriptState,
+	foldBranchIntoState,
 	type ResponseGroup,
 	type TranscriptState,
 } from "../src/shared/projection.js";
@@ -231,5 +234,89 @@ describe("projection", () => {
 		};
 		expect(activitySummary(group)).toBe("1 thought · 2 tool calls");
 		expect(activitySummary({ ...group, activity: [] })).toBe("no activity");
+	});
+});
+
+describe("foldBranchIntoState (Phase 6 rebuild)", () => {
+	const branch: BranchTurn[] = [
+		{ entryId: "u1", role: "user", text: "hi" },
+		{ entryId: "a1", role: "assistant", text: "hello" },
+		{ entryId: "u2", role: "user", text: "again" },
+		{ entryId: "a2", role: "assistant", text: "world" },
+	];
+
+	it("rebuilds the transcript in place from branch turns (stable reference)", () => {
+		const state = createTranscriptState();
+		state.items.push({ kind: "user", text: "stale" });
+		const ref = state; // same object must survive
+
+		foldBranchIntoState(state, branch);
+
+		expect(state).toBe(ref);
+		expect(
+			state.items.map((i) => (i.kind === "user" ? `u:${i.text}` : i.kind === "response" ? `a:${i.answer}` : i.text)),
+		).toEqual(["u:hi", "a:hello", "u:again", "a:world"]);
+		// Response groups get fresh, monotonic ids and are not streaming.
+		const groups = state.items.filter((i): i is ResponseGroup => i.kind === "response");
+		expect(groups.map((g) => g.id)).toEqual([1, 2]);
+		expect(groups.every((g) => !g.streaming && g.collapsed)).toBe(true);
+		expect(state.nextResponseId).toBe(3);
+	});
+
+	it("resets transient state (streaming, uiRequests, errors)", () => {
+		const state = createTranscriptState();
+		state.streaming = true;
+		state.hostError = "dead";
+		state.uiRequests.push({ id: "x", method: "confirm", title: "?" });
+		foldBranchIntoState(state, []);
+		expect(state.streaming).toBe(false);
+		expect(state.hostError).toBeUndefined();
+		expect(state.uiRequests).toEqual([]);
+	});
+});
+
+describe("alignCheckpoints (Phase 6)", () => {
+	function withResponses(count: number): TranscriptState {
+		const state = createTranscriptState();
+		for (let i = 0; i < count; i++) {
+			state.items.push({
+				kind: "response",
+				id: i + 1,
+				activity: [],
+				answer: `a${i}`,
+				streaming: false,
+				collapsed: true,
+			});
+		}
+		return state;
+	}
+
+	it("keys checkpoints by response id; latest turn has canRestore false", () => {
+		const state = withResponses(2);
+		expect(alignCheckpoints(state, ["e1", "e2"])).toEqual([
+			{ responseId: 1, entryId: "e1", canRestore: true },
+			{ responseId: 2, entryId: "e2", canRestore: false },
+		]);
+	});
+
+	it("skips streaming/errored groups (no session entry for them)", () => {
+		const state = createTranscriptState();
+		state.items.push({ kind: "response", id: 1, activity: [], answer: "ok", streaming: false, collapsed: true });
+		state.items.push({ kind: "response", id: 2, activity: [], answer: "", streaming: true, collapsed: false });
+		expect(alignCheckpoints(state, ["e1"])).toEqual([{ responseId: 1, entryId: "e1", canRestore: false }]);
+	});
+
+	it("degrades gracefully on a length mismatch, anchoring from the most recent turn", () => {
+		// 3 response groups but only 2 entry ids → the oldest group gets no control,
+		// and alignment anchors the newest turns.
+		const state = withResponses(3);
+		expect(alignCheckpoints(state, ["e2", "e3"])).toEqual([
+			{ responseId: 2, entryId: "e2", canRestore: true },
+			{ responseId: 3, entryId: "e3", canRestore: false },
+		]);
+	});
+
+	it("returns nothing when there are no entries", () => {
+		expect(alignCheckpoints(withResponses(2), [])).toEqual([]);
 	});
 });

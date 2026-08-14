@@ -56,6 +56,30 @@ export interface SystemItem {
 
 export type TranscriptItem = UserItem | ResponseGroup | SystemItem;
 
+/**
+ * An inline restore/fork control descriptor (Phase 6). Maps a rendered response
+ * group to the session entry the webview forks from / navigates to. Kept out of
+ * `TranscriptState` because it is host-derived (from the session tree) and
+ * refreshes independently of the streamed transcript.
+ */
+export interface Checkpoint {
+	/** The {@link ResponseGroup.id} this control attaches to. */
+	responseId: number;
+	/** Session entry id (the assistant turn) to fork from / restore to. */
+	entryId: string;
+	/** Whether "Restore Checkpoint" is offered — false for the latest turn,
+	 * where restoring to where you already are is a no-op. */
+	canRestore: boolean;
+}
+
+/** One turn on a session branch, used to rebuild the transcript after a tree
+ * navigation or fork (see {@link foldBranchIntoState}). */
+export interface BranchTurn {
+	entryId: string;
+	role: "user" | "assistant";
+	text: string;
+}
+
 /** A pending, blocking extension-UI request the user must answer. */
 export interface UiRequest {
 	id: string;
@@ -378,4 +402,59 @@ export function activitySummary(group: ResponseGroup): string {
 	if (thoughtCount > 0) parts.push(`${thoughtCount} thought${thoughtCount === 1 ? "" : "s"}`);
 	if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount === 1 ? "" : "s"}`);
 	return parts.length > 0 ? parts.join(" · ") : "no activity";
+}
+
+/**
+ * Replace `state`'s transcript in place with turns rebuilt from a session branch
+ * (Phase 6 — after a restore/fork moved the leaf). Mutates the state's
+ * properties, not the reference, so a holder of the state object (the host's
+ * snapshot source) stays valid. Turn text is the branch entry's preview: full
+ * answer text and tool activity are not reconstructed on rebuild (MVP).
+ */
+export function foldBranchIntoState(state: TranscriptState, turns: BranchTurn[]): void {
+	state.items = [];
+	state.streaming = false;
+	state.uiRequests = [];
+	state.statusText = undefined;
+	state.hostError = undefined;
+	state.nextResponseId = 1;
+	for (const turn of turns) {
+		if (turn.role === "user") {
+			state.items.push({ kind: "user", text: turn.text });
+		} else {
+			state.items.push({
+				kind: "response",
+				id: state.nextResponseId++,
+				activity: [],
+				answer: turn.text,
+				streaming: false,
+				collapsed: true,
+			});
+		}
+	}
+}
+
+/**
+ * Align assistant session entry ids (the current branch, chronological order) to
+ * the transcript's completed response groups, keyed by the stable
+ * {@link ResponseGroup.id}. Aligns from the most recent turn backward so the leaf
+ * stays anchored even when an interrupted/errored run left a response group with
+ * no corresponding session entry; on a length mismatch the unmatched (older)
+ * groups simply get no control rather than a wrong one. The latest aligned
+ * checkpoint gets `canRestore: false` (restoring to where you already are is a
+ * no-op); every earlier one gets `canRestore: true`.
+ */
+export function alignCheckpoints(state: TranscriptState, assistantEntryIds: string[]): Checkpoint[] {
+	const groups = state.items.filter(
+		(item): item is ResponseGroup => item.kind === "response" && !item.streaming && !item.error,
+	);
+	const pairs = Math.min(groups.length, assistantEntryIds.length);
+	const checkpoints: Checkpoint[] = [];
+	for (let k = 0; k < pairs; k++) {
+		const group = groups[groups.length - 1 - k];
+		const entryId = assistantEntryIds[assistantEntryIds.length - 1 - k];
+		// k === 0 is the most recent turn → no restore.
+		checkpoints.push({ responseId: group.id, entryId, canRestore: k !== 0 });
+	}
+	return checkpoints.reverse();
 }

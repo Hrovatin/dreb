@@ -4,7 +4,7 @@ A native chat client for the [dreb](https://github.com/aebrer/dreb) coding agent
 
 This package is modeled on `@dreb/dashboard`: an extension **host** owns the RPC child and the authoritative transcript state, and a **webview** renders it. The only transport difference is that the dashboard's HTTP+SSE layer is replaced by VS Code's `postMessage` bridge.
 
-> Status: **Phase 5b** (clickable code links — file/symbol references in answers open the code in the editor, grounded in the session's own tool results) on top of Phase 5 (sessions side panel — a Copilot-style sidebar listing sessions with live status, resume, rename, pin, archive, delete; multiple sessions run concurrently), Phase 4b (context tagging — tag an editor selection or a file/folder into the current chat), Phase 3 (change review — per-turn git snapshot + per-hunk keep/reject), Phase 2 (built-in slash commands + TUI-parity status header), and the Phase 0 + 1 foundation. See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
+> Status: **Phase 6** (session tree — Copilot-style inline restore-checkpoint + fork controls in the chat, plus a branch-tree view) on top of Phase 5b (clickable code links — file/symbol references in answers open the code in the editor, grounded in the session's own tool results), Phase 5 (sessions side panel — a Copilot-style sidebar listing sessions with live status, resume, rename, pin, archive, delete; multiple sessions run concurrently), Phase 4b (context tagging — tag an editor selection or a file/folder into the current chat), Phase 3 (change review — per-turn git snapshot + per-hunk keep/reject), Phase 2 (built-in slash commands + TUI-parity status header), and the Phase 0 + 1 foundation. See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
 
 ## Architecture
 
@@ -41,8 +41,9 @@ src/
     sidebar-protocol.ts host ↔ sessions-sidebar message envelopes (no @dreb import)
   webview/       # SolidJS UI — bundled with Vite → dist/webview (chat) + dist/webview-sidebar (sessions)
     app.tsx             transcript, collapsible activity box, composer, needs-input,
-                        the status header (model · thinking · cost · ctx), and the
-                        change-review bar
+                        the status header (model · thinking · cost · ctx), the
+                        change-review bar, and the inline restore/fork checkpoint
+                        controls + branch-tree overlay (Phase 6)
     code-links.ts       grounded file/symbol linkification of answers (pure, tested)
     sidebar/app.tsx     the sessions side panel — grouped list, live status, resume,
                         inline rename, pin / archive / delete
@@ -120,6 +121,17 @@ File paths and code symbols that appear in an answer render as **clickable links
 - Links are wired via **event delegation → `postToHost`** (not `href` navigation), so they work under the webview's strict `default-src 'none'` CSP.
 
 Grounding + linkification are pure and unit-tested in `webview/code-links.ts` (`buildGroundedRefs` parses the tool-output formats; `linkifyAnswer` walks the sanitized answer DOM without corrupting existing markdown links/code spans). The open/resolve logic is driven through the vscode-free `host/source-link-ui.ts` port (real impl `host/vscode-source-link-ui.ts`), so the controller stays testable. A grounded symbol carries its usage location so the host can jump even before the language server resolves; semantic-search-based resolution is a possible future deepening.
+
+## Session tree — restore checkpoint + fork
+
+Every conversation is a **branch tree**: you can rewind to an earlier point or fork a new line of conversation, without losing the branches you leave behind.
+
+- **Inline controls (Copilot-style).** After each response the transcript shows a subtle **"Restore Checkpoint · ⑃ Fork"** divider. **Restore Checkpoint** rewinds the conversation to that turn; **Fork** branches a new line of conversation from it. The **fork** control appears on every turn including the latest; **Restore Checkpoint is omitted at the current turn** (restoring to where you already are is a no-op).
+- **Fork semantics.** Forking at an assistant turn continues from that answer (your composer is untouched); forking at a user turn pre-fills the composer with that message's re-ask text. Cancelling a fork or restore surfaces an unobtrusive notice and leaves the conversation untouched.
+- **Branch-tree view.** The header's **⑃ tree** button opens an overlay of every turn on every branch (the current leaf is marked); picking any node jumps there — so a forked or rewound branch is always reachable again.
+- **Reuses the existing RPC surface.** Fork/restore/tree are wired over dreb's `fork` / `get_fork_messages` / `get_tree` / `navigate_tree` commands — no backend changes. The webview never holds session entry ids; the host derives them from the session tree and aligns them to the rendered turns.
+
+After a restore or fork moves the leaf, the host rebuilds the transcript from the target branch (`SessionController.rebuildTranscript`) and re-snapshots the webview via the same `resync` path as `/new` and `/import`. Rebuilt turns use the branch's per-entry **previews**; full answer text and tool activity are not reconstructed on a rebuild (an MVP limitation). The pure pieces — `foldBranchIntoState` (rebuild) and `alignCheckpoints` (map response groups → entry ids, anchored to the most recent turn so an interrupted run can't misalign the rest) — live in `shared/projection.ts` and are unit-tested; the inline controls and branch-tree overlay (`CheckpointBar` / `TreePanel` in `webview/app.tsx`) post to the host under the strict CSP via event delegation, and all host logic stays vscode-free (RPC-faked in tests).
 
 
 ## Requirements

@@ -83,7 +83,8 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				post({ type: "review", review: update.review });
 				break;
 			case "resync":
-				// Transcript was replaced host-side (/new, /import) — re-snapshot.
+				// Transcript was replaced host-side (/new, /import, restore, fork) —
+				// re-snapshot.
 				post({
 					type: "snapshot",
 					state: structuredClone(controller.getTranscript()),
@@ -91,6 +92,16 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 					status: controller.getStatus(),
 				});
 				post({ type: "review", review: controller.getReviewState() });
+				post({ type: "checkpoints", checkpoints: controller.getCheckpoints() });
+				break;
+			case "checkpoints":
+				post({ type: "checkpoints", checkpoints: update.checkpoints });
+				break;
+			case "tree":
+				post({ type: "tree", tree: update.tree });
+				break;
+			case "composer-prefill":
+				post({ type: "composer-prefill", text: update.text });
 				break;
 		}
 	});
@@ -109,6 +120,7 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				});
 				live = true;
 				post({ type: "review", review: controller.getReviewState() });
+				post({ type: "checkpoints", checkpoints: controller.getCheckpoints() });
 				// Deliver any selections tagged before the webview was live.
 				for (const context of pendingTags.splice(0)) post({ type: "tag-context", context });
 				pushCommands();
@@ -137,6 +149,15 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				return;
 			case "open-source":
 				void controller.openSource(raw.ref);
+				return;
+			case "fork":
+				void controller.fork(raw.entryId);
+				return;
+			case "navigate-tree":
+				void controller.navigateTree(raw.entryId);
+				return;
+			case "show-tree":
+				void controller.requestTree();
 				return;
 			case "ui-response":
 				controller.respondUi(raw.response);
