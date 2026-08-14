@@ -22,6 +22,7 @@ import type {
 	TaggedContextDto,
 	UiResponse,
 } from "../shared/protocol.js";
+import { deriveSessionStatus, type SessionRunState } from "../shared/session-list.js";
 import { buildFileContext, buildPromptWithContext } from "../shared/tagged-context.js";
 import { hunkIndexForLine, parseFileDiff } from "./diff-hunks.js";
 import {
@@ -49,6 +50,7 @@ interface RpcSessionStateLike {
 	thinkingLevel?: string;
 	usingSubscription?: boolean;
 	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+	sessionFile?: string;
 }
 
 /** Structural view of `getSessionStats()` (superset assignable from SessionStats). */
@@ -122,6 +124,9 @@ export interface SessionControllerOptions {
 	cliPath: string;
 	/** Extra CLI args (e.g. --provider/--model), appended verbatim. */
 	args?: string[];
+	/** Resume a specific session .jsonl by passing `--session <path>` to the RPC
+	 * child. Omit for a fresh session. */
+	sessionPath?: string;
 	/** Override the RpcClient constructor (tests inject a fake). */
 	clientFactory?: RpcClientFactory;
 	/** Native prompt port (quick picks / dialogs); defaults to a no-op so the
@@ -179,6 +184,7 @@ export class SessionController {
 	private readonly logger: (line: string) => void;
 	private readonly options: SessionControllerOptions;
 	private client: RpcClientLike | undefined;
+	private sessionFile: string | undefined;
 	private commands: SlashCommandDto[] = [...BUILTIN_COMMANDS];
 	private status: HostStatus;
 	private unsubEvent: (() => void) | undefined;
@@ -216,6 +222,24 @@ export class SessionController {
 		return this.options.cwd;
 	}
 
+	/** The live session .jsonl path (from get_state), falling back to a resume
+	 * path passed at construction; undefined for a brand-new session before its
+	 * first status refresh. */
+	get sessionPath(): string | undefined {
+		return this.sessionFile ?? this.options.sessionPath;
+	}
+
+	/** Live run state (running / needs-input / idle) derived from the projected
+	 * transcript. */
+	get runState(): SessionRunState {
+		return deriveSessionStatus(this.state);
+	}
+
+	/** Rename the live session (persisted via the set_session_name RPC). */
+	async rename(name: string): Promise<void> {
+		await this.client?.setSessionName(name);
+	}
+
 	/** The git repository root backing change review (repo root, or the workspace
 	 * cwd when review is disabled). Used by the extension to map editor URIs to
 	 * the repo-root-relative paths the review model speaks. */
@@ -249,10 +273,14 @@ export class SessionController {
 	/** Spawn the RPC child, wire event/exit handlers, and prime the command list. */
 	async start(): Promise<void> {
 		if (this.disposed) throw new Error("SessionController is disposed");
+		const args = [
+			...(this.options.args ?? []),
+			...(this.options.sessionPath ? ["--session", this.options.sessionPath] : []),
+		];
 		const client = await this.factory({
 			cliPath: this.options.cliPath,
 			cwd: this.options.cwd,
-			args: this.options.args ?? [],
+			args,
 		});
 		this.client = client;
 		this.unsubEvent = client.onEvent((event) => this.handleEvent(event));
@@ -538,6 +566,9 @@ export class SessionController {
 			const model = state.model
 				? { provider: state.model.provider, id: state.model.id, name: state.model.name }
 				: undefined;
+			// Capture the live session file without clobbering a known value when a
+			// later state read omits it.
+			this.sessionFile = state.sessionFile ?? this.sessionFile;
 			this.setStatus({
 				...this.status,
 				model,
