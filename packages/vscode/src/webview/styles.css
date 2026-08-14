@@ -137,6 +137,23 @@ body {
 .dreb-answer code {
 	font-family: var(--vscode-editor-font-family, monospace);
 }
+/* Clickable code links (Phase 5b) — subtle, editor-native affordance. */
+.dreb-code-link {
+	color: var(--vscode-textLink-foreground, #3794ff);
+	text-decoration: none;
+	cursor: pointer;
+	border-radius: 3px;
+}
+.dreb-code-link:hover {
+	text-decoration: underline;
+	color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground, #3794ff));
+}
+.dreb-answer code .dreb-code-link {
+	color: inherit;
+	text-decoration: underline;
+	text-decoration-style: dotted;
+	text-underline-offset: 2px;
+}
 
 /* Activity box ------------------------------------------------------------ */
 .dreb-activity {

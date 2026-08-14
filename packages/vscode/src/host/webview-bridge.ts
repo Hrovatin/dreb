@@ -135,6 +135,9 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 			case "review-open-diff":
 				void controller.reviewOpenDiff(raw.path);
 				return;
+			case "open-source":
+				void controller.openSource(raw.ref);
+				return;
 			case "ui-response":
 				controller.respondUi(raw.response);
 				return;
