@@ -4,7 +4,7 @@ A native chat client for the [dreb](https://github.com/aebrer/dreb) coding agent
 
 This package is modeled on `@dreb/dashboard`: an extension **host** owns the RPC child and the authoritative transcript state, and a **webview** renders it. The only transport difference is that the dashboard's HTTP+SSE layer is replaced by VS Code's `postMessage` bridge.
 
-> Status: **Phase 5** (sessions side panel — a Copilot-style sidebar listing sessions with live status, resume, rename, pin, archive, delete; multiple sessions run concurrently) on top of Phase 4b (context tagging — tag an editor selection or a file/folder into the current chat), Phase 3 (change review — per-turn git snapshot + per-hunk keep/reject), Phase 2 (built-in slash commands + TUI-parity status header), and the Phase 0 + 1 foundation. See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
+> Status: **Phase 5b** (clickable code links — file/symbol references in answers open the code in the editor, grounded in the session's own tool results) on top of Phase 5 (sessions side panel — a Copilot-style sidebar listing sessions with live status, resume, rename, pin, archive, delete; multiple sessions run concurrently), Phase 4b (context tagging — tag an editor selection or a file/folder into the current chat), Phase 3 (change review — per-turn git snapshot + per-hunk keep/reject), Phase 2 (built-in slash commands + TUI-parity status header), and the Phase 0 + 1 foundation. See the [tracking issue](https://github.com/Hrovatin/dreb/issues/12) for the roadmap.
 
 ## Architecture
 
@@ -32,6 +32,8 @@ src/
     review-model.ts     change-review cycle + accept state (pure, tested)
     review-ui.ts        SCM / quick-diff / diff-viewer port; vscode-free
     vscode-review-ui.ts the real `ReviewUi` backed by `vscode.scm`
+    source-link-ui.ts   clicked-code-link open/resolve port; vscode-free
+    vscode-source-link-ui.ts the real `SourceLinkUi` (open file / resolve symbol → definition)
   shared/
     format.ts           status-header + `/session` display formatters (pure, tested)
     tagged-context.ts   selection + file/folder context DTOs, chip label, prompt fold + threshold (pure, tested)
@@ -41,6 +43,7 @@ src/
     app.tsx             transcript, collapsible activity box, composer, needs-input,
                         the status header (model · thinking · cost · ctx), and the
                         change-review bar
+    code-links.ts       grounded file/symbol linkification of answers (pure, tested)
     sidebar/app.tsx     the sessions side panel — grouped list, live status, resume,
                         inline rename, pin / archive / delete
 ```
@@ -105,6 +108,18 @@ Tag context into the chat as removable chips. Two kinds of context can be tagged
 dreb's agent accepts text + images only, so there is no separate structured-context channel: all tags are folded into the prompt text. Sending with only chips and no typed text is allowed. Tagging with no chat open opens one first, then attaches.
 
 The pure DTO builders, chip label/title, threshold logic, and prompt formatter are unit-tested in `shared/tagged-context.ts`; the selection command orchestration lives in the vscode-free `host/tag-selection.ts`; the file picker is driven through the `HostUi` port (`pickWorkspaceFiles`), so the controller stays vscode-free. Delivery to the composer is queued until the webview is `ready` so tagging into a freshly opened chat still lands.
+
+
+## Clickable code links
+
+File paths and code symbols that appear in an answer render as **clickable links** that open the referenced code at the right spot in the editor.
+
+- **File references** — a `path:line[:col]` (e.g. `src/app.ts:38`) or a workspace-relative path with a directory + extension render as links. Clicking opens the file and selects/reveals the line (1-based line/column from the answer are converted to VS Code's 0-based `Position`).
+- **Symbol references** — a class/function name renders as a link **only when it is grounded** — i.e. it actually appeared in this response's own tool results (`search`/`grep`). Clicking prefers the symbol's real **definition** via the workspace symbol provider; if the language server finds nothing, it falls back to the **grounded location** captured from the tool hit. This grounding gate is what keeps ordinary prose from being over-linkified.
+- **Reliability lives in the client, not the model.** The agent is never trusted to emit valid links: the webview linkifies syntactically/greedily but only *grounds* ambiguous symbols against real tool hits, and the host **validates** on click (a path that does not exist, or a symbol that resolves nowhere, shows an unobtrusive notice — never a broken jump). References that match nothing real simply stay plain text.
+- Links are wired via **event delegation → `postToHost`** (not `href` navigation), so they work under the webview's strict `default-src 'none'` CSP.
+
+Grounding + linkification are pure and unit-tested in `webview/code-links.ts` (`buildGroundedRefs` parses the tool-output formats; `linkifyAnswer` walks the sanitized answer DOM without corrupting existing markdown links/code spans). The open/resolve logic is driven through the vscode-free `host/source-link-ui.ts` port (real impl `host/vscode-source-link-ui.ts`), so the controller stays testable. A grounded symbol carries its usage location so the host can jump even before the language server resolves; semantic-search-based resolution is a possible future deepening.
 
 
 ## Requirements

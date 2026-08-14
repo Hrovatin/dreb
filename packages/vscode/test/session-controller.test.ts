@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { HostUi, HostUiPickItem } from "../src/host/host-ui.js";
 import { type RpcClientLike, SessionController } from "../src/host/session-controller.js";
+import type { SourceLinkUi } from "../src/host/source-link-ui.js";
+import type { OpenSourceRef } from "../src/shared/protocol.js";
 
 /** Fake RpcClient that captures calls and lets a test drive events/exit. */
 class FakeClient implements RpcClientLike {
@@ -974,5 +976,39 @@ describe("SessionController", () => {
 		await Promise.resolve();
 
 		expect(controller.sessionPath).toBe("/abs/live.jsonl");
+	});
+});
+
+describe("SessionController.openSource", () => {
+	it("delegates a clicked code reference to the injected SourceLinkUi", async () => {
+		const calls: OpenSourceRef[] = [];
+		const sourceLink: SourceLinkUi = {
+			async openSource(ref) {
+				calls.push(ref);
+			},
+		};
+		const controller = new SessionController({
+			cwd: "/tmp/project",
+			cliPath: "/cli.js",
+			clientFactory: () => new FakeClient(),
+			sourceLink,
+		});
+
+		await controller.openSource({ path: "src/a.ts", line: 12 });
+		await controller.openSource({ symbol: "Widget", path: "src/a.ts", line: 3 });
+
+		expect(calls).toEqual([
+			{ path: "src/a.ts", line: 12 },
+			{ symbol: "Widget", path: "src/a.ts", line: 3 },
+		]);
+	});
+
+	it("is inert (no throw) when no SourceLinkUi is injected", async () => {
+		const controller = new SessionController({
+			cwd: "/tmp/project",
+			cliPath: "/cli.js",
+			clientFactory: () => new FakeClient(),
+		});
+		await expect(controller.openSource({ path: "src/a.ts", line: 1 })).resolves.toBeUndefined();
 	});
 });

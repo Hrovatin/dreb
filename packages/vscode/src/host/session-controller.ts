@@ -16,6 +16,7 @@ import { formatSessionStats } from "../shared/format.js";
 import { applyEvent, createTranscriptState, type TranscriptState } from "../shared/projection.js";
 import type {
 	HostStatus,
+	OpenSourceRef,
 	ReviewFileDto,
 	ReviewStateDto,
 	SlashCommandDto,
@@ -38,6 +39,7 @@ import { type HostUi, noopHostUi } from "./host-ui.js";
 import { ReviewModel } from "./review-model.js";
 import { noopReviewUi, type ReviewUi } from "./review-ui.js";
 import { BUILTIN_COMMANDS, DEFERRED_BUILTINS, routeInput, stripSlash, TERMINAL_ONLY_BUILTINS } from "./slash-router.js";
+import { noopSourceLinkUi, type SourceLinkUi } from "./source-link-ui.js";
 
 /** Thinking levels offered in the picker. The active model may support a subset;
  * `set_thinking_level` clamps server-side and we reflect the applied value via a
@@ -136,6 +138,9 @@ export interface SessionControllerOptions {
 	/** Native change-review surface (SCM group + quick-diff + diff viewer);
 	 * defaults to a no-op so the controller stays vscode-free and testable. */
 	review?: ReviewUi;
+	/** Native code-link opener (Phase 5b); defaults to a no-op so the controller
+	 * stays vscode-free and testable. */
+	sourceLink?: SourceLinkUi;
 	logger?: (line: string) => void;
 }
 
@@ -170,6 +175,7 @@ export class SessionController {
 	private readonly factory: RpcClientFactory;
 	private readonly ui: HostUi;
 	private readonly reviewUi: ReviewUi;
+	private readonly sourceLinkUi: SourceLinkUi;
 	private readonly reviewModel = new ReviewModel();
 	/** Whether change review is active for this cwd (false outside a git repo). */
 	private reviewEnabled = false;
@@ -204,6 +210,7 @@ export class SessionController {
 		this.factory = options.clientFactory ?? defaultClientFactory;
 		this.ui = options.ui ?? noopHostUi;
 		this.reviewUi = options.review ?? noopReviewUi;
+		this.sourceLinkUi = options.sourceLink ?? noopSourceLinkUi;
 		this.logger = options.logger ?? (() => {});
 		this.status = { connected: false, cwd: options.cwd };
 		// Resolve the git-repo state synchronously up front (findGitRoot is a cheap
@@ -688,6 +695,11 @@ export class SessionController {
 	/** Open the baseline↔current diff for a reviewed file. */
 	async reviewOpenDiff(path: string): Promise<void> {
 		await this.reviewUi.openDiff(path);
+	}
+
+	/** Open a code reference the user clicked in an answer (Phase 5b). */
+	async openSource(ref: OpenSourceRef): Promise<void> {
+		await this.sourceLinkUi.openSource(ref);
 	}
 
 	/** Accept a single file (clear its review marker; no commit). */
