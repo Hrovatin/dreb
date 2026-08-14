@@ -13,7 +13,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { relative, sep } from "node:path";
 import * as vscode from "vscode";
@@ -308,24 +307,30 @@ async function renameSession(key: string, name: string): Promise<void> {
 }
 
 /** Delete a session (behind a modal confirmation): tear down any live controller,
- * remove its `.jsonl`, and drop its persisted flags. */
+ * then delete its transcript through dreb's session manager — trash-first with an
+ * unlink fallback, `.jsonl` validation, and an active-session guard — and drop its
+ * persisted flags only once the delete actually succeeded. */
 async function deleteSession(key: string): Promise<void> {
 	const live = pool.get(key);
 	const path = live?.controller.sessionPath ?? (key.startsWith("new:") ? undefined : key);
 	const choice = await vscode.window.showWarningMessage(
-		"Delete this dreb session? This permanently removes its transcript and cannot be undone.",
+		"Delete this dreb session? Its transcript is moved to the trash (or permanently removed if trash is unavailable).",
 		{ modal: true },
 		"Delete",
 	);
 	if (choice !== "Delete") return;
 	if (live) await pool.disposeSession(live);
 	if (path) {
-		try {
-			await rm(path, { force: true });
-		} catch (err) {
-			vscode.window.showErrorMessage(`dreb: delete failed — ${errorText(err)}`);
+		// Guard against deleting whatever is active now (a different session after
+		// the target's own controller was disposed just above).
+		const result = await inventory.deleteSession(path, {
+			activeSessionPath: pool.active?.controller.sessionPath,
+		});
+		if (result.ok) {
+			await flags.clear(path);
+		} else {
+			vscode.window.showErrorMessage(`dreb: delete failed — ${result.error ?? "unknown error"}`);
 		}
-		await flags.clear(path);
 	}
 	scheduleSidebarRefresh();
 }

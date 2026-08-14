@@ -210,4 +210,37 @@ describe("buildSessionList", () => {
 		expect(order(running)).toEqual(["A", "B"]);
 		expect(running.groups[0].sessions[1].state).toBe("running");
 	});
+
+	it("(h) each group carries a stable, unique key (for webview reconcile)", () => {
+		const list = buildSessionList({
+			currentCwd: "/proj",
+			disk: [
+				disk({ path: "/proj/a.jsonl", cwd: "/proj", name: "A" }),
+				disk({ path: "/alpha/x.jsonl", cwd: "/alpha", name: "X" }),
+				disk({ path: "/proj/z.jsonl", cwd: "/proj", name: "Z", modified: "2020-01-01T00:00:00.000Z" }),
+			],
+			live: [],
+			flags: (p) => ({ pinned: false, archived: p === "/proj/z.jsonl" }),
+		});
+
+		const keys = list.groups.map((g) => g.key);
+		// current + one project + archived, each with the "<kind>:<cwd>" convention.
+		expect(keys).toEqual(["current:/proj", "project:/alpha", "archived:"]);
+		// keys are unique.
+		expect(new Set(keys).size).toBe(keys.length);
+
+		// A rebuild with an added live session produces identical group keys, so the
+		// webview reconcile matches groups by identity instead of remounting them.
+		const rebuilt = buildSessionList({
+			currentCwd: "/proj",
+			disk: [
+				disk({ path: "/proj/a.jsonl", cwd: "/proj", name: "A" }),
+				disk({ path: "/alpha/x.jsonl", cwd: "/alpha", name: "X" }),
+				disk({ path: "/proj/z.jsonl", cwd: "/proj", name: "Z", modified: "2020-01-01T00:00:00.000Z" }),
+			],
+			live: [live({ key: "/proj/a.jsonl", path: "/proj/a.jsonl", cwd: "/proj", state: "running" })],
+			flags: (p) => ({ pinned: false, archived: p === "/proj/z.jsonl" }),
+		});
+		expect(rebuilt.groups.map((g) => g.key)).toEqual(keys);
+	});
 });

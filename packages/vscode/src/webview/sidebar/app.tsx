@@ -1,13 +1,19 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import type { SessionGroupDto, SessionListDto, SessionSummaryDto } from "../../shared/session-list.js";
 import { onHostMessage, postToHost } from "./vscode-api.js";
 
 export function SidebarApp() {
-	const [list, setList] = createSignal<SessionListDto>({ currentCwd: "", groups: [] });
+	const [list, setList] = createStore<SessionListDto>({ currentCwd: "", groups: [] });
 
 	onMount(() => {
 		const off = onHostMessage((msg) => {
-			if (msg.type === "list") setList(msg.list);
+			// Reconcile by stable `key` (present on both groups and session rows) so
+			// unchanged rows/groups keep their component + DOM identity across the
+			// ~150ms streaming refreshes. Without this, replacing the whole list
+			// remounts every row and discards in-progress inline renames and the
+			// user's expanded/collapsed group state.
+			if (msg.type === "list") setList(reconcile(msg.list, { key: "key", merge: false }));
 		});
 		postToHost({ type: "ready" });
 		onCleanup(off);
@@ -39,7 +45,7 @@ export function SidebarApp() {
 			</header>
 
 			<Show
-				when={list().groups.length > 0}
+				when={list.groups.length > 0}
 				fallback={
 					<div class="dreb-side-empty">
 						<div class="dreb-side-empty-text">No sessions yet</div>
@@ -50,7 +56,7 @@ export function SidebarApp() {
 				}
 			>
 				<div class="dreb-side-list">
-					<For each={list().groups}>{(group) => <GroupView group={group} />}</For>
+					<For each={list.groups}>{(group) => <GroupView group={group} />}</For>
 				</div>
 			</Show>
 		</div>

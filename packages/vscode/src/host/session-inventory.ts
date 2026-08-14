@@ -23,9 +23,21 @@ export interface DiskSession {
 	firstMessage: string;
 }
 
+/** Outcome of a delete: `SessionManager.deleteSession` trashes first (recoverable)
+ * and falls back to a permanent unlink, reporting which path was taken. It never
+ * throws — a failure is signalled by `ok: false` plus an `error` message. */
+export interface DeleteSessionResult {
+	ok: boolean;
+	method: "trash" | "unlink";
+	error?: string;
+}
+
 export interface SessionInventory {
 	listForCwd(cwd: string): Promise<DiskSession[]>;
 	listAll(): Promise<DiskSession[]>;
+	/** Delete a session `.jsonl` via dreb's manager: trash-first with an unlink
+	 * fallback, `.jsonl` validation, and an active-session guard. */
+	deleteSession(path: string, opts?: { activeSessionPath?: string }): Promise<DeleteSessionResult>;
 }
 
 /**
@@ -47,6 +59,7 @@ export interface RawSessionInfo {
 export interface SessionManagerLike {
 	list(cwd: string): Promise<RawSessionInfo[]>;
 	listAll(): Promise<RawSessionInfo[]>;
+	deleteSession(path: string, opts?: { activeSessionPath?: string }): Promise<DeleteSessionResult>;
 }
 
 /**
@@ -79,6 +92,9 @@ export function inventoryFrom(manager: SessionManagerLike): SessionInventory {
 			const sessions = await manager.listAll();
 			return sessions.map(toDiskSession);
 		},
+		deleteSession(path: string, opts?: { activeSessionPath?: string }): Promise<DeleteSessionResult> {
+			return manager.deleteSession(path, opts);
+		},
 	};
 }
 
@@ -97,6 +113,10 @@ export function createSessionInventory(): SessionInventory {
 		async listAll(): Promise<DiskSession[]> {
 			const { SessionManager } = await import(pkg);
 			return inventoryFrom(SessionManager as unknown as SessionManagerLike).listAll();
+		},
+		async deleteSession(path: string, opts?: { activeSessionPath?: string }): Promise<DeleteSessionResult> {
+			const { SessionManager } = await import(pkg);
+			return inventoryFrom(SessionManager as unknown as SessionManagerLike).deleteSession(path, opts);
 		},
 	};
 }

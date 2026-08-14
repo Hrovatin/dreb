@@ -57,6 +57,9 @@ export interface SessionSummaryDto {
 
 /** A labelled group of session rows. */
 export interface SessionGroupDto {
+	/** Stable identity (`"<kind>:<cwd>"`) so the webview can reconcile groups by
+	 * key across refreshes instead of remounting them. */
+	key: string;
 	kind: "current" | "project" | "archived";
 	/** Group cwd (`""` for archived). */
 	cwd: string;
@@ -199,16 +202,22 @@ export function buildSessionList(input: BuildSessionListInput): SessionListDto {
 	//    archived last. Omit empty groups.
 	const groups: SessionGroupDto[] = [];
 	if (current.length > 0) {
-		groups.push({ kind: "current", cwd: currentCwd, label: "This workspace", sessions: sortRows(current) });
+		groups.push({
+			key: `current:${currentCwd}`,
+			kind: "current",
+			cwd: currentCwd,
+			label: "This workspace",
+			sessions: sortRows(current),
+		});
 	}
 	for (const cwd of [...projects.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
 		const bucket = projects.get(cwd);
 		if (bucket && bucket.length > 0) {
-			groups.push({ kind: "project", cwd, label: basename(cwd), sessions: sortRows(bucket) });
+			groups.push({ key: `project:${cwd}`, kind: "project", cwd, label: basename(cwd), sessions: sortRows(bucket) });
 		}
 	}
 	if (archived.length > 0) {
-		groups.push({ kind: "archived", cwd: "", label: "Archived", sessions: sortRows(archived) });
+		groups.push({ key: "archived:", kind: "archived", cwd: "", label: "Archived", sessions: sortRows(archived) });
 	}
 
 	return { currentCwd, groups };

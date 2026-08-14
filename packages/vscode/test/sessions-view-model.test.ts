@@ -35,6 +35,7 @@ function makeModel(over: Partial<SessionsViewDeps> = {}) {
 	const inventory: SessionInventory = {
 		listAll: async () => diskSessions,
 		listForCwd: async (cwd) => diskSessions.filter((s) => s.cwd === cwd),
+		deleteSession: async () => ({ ok: true, method: "trash" }),
 	};
 	const flags = new SessionFlagsStore(new FakeMemento());
 	let live: LiveSessionInput[] = [];
@@ -144,6 +145,7 @@ describe("SessionsViewModel", () => {
 				throw new Error("disk boom");
 			},
 			listForCwd: async () => [],
+			deleteSession: async () => ({ ok: true, method: "trash" }),
 		};
 		const logs: string[] = [];
 		const { model, posted } = makeModel({ inventory, logger: (l) => logs.push(l) });

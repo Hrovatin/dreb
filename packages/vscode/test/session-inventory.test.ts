@@ -32,6 +32,7 @@ function fakeManager(): SessionManagerLike {
 	return {
 		list: async (cwd: string) => (cwd === "/proj" ? [dateRaw, stringRaw] : []),
 		listAll: async () => [dateRaw, stringRaw],
+		deleteSession: async () => ({ ok: true, method: "trash" }),
 	};
 }
 
@@ -74,6 +75,7 @@ describe("inventoryFrom", () => {
 				return [dateRaw, stringRaw];
 			},
 			listAll: async () => [],
+			deleteSession: async () => ({ ok: true, method: "trash" }),
 		};
 		const inventory = inventoryFrom(manager);
 		const result = await inventory.listForCwd("/proj");
@@ -90,6 +92,7 @@ describe("inventoryFrom", () => {
 				called = true;
 				return [dateRaw, stringRaw];
 			},
+			deleteSession: async () => ({ ok: true, method: "trash" }),
 		};
 		const inventory = inventoryFrom(manager);
 		const result = await inventory.listAll();
@@ -101,5 +104,44 @@ describe("inventoryFrom", () => {
 	it("returns empty for an unknown cwd", async () => {
 		const inventory = inventoryFrom(fakeManager());
 		expect(await inventory.listForCwd("/other")).toEqual([]);
+	});
+});
+
+describe("inventoryFrom.deleteSession", () => {
+	it("delegates path + opts to manager.deleteSession and returns its result", async () => {
+		let seen: { path?: string; opts?: { activeSessionPath?: string } } = {};
+		const manager: SessionManagerLike = {
+			list: async () => [],
+			listAll: async () => [],
+			deleteSession: async (path, opts) => {
+				seen = { path, opts };
+				return { ok: true, method: "trash" };
+			},
+		};
+		const inventory = inventoryFrom(manager);
+		const result = await inventory.deleteSession("/proj/.dreb/sessions/a.jsonl", {
+			activeSessionPath: "/proj/.dreb/sessions/b.jsonl",
+		});
+
+		expect(seen.path).toBe("/proj/.dreb/sessions/a.jsonl");
+		expect(seen.opts).toEqual({ activeSessionPath: "/proj/.dreb/sessions/b.jsonl" });
+		expect(result).toEqual({ ok: true, method: "trash" });
+	});
+
+	it("propagates a failure result (ok:false with an error) rather than throwing", async () => {
+		const manager: SessionManagerLike = {
+			list: async () => [],
+			listAll: async () => [],
+			deleteSession: async () => ({
+				ok: false,
+				method: "unlink",
+				error: "Cannot delete the currently active session",
+			}),
+		};
+		const inventory = inventoryFrom(manager);
+		const result = await inventory.deleteSession("/proj/.dreb/sessions/a.jsonl");
+
+		expect(result.ok).toBe(false);
+		expect(result.error).toMatch(/active session/);
 	});
 });
