@@ -117,6 +117,22 @@ export interface FileContextDto {
  * into the next prompt. */
 export type TaggedContextDto = SelectionContextDto | FileContextDto;
 
+/** A clickable code reference the user activated in an answer (Phase 5b). Either
+ * a concrete file `path` (optionally with a 1-based `line`/`column`), a `symbol`
+ * name to resolve at click time, or both. When a `symbol` is present the host
+ * prefers jumping to its definition (workspace symbol provider); the `path`/`line`
+ * — captured from the grounding tool hit — is the best-effort fallback location. */
+export interface OpenSourceRef {
+	/** Workspace-relative (or absolute) file path, forward slashes. */
+	path?: string;
+	/** 1-based line to reveal/select. */
+	line?: number;
+	/** 1-based column to place the caret. */
+	column?: number;
+	/** Symbol name (function/class/heading) to resolve to a definition. */
+	symbol?: string;
+}
+
 /** Messages sent from the host to the webview. */
 export type HostToWebview =
 	| { type: "snapshot"; state: TranscriptState; commands: SlashCommandDto[]; status: HostStatus }
@@ -142,4 +158,7 @@ export type WebviewToHost =
 	/** Open the native file/folder picker to tag context (composer `@`). */
 	| { type: "pick-file" }
 	/** Open the baseline→current diff for a reviewed file (indicator click). */
-	| { type: "review-open-diff"; path: string };
+	| { type: "review-open-diff"; path: string }
+	/** Open a code reference clicked in an answer (Phase 5b) — a file location
+	 * and/or a symbol to resolve to its definition. */
+	| { type: "open-source"; ref: OpenSourceRef };
