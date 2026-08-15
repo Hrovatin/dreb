@@ -5,6 +5,10 @@ import { type SessionOps, SessionPool } from "../src/host/session-registry.js";
  * whose completion a test can gate to simulate slow/racing `/quit` reopen. */
 class FakeSession {
 	disposed = false;
+	/** Mirrors a *failed* controller (crashed child / failed start): the pool
+	 * predicate treats it as not-reusable, exactly like the extension's
+	 * `isDisposed() || hasFailed()` composite. */
+	failed = false;
 	revealed = 0;
 	teardownCalls = 0;
 	private teardownGate: Promise<void> | undefined;
@@ -30,7 +34,7 @@ class FakeSession {
 /** Build a pool over FakeSession with observable ops. */
 function makePool() {
 	const ops: SessionOps<FakeSession> = {
-		isDisposed: (s) => s.disposed,
+		isDisposed: (s) => s.disposed || s.failed,
 		reveal: (s) => {
 			s.revealed += 1;
 		},
@@ -85,6 +89,29 @@ describe("SessionPool", () => {
 		expect(fresh).toBe(sessions[1]);
 		expect(pool.get("k")).toBe(sessions[1]); // fresh session live
 		expect(sessions[1].revealed).toBe(0); // brand new, not revealed
+	});
+
+	it("tears down a FAILED (crashed) session and rebuilds on reopen(key)", async () => {
+		// Mirrors Phase 9 Item 1: a crashed session (child exited, controller not
+		// disposed) is treated as not-reusable by the composite predicate, so
+		// reopening rebuilds a fresh session rather than revealing the dead one.
+		const pool = makePool();
+		const sessions: FakeSession[] = [];
+		const create = () => {
+			const s = new FakeSession(`s${sessions.length + 1}`);
+			sessions.push(s);
+			return s;
+		};
+
+		await pool.open("k", create); // s1 live
+		sessions[0].failed = true; // RPC child crashed (but NOT disposed)
+
+		const fresh = await pool.open("k", create); // tear down s1, build s2
+		expect(sessions).toHaveLength(2);
+		expect(sessions[0].teardownCalls).toBe(1); // dead session torn down
+		expect(fresh).toBe(sessions[1]);
+		expect(pool.get("k")).toBe(sessions[1]); // fresh session live
+		expect(sessions[1].revealed).toBe(0); // rebuilt, not revealed
 	});
 
 	it("defers to a concurrent open() for the SAME key instead of orphaning it (reentrancy race)", async () => {
