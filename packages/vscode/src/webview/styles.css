@@ -278,6 +278,19 @@ body {
 .dreb-review-file:hover {
 	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
 }
+.dreb-review-accept-all {
+	font-size: 0.8em;
+	padding: 1px 8px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-button-border, transparent);
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	cursor: pointer;
+	margin-right: 4px;
+}
+.dreb-review-accept-all:hover {
+	background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
 .dreb-review-unavailable .dreb-review-title {
 	font-weight: 400;
 	font-style: italic;
