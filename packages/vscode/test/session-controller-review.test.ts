@@ -67,6 +67,9 @@ class MiniClient implements RpcClientLike {
 	async importJsonl() {
 		return { cancelled: false };
 	}
+	async getForkMessages(): Promise<Array<{ entryId: string; text: string; role: "user" | "assistant" }>> {
+		return [];
+	}
 	emit(event: unknown): void {
 		this.ev?.(event);
 	}
