@@ -167,3 +167,49 @@ describe("SidebarApp reconcile identity preservation (F2)", () => {
 		expect(detailsAfter[1].open).toBe(true);
 	});
 });
+
+describe("SidebarApp stop action (Phase 7)", () => {
+	it("shows Stop on a live non-idle row and posts a stop message", () => {
+		mountSidebar();
+		emit({
+			currentCwd: "/proj",
+			groups: [
+				group("current", "/proj", "This workspace", [
+					{ ...row("/proj/a.jsonl", "Working", "running"), live: true },
+				]),
+			],
+		});
+
+		const stopBtn = container.querySelector<HTMLButtonElement>('[aria-label="Stop session"]');
+		expect(stopBtn).not.toBeNull();
+		stopBtn?.click();
+		expect(hoisted.posted).toContainEqual({ type: "stop", key: "/proj/a.jsonl" });
+	});
+
+	it("shows Stop on a live needs-input row too", () => {
+		mountSidebar();
+		emit({
+			currentCwd: "/proj",
+			groups: [
+				group("current", "/proj", "This workspace", [
+					{ ...row("/proj/a.jsonl", "Awaiting", "needs-input"), live: true },
+				]),
+			],
+		});
+		expect(container.querySelector('[aria-label="Stop session"]')).not.toBeNull();
+	});
+
+	it("hides Stop on an idle row and on a non-live row", () => {
+		mountSidebar();
+		emit({
+			currentCwd: "/proj",
+			groups: [
+				group("current", "/proj", "This workspace", [
+					{ ...row("/proj/a.jsonl", "Idle live", "idle"), live: true }, // live but idle -> no Stop
+					{ ...row("/proj/b.jsonl", "Background off", "running"), live: false }, // not live -> no Stop
+				]),
+			],
+		});
+		expect(container.querySelector('[aria-label="Stop session"]')).toBeNull();
+	});
+});

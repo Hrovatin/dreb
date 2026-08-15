@@ -70,6 +70,15 @@ class MiniClient implements RpcClientLike {
 	async getForkMessages(): Promise<Array<{ entryId: string; text: string; role: "user" | "assistant" }>> {
 		return [];
 	}
+	async fork(): Promise<{ text: string; cancelled: boolean }> {
+		return { text: "", cancelled: false };
+	}
+	async navigateTree(): Promise<{ cancelled: boolean; editorText?: string }> {
+		return { cancelled: false };
+	}
+	async getTree(): Promise<{ roots: any[]; leafId: string | null }> {
+		return { roots: [], leafId: null };
+	}
 	emit(event: unknown): void {
 		this.ev?.(event);
 	}
