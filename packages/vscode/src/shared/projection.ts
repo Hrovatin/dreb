@@ -56,6 +56,35 @@ export interface SystemItem {
 
 export type TranscriptItem = UserItem | ResponseGroup | SystemItem;
 
+/**
+ * An inline restore/fork control descriptor (Phase 6). Maps a rendered response
+ * group to the session entry the webview forks from / navigates to. Kept out of
+ * `TranscriptState` because it is host-derived (from the session tree) and
+ * refreshes independently of the streamed transcript.
+ */
+export interface Checkpoint {
+	/** The {@link ResponseGroup.id} this control attaches to. */
+	responseId: number;
+	/** Session entry id (the assistant turn) to fork from / restore to. */
+	entryId: string;
+	/** Whether "Restore Checkpoint" is offered — false for the latest turn,
+	 * where restoring to where you already are is a no-op. */
+	canRestore: boolean;
+	/** Whether "Fork" is offered — false for turns the backend refuses to fork
+	 * from (errored/aborted turns, and turns containing tool calls whose results
+	 * live in descendant entries a branch cannot carry). Sourced from the
+	 * `get_fork_messages` RPC so the control only appears where forking works. */
+	canFork: boolean;
+}
+
+/** One turn on a session branch, used to rebuild the transcript after a tree
+ * navigation or fork (see {@link foldBranchIntoState}). */
+export interface BranchTurn {
+	entryId: string;
+	role: "user" | "assistant";
+	text: string;
+}
+
 /** A pending, blocking extension-UI request the user must answer. */
 export interface UiRequest {
 	id: string;
@@ -378,4 +407,74 @@ export function activitySummary(group: ResponseGroup): string {
 	if (thoughtCount > 0) parts.push(`${thoughtCount} thought${thoughtCount === 1 ? "" : "s"}`);
 	if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount === 1 ? "" : "s"}`);
 	return parts.length > 0 ? parts.join(" · ") : "no activity";
+}
+
+/**
+ * Replace `state`'s transcript in place with turns rebuilt from a session branch
+ * (Phase 6 — after a restore/fork moved the leaf). Mutates the state's
+ * properties, not the reference, so a holder of the state object (the host's
+ * snapshot source) stays valid. Turn text is the branch entry's preview: full
+ * answer text and tool activity are not reconstructed on rebuild (MVP).
+ */
+export function foldBranchIntoState(state: TranscriptState, turns: BranchTurn[]): void {
+	state.items = [];
+	state.streaming = false;
+	state.uiRequests = [];
+	state.statusText = undefined;
+	state.hostError = undefined;
+	state.nextResponseId = 1;
+	for (const turn of turns) {
+		if (turn.role === "user") {
+			state.items.push({ kind: "user", text: turn.text });
+		} else {
+			state.items.push({
+				kind: "response",
+				id: state.nextResponseId++,
+				activity: [],
+				answer: turn.text,
+				streaming: false,
+				collapsed: true,
+			});
+		}
+	}
+}
+
+/**
+ * Align assistant session entry ids (the current branch, chronological order) to
+ * the transcript's completed response groups, keyed by the stable
+ * {@link ResponseGroup.id}. Aligns from the most recent turn backward so the leaf
+ * stays anchored on a length mismatch (unmatched older groups simply get no
+ * control rather than a wrong one). The latest aligned checkpoint gets
+ * `canRestore: false` (restoring to where you already are is a no-op); every
+ * earlier one gets `canRestore: true`.
+ *
+ * Only actively-streaming groups are excluded: the in-flight turn has not been
+ * persisted as a session entry yet, so it has no id in `assistantEntryIds`.
+ * Errored groups are deliberately KEPT — a provider-error turn is still persisted
+ * to the session (and therefore present in the tree / `assistantEntryIds`), so
+ * dropping it here would desync the two sequences and shift every older
+ * checkpoint onto the wrong entry id (backward alignment would pair a successful
+ * group with the errored turn's id). Keeping errored groups preserves the 1:1
+ * positional correspondence the {@link foldBranchIntoState} rebuild path relies on.
+ *
+ * `forkableEntryIds` is the set of entry ids the backend will actually fork from
+ * (from the `get_fork_messages` RPC); a checkpoint whose entry id is absent gets
+ * `canFork: false` so the Fork control is hidden rather than shown as a no-op
+ * that only surfaces a "Couldn't fork…" notice on click.
+ */
+export function alignCheckpoints(
+	state: TranscriptState,
+	assistantEntryIds: string[],
+	forkableEntryIds: ReadonlySet<string>,
+): Checkpoint[] {
+	const groups = state.items.filter((item): item is ResponseGroup => item.kind === "response" && !item.streaming);
+	const pairs = Math.min(groups.length, assistantEntryIds.length);
+	const checkpoints: Checkpoint[] = [];
+	for (let k = 0; k < pairs; k++) {
+		const group = groups[groups.length - 1 - k];
+		const entryId = assistantEntryIds[assistantEntryIds.length - 1 - k];
+		// k === 0 is the most recent turn → no restore.
+		checkpoints.push({ responseId: group.id, entryId, canRestore: k !== 0, canFork: forkableEntryIds.has(entryId) });
+	}
+	return checkpoints.reverse();
 }

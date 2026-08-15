@@ -4,6 +4,7 @@ import { formatContextUsage, formatCost, formatModel, formatThinking } from "../
 import {
 	activitySummary,
 	applyEvent,
+	type Checkpoint,
 	createTranscriptState,
 	type ResponseGroup,
 	type ToolActivity,
@@ -14,6 +15,8 @@ import type {
 	HostStatus,
 	OpenSourceRef,
 	ReviewStateDto,
+	SessionTreeDto,
+	SessionTreeNodeDto,
 	SlashCommandDto,
 	TaggedContextDto,
 	UiResponse,
@@ -34,6 +37,14 @@ export function App() {
 	// Editor selections tagged into the chat (Phase 4), shown as removable chips
 	// above the composer and folded into the next submitted message.
 	const [attachments, setAttachments] = createSignal<TaggedContextDto[]>([]);
+	// Inline restore/fork controls (Phase 6), aligned to response groups by id.
+	const [checkpoints, setCheckpoints] = createSignal<Checkpoint[]>([]);
+	const checkpointByResponse = createMemo(() => new Map(checkpoints().map((c) => [c.responseId, c])));
+	// The session branch tree, shown as an overlay when the user opens it.
+	const [tree, setTree] = createSignal<SessionTreeDto | undefined>();
+	// A composer pre-fill request (a user-message fork's re-ask text). Bumped
+	// `nonce` retriggers the effect even when the text repeats.
+	const [prefill, setPrefill] = createSignal<{ text: string; nonce: number }>();
 	const [tick, setTick] = createSignal(0);
 
 	let scrollEl: HTMLDivElement | undefined;
@@ -63,6 +74,15 @@ export function App() {
 					break;
 				case "tag-context":
 					setAttachments((current) => [...current, msg.context]);
+					break;
+				case "checkpoints":
+					setCheckpoints(msg.checkpoints);
+					break;
+				case "tree":
+					setTree(msg.tree);
+					break;
+				case "composer-prefill":
+					setPrefill((prev) => ({ text: msg.text, nonce: (prev?.nonce ?? 0) + 1 }));
 					break;
 			}
 			setTick((t) => t + 1);
@@ -118,6 +138,15 @@ export function App() {
 						</span>
 					)}
 				</Show>
+				<button
+					type="button"
+					class="dreb-chip"
+					title="Session tree — restore or fork any point"
+					disabled={!status().connected}
+					onClick={() => postToHost({ type: "show-tree" })}
+				>
+					⑃ tree
+				</button>
 				<span class={`dreb-dot ${status().connected ? "ok" : "off"}`} />
 			</header>
 
@@ -165,7 +194,12 @@ export function App() {
 						) : item.kind === "system" ? (
 							<pre class="dreb-system">{item.text}</pre>
 						) : (
-							<ResponseView group={item} />
+							<>
+								<ResponseView group={item} />
+								<Show when={checkpointByResponse().get(item.id)}>
+									{(checkpoint) => <CheckpointBar checkpoint={checkpoint()} />}
+								</Show>
+							</>
 						)
 					}
 				</For>
@@ -177,10 +211,24 @@ export function App() {
 				</Show>
 			</div>
 
+			<Show when={tree()}>
+				{(current) => (
+					<TreePanel
+						tree={current()}
+						onNavigate={(entryId) => {
+							postToHost({ type: "navigate-tree", entryId });
+							setTree(undefined);
+						}}
+						onClose={() => setTree(undefined)}
+					/>
+				)}
+			</Show>
+
 			<Composer
 				streaming={state.streaming}
 				commands={commands()}
 				attachments={attachments()}
+				prefill={prefill()}
 				onRemoveAttachment={(index) => setAttachments((current) => current.filter((_, i) => i !== index))}
 				onSubmit={(text) => {
 					postToHost({ type: "submit", text, attachments: attachments() });
@@ -214,6 +262,105 @@ export function ResponseView(props: { group: ResponseGroup }) {
 			<Show when={props.group.error}>
 				<div class="dreb-banner error">{props.group.error}</div>
 			</Show>
+		</div>
+	);
+}
+
+/** Inline restore/fork controls rendered after a response (Phase 6), Copilot
+ * style. "Restore Checkpoint" rewinds the conversation to this turn; "Fork"
+ * branches a new line of conversation from it. Both post to the host, which
+ * drives the RPC and rebuilds the transcript. */
+export function CheckpointBar(props: { checkpoint: Checkpoint }) {
+	return (
+		<Show when={props.checkpoint.canRestore || props.checkpoint.canFork}>
+			<div class="dreb-checkpoint">
+				<Show when={props.checkpoint.canRestore}>
+					<button
+						type="button"
+						class="dreb-checkpoint-btn"
+						title="Restore the conversation to this point"
+						onClick={() => postToHost({ type: "navigate-tree", entryId: props.checkpoint.entryId })}
+					>
+						Restore Checkpoint
+					</button>
+				</Show>
+				<Show when={props.checkpoint.canRestore && props.checkpoint.canFork}>
+					<span class="dreb-checkpoint-sep">·</span>
+				</Show>
+				<Show when={props.checkpoint.canFork}>
+					<button
+						type="button"
+						class="dreb-checkpoint-btn dreb-checkpoint-fork"
+						title="Fork a new branch from here"
+						onClick={() => postToHost({ type: "fork", entryId: props.checkpoint.entryId })}
+					>
+						⑃ Fork
+					</button>
+				</Show>
+			</div>
+		</Show>
+	);
+}
+
+interface TreeRow {
+	node: SessionTreeNodeDto;
+	depth: number;
+}
+
+/** Flatten the session tree to indented rows, keeping only message turns
+ * (user/assistant) so the branch view stays readable. Oldest-first. */
+function flattenTree(nodes: SessionTreeNodeDto[], depth = 0, out: TreeRow[] = []): TreeRow[] {
+	for (const node of nodes) {
+		const isTurn = node.type === "message" && (node.role === "user" || node.role === "assistant");
+		if (isTurn) out.push({ node, depth });
+		flattenTree(node.children, isTurn ? depth + 1 : depth, out);
+	}
+	return out;
+}
+
+/** The branch-tree overlay (Phase 6): jump to any turn on any branch, so forked
+ * or rewound branches stay reachable. The current leaf is marked and disabled. */
+export function TreePanel(props: { tree: SessionTreeDto; onNavigate: (entryId: string) => void; onClose: () => void }) {
+	const rows = createMemo(() => flattenTree(props.tree.roots));
+	return (
+		// biome-ignore lint/a11y/noStaticElementInteractions: click-away backdrop; the panel itself stops propagation
+		// biome-ignore lint/a11y/useKeyWithClickEvents: backdrop dismissal mirrors the escape affordance below
+		<div class="dreb-tree-overlay" onClick={props.onClose}>
+			{/* biome-ignore lint/a11y/noStaticElementInteractions: stops backdrop dismissal from firing inside the panel */}
+			{/* biome-ignore lint/a11y/useKeyWithClickEvents: non-interactive container; interactive children handle keys */}
+			<div class="dreb-tree-panel" onClick={(event) => event.stopPropagation()}>
+				<div class="dreb-tree-head">
+					<span class="dreb-tree-title">Session tree</span>
+					<button type="button" class="dreb-tree-close" title="Close" onClick={props.onClose}>
+						×
+					</button>
+				</div>
+				<div class="dreb-tree-body">
+					<Show
+						when={rows().length > 0}
+						fallback={<div class="dreb-tree-empty">No turns yet — send a message to start the tree.</div>}
+					>
+						<For each={rows()}>
+							{(row) => (
+								<button
+									type="button"
+									class="dreb-tree-node"
+									style={{ "padding-left": `${8 + row.depth * 16}px` }}
+									disabled={row.node.id === props.tree.leafId}
+									title={`${row.node.role ?? row.node.type} · ${row.node.id.slice(0, 8)}`}
+									onClick={() => props.onNavigate(row.node.id)}
+								>
+									<span class="dreb-tree-role">{row.node.role === "assistant" ? "assistant" : "you"}</span>
+									<span class="dreb-tree-preview">{row.node.label ?? row.node.preview}</span>
+									<Show when={row.node.id === props.tree.leafId}>
+										<span class="dreb-tree-current">current</span>
+									</Show>
+								</button>
+							)}
+						</For>
+					</Show>
+				</div>
+			</div>
 		</div>
 	);
 }
@@ -442,12 +589,20 @@ function Composer(props: {
 	streaming: boolean;
 	commands: SlashCommandDto[];
 	attachments: TaggedContextDto[];
+	prefill?: { text: string; nonce: number };
 	onRemoveAttachment: (index: number) => void;
 	onSubmit: (text: string) => void;
 	onAbort: () => void;
 	onPickFile: () => void;
 }) {
 	const [text, setText] = createSignal("");
+
+	// Apply a host-driven pre-fill (a user-message fork's re-ask text). The
+	// `nonce` makes the effect retrigger even when the same text is sent twice.
+	createEffect(() => {
+		const request = props.prefill;
+		if (request) setText(request.text);
+	});
 
 	const menu = createMemo(() => {
 		const value = text();
