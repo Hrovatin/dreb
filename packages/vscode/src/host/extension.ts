@@ -23,7 +23,12 @@ import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
 import { createSessionInventory, deletePersistedSession, type SessionInventory } from "./session-inventory.js";
 import { SessionPool } from "./session-registry.js";
-import { revealOrReattach, type SleepableSession, SleepController } from "./session-view-lifecycle.js";
+import {
+	readSleepSetting,
+	revealOrReattach,
+	type SleepableSession,
+	SleepController,
+} from "./session-view-lifecycle.js";
 import { SessionsViewProvider } from "./sessions-view.js";
 import { tagSelectionToChat } from "./tag-selection.js";
 import { createVscodeHostUi } from "./vscode-host-ui.js";
@@ -65,6 +70,7 @@ const pool = new SessionPool<ChatSession>({
 	reveal: (s) => revealSession(s),
 	teardown: async (s) => {
 		s.disposing = true;
+		s.sleep.dispose(); // cancel the idle / inactivity-cap timers so they don't retain the session graph
 		s.connection?.dispose();
 		await s.controller.dispose();
 		s.reviewUi.dispose();
@@ -289,15 +295,17 @@ function createSession(context: vscode.ExtensionContext, key: string, sessionPat
 	};
 	// Two configurable inactivity timers (Phase 9): an idle-deactivation period
 	// for detached + idle sessions, and a longer no-user-input cap that sleeps
-	// any session regardless of state. Either `0` disables that timer.
-	const idleMinutes = config.get<number>("session.idleSleepMinutes") ?? 60;
-	const inactivityHours = config.get<number>("session.inactivitySleepHours") ?? 4;
+	// any session regardless of state. `0` disables a timer; any invalid entry
+	// (non-number / NaN / Infinity / negative, past VS Code's schema warning)
+	// falls back to the default rather than the previous silent 0-ms self-sleep.
+	const idleMinutes = readSleepSetting(config.get<unknown>("session.idleSleepMinutes"), 60);
+	const inactivityHours = readSleepSetting(config.get<unknown>("session.inactivitySleepHours"), 4);
 	session.sleep = new SleepController(
 		sleepable,
 		{ sleep: () => void sleepSession(session) },
 		{
-			idleMs: Math.max(0, idleMinutes) * 60_000,
-			capMs: Math.max(0, inactivityHours) * 60 * 60_000,
+			idleMs: idleMinutes * 60_000,
+			capMs: inactivityHours * 60 * 60_000,
 		},
 	);
 

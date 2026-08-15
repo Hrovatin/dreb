@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+	readSleepSetting,
 	revealOrReattach,
 	type SleepableSession,
 	SleepController,
@@ -237,6 +238,76 @@ describe("SleepController — both timers together", () => {
 		h.sleep.onUserInput();
 		h.advance(60 * 60_000);
 		expect(h.sleepCalls()).toBe(1);
+	});
+});
+
+describe("SleepController.dispose() (Phase 9 — cancel timers on explicit teardown)", () => {
+	it("cancels a pending idle timer so an explicit teardown doesn't sleep later", () => {
+		const h = harness({ idleMs: 1000, capMs: 0 });
+		h.setView(false);
+		h.sleep.onDetach(); // schedules the idle timer
+		expect(h.pending()).toBe(1);
+		h.sleep.dispose(); // stop/delete/deactivate tears the session down
+		expect(h.pending()).toBe(0); // no timer left to retain the session graph
+		h.advance(60 * 60_000);
+		expect(h.sleepCalls()).toBe(0);
+	});
+
+	it("cancels the long-running inactivity cap on teardown", () => {
+		const h = harness({ idleMs: 0, capMs: 4 * 60 * 60_000 });
+		expect(h.pending()).toBe(1); // cap scheduled at construction
+		h.sleep.dispose();
+		expect(h.pending()).toBe(0);
+		h.advance(4 * 60 * 60_000);
+		expect(h.sleepCalls()).toBe(0);
+	});
+
+	it("is idempotent and safe to call after the session already slept", () => {
+		const h = harness({ idleMs: 1000, capMs: 5000 });
+		h.setView(false);
+		h.sleep.onDetach();
+		h.advance(1000); // idle fires → slept, both timers cleared
+		expect(h.sleepCalls()).toBe(1);
+		expect(h.pending()).toBe(0);
+		expect(() => {
+			h.sleep.dispose();
+			h.sleep.dispose();
+		}).not.toThrow();
+		expect(h.sleepCalls()).toBe(1);
+	});
+});
+
+describe("readSleepSetting (Phase 9 — invalid config falls back to the default)", () => {
+	it("passes a valid non-negative number through unchanged", () => {
+		expect(readSleepSetting(60, 60)).toBe(60);
+		expect(readSleepSetting(90, 60)).toBe(90);
+		expect(readSleepSetting(0.5, 4)).toBe(0.5);
+	});
+
+	it("preserves 0 (the explicit 'disabled' value) rather than defaulting it", () => {
+		expect(readSleepSetting(0, 60)).toBe(0);
+	});
+
+	it("falls back to the default for a non-numeric value (the NaN-timer hazard)", () => {
+		// VS Code's get() returns the raw JSON; "never" would become NaN downstream.
+		expect(readSleepSetting("never", 60)).toBe(60);
+		expect(readSleepSetting("1h", 4)).toBe(4);
+		expect(readSleepSetting(true, 60)).toBe(60);
+		expect(readSleepSetting({}, 4)).toBe(4);
+	});
+
+	it("falls back to the default for NaN and Infinity", () => {
+		expect(readSleepSetting(Number.NaN, 60)).toBe(60);
+		expect(readSleepSetting(Number.POSITIVE_INFINITY, 4)).toBe(4);
+	});
+
+	it("falls back to the default for a negative (below the minimum:0 schema)", () => {
+		expect(readSleepSetting(-5, 60)).toBe(60);
+	});
+
+	it("falls back to the default for a missing value (undefined / null)", () => {
+		expect(readSleepSetting(undefined, 60)).toBe(60);
+		expect(readSleepSetting(null, 4)).toBe(4);
 	});
 });
 

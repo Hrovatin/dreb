@@ -165,8 +165,8 @@ When running a packaged `.vsix` that does not ship the CLI, set `dreb.cliPath` t
 | `dreb.cliPath` | Absolute path to the dreb CLI (`dist/cli.js`). Empty = auto-resolve. |
 | `dreb.provider` | Optional provider passed to dreb (e.g. `anthropic`). |
 | `dreb.model` | Optional model id/pattern passed to dreb. |
-| `dreb.session.idleSleepMinutes` | Minutes a detached + idle session stays alive before sleeping (releasing its RPC child). Reopening before then reattaches losslessly. Default `60`; `0` disables. |
-| `dreb.session.inactivitySleepHours` | Hours without user input after which a session sleeps regardless of state (including a focused, awaiting-input, or running session). Resets on submit / prompt answer. Default `4`; `0` disables. |
+| `dreb.session.idleSleepMinutes` | Minutes a detached + idle session stays alive before sleeping (releasing its RPC child). Reopening before then reattaches losslessly. Default `60`; `0` disables; an invalid value falls back to the default. |
+| `dreb.session.inactivitySleepHours` | Hours without user input after which a session sleeps regardless of state (including a focused, awaiting-input, or running session). Resets on submit / prompt answer. Default `4`; `0` disables; an invalid value falls back to the default. |
 
 ## Development
 

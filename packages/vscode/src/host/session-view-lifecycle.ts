@@ -69,6 +69,24 @@ const defaultScheduler: SleepScheduler = {
 const DEFAULT_IDLE_MS = 60 * 60_000; // 1 hour
 const DEFAULT_CAP_MS = 4 * 60 * 60_000; // 4 hours
 
+/**
+ * Resolve a user-configured inactivity period (minutes / hours) to a valid,
+ * non-negative number, falling back to `fallback` for any invalid entry.
+ *
+ * VS Code's `getConfiguration().get()` returns the raw JSON value with no
+ * runtime type enforcement — the generic is only a hint — so a non-number,
+ * `NaN`, `Infinity`, or a negative (below the `minimum: 0` schema) can slip
+ * through if a user hand-edits `settings.json` past the editor's validation
+ * warning. Left unguarded these produce a `NaN`/negative delay that the timer's
+ * `<= 0` check does not treat as "disabled", degrading `setTimer` to a 0-ms
+ * fire that would sleep the session the instant it is created. `0` is a valid
+ * "disabled" value and is preserved; only genuinely invalid entries fall back
+ * to the default.
+ */
+export function readSleepSetting(raw: unknown, fallback: number): number {
+	return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+}
+
 export interface SleepControllerOptions {
 	/** Idle-deactivation period in ms (detached + idle). `<= 0` disables it. */
 	idleMs?: number;
@@ -144,6 +162,15 @@ export class SleepController {
 	onUserInput(): void {
 		if (this.slept) return;
 		this.scheduleCap();
+	}
+
+	/** Cancel both timers. Called when the session is torn down explicitly (stop /
+	 * delete / deactivate / rebuild-on-reopen) so a still-pending timer — the cap
+	 * runs for hours — doesn't retain the disposed session graph until it fires.
+	 * Idempotent; safe to call after {@link doSleep} has already cleared them. */
+	dispose(): void {
+		this.clearIdle();
+		this.clearCap();
 	}
 
 	/** (Re)evaluate the idle timer against the current detached + view + run
