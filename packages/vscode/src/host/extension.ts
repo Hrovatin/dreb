@@ -16,13 +16,14 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { relative, sep } from "node:path";
 import * as vscode from "vscode";
-import type { LiveSessionInput } from "../shared/session-list.js";
+import type { LiveSessionInput, SessionRunState } from "../shared/session-list.js";
 import { resolveCliPath } from "./cli-path.js";
 import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
 import { createSessionInventory, deletePersistedSession, type SessionInventory } from "./session-inventory.js";
 import { SessionPool } from "./session-registry.js";
+import { revealOrReattach, type SleepableSession, SleepController } from "./session-view-lifecycle.js";
 import { SessionsViewProvider } from "./sessions-view.js";
 import { tagSelectionToChat } from "./tag-selection.js";
 import { createVscodeHostUi } from "./vscode-host-ui.js";
@@ -33,29 +34,47 @@ import { connectWebview, getWebviewHtml } from "./webview-bridge.js";
 interface ChatSession {
 	/** Pool key: the session `.jsonl` path when resuming, else `new:<uuid>`. */
 	key: string;
-	panel: vscode.WebviewPanel;
+	/** The chat panel + webview bridge, or `undefined` while backgrounded (the
+	 * tab was closed but the controller keeps running / is idle-and-sleeping). */
+	panel: vscode.WebviewPanel | undefined;
 	controller: SessionController;
-	connection: vscode.Disposable;
+	/** The webview bridge for {@link panel}; `undefined` while backgrounded. */
+	connection: vscode.Disposable | undefined;
 	reviewUi: ReviewUi & vscode.Disposable;
+	/** Sleep-on-idle driver: backgrounds a closed session and releases its RPC
+	 * child once it goes idle. */
+	sleep: SleepController;
+	/** Set while an explicit teardown (stop / delete / deactivate / sleep) is
+	 * disposing the panel, so the panel's own `onDidDispose` doesn't re-background
+	 * a session that is already being torn down. */
+	disposing: boolean;
 }
 
 /** Multi-session pool: one live chat panel per session key; several coexist and
  * keep running across tab/focus changes. The reentrancy-safe lifecycle core is
- * the vscode-free, unit-tested `session-registry.ts`; the vscode ops are here. */
+ * the vscode-free, unit-tested `session-registry.ts`; the vscode ops are here.
+ *
+ * `isDisposed` reflects the *controller*, not the view: a backgrounded session
+ * (panel closed, controller still alive) is NOT disposed, so `reveal` reattaches
+ * a fresh panel to the surviving controller instead of rebuilding it. */
 const pool = new SessionPool<ChatSession>({
 	isDisposed: (s) => s.controller.isDisposed(),
-	reveal: (s) => s.panel.reveal(vscode.ViewColumn.Active),
+	reveal: (s) => revealSession(s),
 	teardown: async (s) => {
-		s.connection.dispose();
+		s.disposing = true;
+		s.connection?.dispose();
 		await s.controller.dispose();
 		s.reviewUi.dispose();
-		s.panel.dispose();
+		s.panel?.dispose();
 	},
 });
 
 let sessionsView: SessionsViewProvider | undefined;
 let inventory: SessionInventory;
 let flags: SessionFlagsStore;
+/** The activation context, kept so `reveal` can rebuild a panel for a
+ * backgrounded session that outlived its original panel. */
+let extensionContext: vscode.ExtensionContext | undefined;
 
 /** Debounce sidebar refreshes driven by high-frequency controller updates so a
  * streaming turn doesn't trigger a disk scan per event. */
@@ -69,6 +88,7 @@ function scheduleSidebarRefresh(): void {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+	extensionContext = context;
 	inventory = createSessionInventory();
 	flags = new SessionFlagsStore(context.globalState);
 	sessionsView = new SessionsViewProvider(context.extensionUri, {
@@ -89,6 +109,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		newSession: () => void openNewSession(context),
 		renameSession: (key, name) => renameSession(key, name),
 		deleteSession: (key) => deleteSession(key),
+		stopSession: (key) => stopSession(key),
 	});
 
 	context.subscriptions.push(
@@ -116,7 +137,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					return {
 						cwd: session.controller.cwd,
 						tagContext: (ctx) => session.controller.tagContext(ctx),
-						reveal: () => session.panel.reveal(vscode.ViewColumn.Active),
+						reveal: () => revealSession(session),
 					};
 				},
 				onNoSelection: () => vscode.window.showInformationMessage("dreb: select some code to add to the chat."),
@@ -180,6 +201,7 @@ function toRepoRelative(cwd: string, uri: vscode.Uri): string | undefined {
 
 export async function deactivate(): Promise<void> {
 	await pool.disposeAll();
+	extensionContext = undefined;
 }
 
 /** Open (or resume) a session by pool key. Reveals a live panel, or spawns a
@@ -207,14 +229,19 @@ async function openNewSession(context: vscode.ExtensionContext): Promise<ChatSes
 async function openActiveOrNew(context: vscode.ExtensionContext): Promise<ChatSession | undefined> {
 	const active = pool.active;
 	if (active && !active.controller.isDisposed()) {
-		active.panel.reveal(vscode.ViewColumn.Active);
+		revealSession(active);
 		return active;
 	}
 	return openNewSession(context);
 }
 
-/** Build a fresh chat session: controller, webview panel, transport wiring. Only
- * invoked by the pool when a session for `key` is actually needed. */
+/** Build a fresh chat session: controller + native UIs, then attach a webview
+ * view. Only invoked by the pool when a session for `key` is actually needed.
+ *
+ * The controller and its native UIs are *session-bound* — they persist across
+ * view attach/detach so the agent keeps running when the tab is closed. Only the
+ * panel + webview bridge are *view-bound*; {@link attachView} builds them and
+ * `onDidDispose` detaches (backgrounds) them without killing the controller. */
 function createSession(context: vscode.ExtensionContext, key: string, sessionPath?: string): ChatSession {
 	const config = vscode.workspace.getConfiguration("dreb");
 	const cwd = workspaceCwd();
@@ -232,25 +259,32 @@ function createSession(context: vscode.ExtensionContext, key: string, sessionPat
 		logger: (line) => console.warn(`[dreb] ${line}`),
 	});
 
-	const panel = vscode.window.createWebviewPanel("dreb.chat", "dreb", vscode.ViewColumn.Active, {
-		enableScripts: true,
-		retainContextWhenHidden: true,
-		localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist", "webview")],
+	const session: ChatSession = {
+		key,
+		panel: undefined,
+		controller,
+		connection: undefined,
+		reviewUi,
+		// Assigned immediately below (it closes over `session`).
+		sleep: undefined as unknown as SleepController,
+		disposing: false,
+	};
+	const sleepable: SleepableSession = {
+		runState: () => controller.runState,
+		hasView: () => session.panel !== undefined,
+	};
+	session.sleep = new SleepController(sleepable, { sleep: () => void sleepSession(session) });
+
+	// Controller-lifetime listener (survives view reattach): keep the sidebar in
+	// sync (debounced so a turn doesn't scan disk per event), drive sleep-on-idle
+	// for a backgrounded session, and reflect run-state in the tab title.
+	controller.onUpdate(() => {
+		scheduleSidebarRefresh();
+		session.sleep.onUpdate();
+		updateTabTitle(session);
 	});
 
-	const connection = connectWebview(panel.webview, controller);
-	panel.webview.html = getWebviewHtml(panel.webview, context.extensionUri, makeNonce());
-
-	const session: ChatSession = { key, panel, controller, connection, reviewUi };
-	panel.onDidDispose(() => {
-		void pool.disposeSession(session).then(() => scheduleSidebarRefresh());
-	});
-	panel.onDidChangeViewState((e) => {
-		if (e.webviewPanel.active) pool.setActive(key);
-	});
-	// Live status (running / needs-input / idle) changes as the controller streams;
-	// keep the sidebar in sync (debounced so a turn doesn't scan disk per event).
-	controller.onUpdate(() => scheduleSidebarRefresh());
+	attachView(context, session);
 
 	if (!cli.ok) {
 		// Surface an actionable error into the transcript; the webview shows it
@@ -264,6 +298,105 @@ function createSession(context: vscode.ExtensionContext, key: string, sessionPat
 
 	scheduleSidebarRefresh();
 	return session;
+}
+
+/** Build and attach a fresh chat panel + webview bridge to a session's
+ * controller — on first creation and again when reopening a backgrounded session
+ * whose original panel was closed. */
+function attachView(context: vscode.ExtensionContext, session: ChatSession): void {
+	const panel = vscode.window.createWebviewPanel(
+		"dreb.chat",
+		panelTitle(session.controller.runState),
+		vscode.ViewColumn.Active,
+		{
+			enableScripts: true,
+			retainContextWhenHidden: true,
+			localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist", "webview")],
+		},
+	);
+
+	const connection = connectWebview(panel.webview, session.controller);
+	panel.webview.html = getWebviewHtml(panel.webview, context.extensionUri, makeNonce());
+	session.panel = panel;
+	session.connection = connection;
+	session.sleep.onAttach();
+
+	panel.onDidDispose(() => {
+		// An explicit teardown (stop / delete / deactivate / sleep) already owns
+		// disposal — don't re-background a session that is being torn down.
+		if (session.disposing) return;
+		// User closed the tab: detach the view but keep the controller running.
+		// It stays alive while working / awaiting input, and sleeps once idle.
+		detachView(session);
+		session.sleep.onDetach();
+		scheduleSidebarRefresh();
+	});
+	panel.onDidChangeViewState((e) => {
+		if (e.webviewPanel.active) pool.setActive(session.key);
+	});
+}
+
+/** Detach the webview view from a backgrounded session: dispose the bridge and
+ * drop the panel references, keeping the controller (and its RPC child) alive. */
+function detachView(session: ChatSession): void {
+	session.connection?.dispose();
+	session.connection = undefined;
+	session.panel = undefined;
+}
+
+/** Reveal a session's panel, rebuilding it if the session was backgrounded (its
+ * panel closed) since it was last viewed. Does nothing if the extension is
+ * shutting down (no context to rebuild into). */
+function revealSession(session: ChatSession): void {
+	const ctx = extensionContext;
+	revealOrReattach(
+		{ hasPanel: () => session.panel !== undefined, hasContext: () => ctx !== undefined },
+		{
+			reveal: () => session.panel?.reveal(vscode.ViewColumn.Active),
+			rebuild: () => {
+				if (ctx) attachView(ctx, session);
+			},
+		},
+	);
+}
+
+/** The chat tab title reflecting run-state, so a backgrounded / unfocused
+ * session's running or needs-input status is visible in the editor tab strip. */
+function panelTitle(state: SessionRunState): string {
+	switch (state) {
+		case "running":
+			return "dreb ● running";
+		case "needs-input":
+			return "dreb ⚠ needs input";
+		default:
+			return "dreb";
+	}
+}
+
+function updateTabTitle(session: ChatSession): void {
+	if (session.panel) session.panel.title = panelTitle(session.controller.runState);
+}
+
+/** Put a backgrounded, idle session to sleep: release its controller / RPC child
+ * (via the pool teardown), leaving a resumable on-disk row that reopening
+ * restores from the persisted transcript. */
+async function sleepSession(session: ChatSession): Promise<void> {
+	await pool.disposeSession(session);
+	scheduleSidebarRefresh();
+}
+
+/** Abort a session's current turn and end it — the explicit, deliberate
+ * interrupt. Closing a tab never aborts; this is the only user path that does. */
+async function stopSession(key: string): Promise<void> {
+	const session = pool.get(key);
+	if (!session) return;
+	try {
+		await session.controller.abort();
+	} catch {
+		// Abort is best-effort (e.g. no turn in flight); tear down regardless.
+	}
+	await pool.disposeKey(key);
+	scheduleSidebarRefresh();
 }
 
 /** Rename a session. A live controller renames directly; a disk-only session is

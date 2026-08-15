@@ -1247,8 +1247,7 @@ describe("SessionController session tree (Phase 6)", () => {
 		await controller.start();
 		const checkpointUpdates: Array<Array<{ responseId: number; entryId: string; canRestore: boolean }>> = [];
 		controller.onUpdate((u) => {
-			if ((u as { kind: string }).kind === "checkpoints")
-				checkpointUpdates.push((u as { checkpoints: never[] }).checkpoints);
+			if (u.kind === "checkpoints") checkpointUpdates.push(u.checkpoints);
 		});
 
 		// A live turn builds one response group (id 1) from events.
