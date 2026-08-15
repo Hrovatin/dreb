@@ -8,7 +8,7 @@
  * node-only code — the mirror of the dashboard's `src/shared/protocol.ts`.
  */
 
-import type { TranscriptState } from "./projection.js";
+import type { Checkpoint, TranscriptState } from "./projection.js";
 
 /** A slash command offered in the composer dropdown. */
 export interface SlashCommandDto {
@@ -133,6 +133,32 @@ export interface OpenSourceRef {
 	symbol?: string;
 }
 
+/** A node in the session branch tree (Phase 6), mirroring the RPC `RpcTreeNode`.
+ * Drives the branch-tree view; prefer the nested `children` over `parentId` when
+ * reconstructing hierarchy. */
+export interface SessionTreeNodeDto {
+	/** Session entry id. */
+	id: string;
+	parentId: string | null;
+	/** Session entry type (e.g. "message", "label"). */
+	type: string;
+	/** Message role when `type === "message"` (user/assistant/toolResult/…). */
+	role?: string;
+	/** Short single-line content preview (whitespace-collapsed). */
+	preview: string;
+	timestamp: string;
+	/** Resolved label, if any. */
+	label?: string;
+	/** Child nodes, oldest first. */
+	children: SessionTreeNodeDto[];
+}
+
+/** The session branch tree plus the current leaf (Phase 6). */
+export interface SessionTreeDto {
+	roots: SessionTreeNodeDto[];
+	leafId: string | null;
+}
+
 /** Messages sent from the host to the webview. */
 export type HostToWebview =
 	| { type: "snapshot"; state: TranscriptState; commands: SlashCommandDto[]; status: HostStatus }
@@ -142,7 +168,13 @@ export type HostToWebview =
 	/** Change-review set changed (per-turn detection, accept/revert). */
 	| { type: "review"; review: ReviewStateDto }
 	/** An editor selection was tagged into the chat — add it as a composer chip. */
-	| { type: "tag-context"; context: TaggedContextDto };
+	| { type: "tag-context"; context: TaggedContextDto }
+	/** Inline restore/fork controls, aligned to response groups (Phase 6). */
+	| { type: "checkpoints"; checkpoints: Checkpoint[] }
+	/** The session branch tree, in response to a `show-tree` request (Phase 6). */
+	| { type: "tree"; tree: SessionTreeDto }
+	/** Pre-fill the composer (e.g. a user-message fork's re-ask text) (Phase 6). */
+	| { type: "composer-prefill"; text: string };
 
 /** Messages sent from the webview to the host. */
 export type WebviewToHost =
@@ -161,4 +193,10 @@ export type WebviewToHost =
 	| { type: "review-open-diff"; path: string }
 	/** Open a code reference clicked in an answer (Phase 5b) — a file location
 	 * and/or a symbol to resolve to its definition. */
-	| { type: "open-source"; ref: OpenSourceRef };
+	| { type: "open-source"; ref: OpenSourceRef }
+	/** Fork a new branch from a session entry (Phase 6 inline control / tree). */
+	| { type: "fork"; entryId: string }
+	/** Restore (navigate) to a session entry — rewind or branch-jump (Phase 6). */
+	| { type: "navigate-tree"; entryId: string }
+	/** Request the session branch tree for the branch-tree view (Phase 6). */
+	| { type: "show-tree" };
