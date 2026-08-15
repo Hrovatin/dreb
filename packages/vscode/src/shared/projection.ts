@@ -70,6 +70,11 @@ export interface Checkpoint {
 	/** Whether "Restore Checkpoint" is offered — false for the latest turn,
 	 * where restoring to where you already are is a no-op. */
 	canRestore: boolean;
+	/** Whether "Fork" is offered — false for turns the backend refuses to fork
+	 * from (errored/aborted turns, and turns containing tool calls whose results
+	 * live in descendant entries a branch cannot carry). Sourced from the
+	 * `get_fork_messages` RPC so the control only appears where forking works. */
+	canFork: boolean;
 }
 
 /** One turn on a session branch, used to rebuild the transcript after a tree
@@ -451,8 +456,17 @@ export function foldBranchIntoState(state: TranscriptState, turns: BranchTurn[])
  * checkpoint onto the wrong entry id (backward alignment would pair a successful
  * group with the errored turn's id). Keeping errored groups preserves the 1:1
  * positional correspondence the {@link foldBranchIntoState} rebuild path relies on.
+ *
+ * `forkableEntryIds` is the set of entry ids the backend will actually fork from
+ * (from the `get_fork_messages` RPC); a checkpoint whose entry id is absent gets
+ * `canFork: false` so the Fork control is hidden rather than shown as a no-op
+ * that only surfaces a "Couldn't fork…" notice on click.
  */
-export function alignCheckpoints(state: TranscriptState, assistantEntryIds: string[]): Checkpoint[] {
+export function alignCheckpoints(
+	state: TranscriptState,
+	assistantEntryIds: string[],
+	forkableEntryIds: ReadonlySet<string>,
+): Checkpoint[] {
 	const groups = state.items.filter((item): item is ResponseGroup => item.kind === "response" && !item.streaming);
 	const pairs = Math.min(groups.length, assistantEntryIds.length);
 	const checkpoints: Checkpoint[] = [];
@@ -460,7 +474,7 @@ export function alignCheckpoints(state: TranscriptState, assistantEntryIds: stri
 		const group = groups[groups.length - 1 - k];
 		const entryId = assistantEntryIds[assistantEntryIds.length - 1 - k];
 		// k === 0 is the most recent turn → no restore.
-		checkpoints.push({ responseId: group.id, entryId, canRestore: k !== 0 });
+		checkpoints.push({ responseId: group.id, entryId, canRestore: k !== 0, canFork: forkableEntryIds.has(entryId) });
 	}
 	return checkpoints.reverse();
 }

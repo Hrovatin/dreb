@@ -127,6 +127,10 @@ export interface RpcClientLike {
 	/** Fork a new branch from a session entry. Returns the re-ask `text` for a
 	 * user-message fork (empty for an assistant continue-from-answer fork). */
 	fork(entryId: string): Promise<{ text: string; cancelled: boolean }>;
+	/** The session entries the backend will actually fork from (assistant turns
+	 * that are not errored/aborted and hold no unresolved tool calls, plus
+	 * non-empty user turns). Drives which inline Fork controls are shown. */
+	getForkMessages(): Promise<Array<{ entryId: string; text: string; role: "user" | "assistant" }>>;
 	/** Navigate (restore/branch-jump) the session leaf to a tree entry. */
 	navigateTree(targetId: string): Promise<{ cancelled: boolean; editorText?: string }>;
 	/** The session branch tree plus the current leaf. */
@@ -846,7 +850,7 @@ export class SessionController {
 		const tree = await this.client.getTree();
 		const branch = currentBranch(tree.roots, tree.leafId);
 		foldBranchIntoState(this.state, branch.turns);
-		this.checkpoints = alignCheckpoints(this.state, branch.assistantEntryIds);
+		this.checkpoints = alignCheckpoints(this.state, branch.assistantEntryIds, await this.forkableEntryIds());
 		await this.refreshStatus(true);
 		this.emit({ kind: "resync" });
 		this.emit({ kind: "checkpoints", checkpoints: this.checkpoints });
@@ -861,10 +865,25 @@ export class SessionController {
 		try {
 			const tree = await this.client.getTree();
 			const branch = currentBranch(tree.roots, tree.leafId);
-			this.checkpoints = alignCheckpoints(this.state, branch.assistantEntryIds);
+			this.checkpoints = alignCheckpoints(this.state, branch.assistantEntryIds, await this.forkableEntryIds());
 			this.emit({ kind: "checkpoints", checkpoints: this.checkpoints });
 		} catch (err) {
 			this.logger(`checkpoint refresh failed: ${errorText(err)}`);
+		}
+	}
+
+	/** The set of session entry ids the backend will fork from, used to gate the
+	 * inline Fork control (via {@link alignCheckpoints}). Best-effort: on failure
+	 * returns an empty set, which hides Fork rather than showing a control that
+	 * would only produce a "Couldn't fork…" notice. */
+	private async forkableEntryIds(): Promise<ReadonlySet<string>> {
+		if (!this.client) return new Set();
+		try {
+			const messages = await this.client.getForkMessages();
+			return new Set(messages.map((m) => m.entryId));
+		} catch (err) {
+			this.logger(`fork-messages fetch failed: ${errorText(err)}`);
+			return new Set();
 		}
 	}
 

@@ -47,8 +47,8 @@ function clickText(host: HTMLElement, text: string): void {
 }
 
 describe("CheckpointBar (inline restore/fork)", () => {
-	it("offers Restore + Fork on a prior turn and posts the right entry", () => {
-		const cp: Checkpoint = { responseId: 1, entryId: "a1", canRestore: true };
+	it("offers Restore + Fork on a prior forkable turn and posts the right entry", () => {
+		const cp: Checkpoint = { responseId: 1, entryId: "a1", canRestore: true, canFork: true };
 		const host = mount(() => <CheckpointBar checkpoint={cp} />);
 
 		expect(host.textContent).toContain("Restore Checkpoint");
@@ -62,12 +62,30 @@ describe("CheckpointBar (inline restore/fork)", () => {
 	});
 
 	it("hides Restore at the latest turn but still offers Fork", () => {
-		const cp: Checkpoint = { responseId: 2, entryId: "a2", canRestore: false };
+		const cp: Checkpoint = { responseId: 2, entryId: "a2", canRestore: false, canFork: true };
 		const host = mount(() => <CheckpointBar checkpoint={cp} />);
 
 		expect(host.textContent).not.toContain("Restore Checkpoint");
 		clickText(host, "Fork");
 		expect(hoisted.posted).toEqual([{ type: "fork", entryId: "a2" }]);
+	});
+
+	it("hides Fork on a non-forkable turn but still offers Restore (finding A)", () => {
+		// An errored/aborted/tool-using turn: forkable=false, so no Fork button.
+		const cp: Checkpoint = { responseId: 1, entryId: "a1", canRestore: true, canFork: false };
+		const host = mount(() => <CheckpointBar checkpoint={cp} />);
+
+		expect(host.textContent).toContain("Restore Checkpoint");
+		expect(host.textContent).not.toContain("Fork");
+		expect(host.querySelector(".dreb-checkpoint-sep")).toBeNull();
+	});
+
+	it("renders no bar at all when neither control is available (non-forkable latest turn)", () => {
+		const cp: Checkpoint = { responseId: 2, entryId: "a2", canRestore: false, canFork: false };
+		const host = mount(() => <CheckpointBar checkpoint={cp} />);
+
+		expect(host.querySelector(".dreb-checkpoint")).toBeNull();
+		expect(host.textContent).toBe("");
 	});
 });
 

@@ -293,9 +293,9 @@ describe("alignCheckpoints (Phase 6)", () => {
 
 	it("keys checkpoints by response id; latest turn has canRestore false", () => {
 		const state = withResponses(2);
-		expect(alignCheckpoints(state, ["e1", "e2"])).toEqual([
-			{ responseId: 1, entryId: "e1", canRestore: true },
-			{ responseId: 2, entryId: "e2", canRestore: false },
+		expect(alignCheckpoints(state, ["e1", "e2"], new Set(["e1", "e2"]))).toEqual([
+			{ responseId: 1, entryId: "e1", canRestore: true, canFork: true },
+			{ responseId: 2, entryId: "e2", canRestore: false, canFork: true },
 		]);
 	});
 
@@ -303,13 +303,17 @@ describe("alignCheckpoints (Phase 6)", () => {
 		const state = createTranscriptState();
 		state.items.push({ kind: "response", id: 1, activity: [], answer: "ok", streaming: false, collapsed: true });
 		state.items.push({ kind: "response", id: 2, activity: [], answer: "", streaming: true, collapsed: false });
-		expect(alignCheckpoints(state, ["e1"])).toEqual([{ responseId: 1, entryId: "e1", canRestore: false }]);
+		expect(alignCheckpoints(state, ["e1"], new Set(["e1"]))).toEqual([
+			{ responseId: 1, entryId: "e1", canRestore: false, canFork: true },
+		]);
 	});
 
 	it("KEEPS errored groups aligned to their entry — a provider-error turn is persisted (finding 1)", () => {
 		// [A ok, B error, C ok]: the errored turn B is still a persisted session
 		// entry (present in assistantEntryIds), so it must keep its slot. Dropping
 		// it would pair A with B's id (off-by-one) — the bug this guards.
+		// Fork is offered only where the backend allows it: the errored turn B is
+		// NOT in the forkable set, so its canFork is false.
 		const state = createTranscriptState();
 		state.items.push({ kind: "response", id: 1, activity: [], answer: "a", streaming: false, collapsed: true });
 		state.items.push({
@@ -322,10 +326,19 @@ describe("alignCheckpoints (Phase 6)", () => {
 			error: "rate limited",
 		});
 		state.items.push({ kind: "response", id: 3, activity: [], answer: "c", streaming: false, collapsed: true });
-		expect(alignCheckpoints(state, ["a", "b", "c"])).toEqual([
-			{ responseId: 1, entryId: "a", canRestore: true },
-			{ responseId: 2, entryId: "b", canRestore: true },
-			{ responseId: 3, entryId: "c", canRestore: false },
+		expect(alignCheckpoints(state, ["a", "b", "c"], new Set(["a", "c"]))).toEqual([
+			{ responseId: 1, entryId: "a", canRestore: true, canFork: true },
+			{ responseId: 2, entryId: "b", canRestore: true, canFork: false },
+			{ responseId: 3, entryId: "c", canRestore: false, canFork: true },
+		]);
+	});
+
+	it("gates canFork on the forkable set — non-forkable turns (errored/aborted/tool) hide Fork (finding A)", () => {
+		const state = withResponses(2);
+		// Only the first turn is forkable; the latest (e.g. a tool-using turn) is not.
+		expect(alignCheckpoints(state, ["e1", "e2"], new Set(["e1"]))).toEqual([
+			{ responseId: 1, entryId: "e1", canRestore: true, canFork: true },
+			{ responseId: 2, entryId: "e2", canRestore: false, canFork: false },
 		]);
 	});
 
@@ -333,13 +346,13 @@ describe("alignCheckpoints (Phase 6)", () => {
 		// 3 response groups but only 2 entry ids → the oldest group gets no control,
 		// and alignment anchors the newest turns.
 		const state = withResponses(3);
-		expect(alignCheckpoints(state, ["e2", "e3"])).toEqual([
-			{ responseId: 2, entryId: "e2", canRestore: true },
-			{ responseId: 3, entryId: "e3", canRestore: false },
+		expect(alignCheckpoints(state, ["e2", "e3"], new Set(["e2", "e3"]))).toEqual([
+			{ responseId: 2, entryId: "e2", canRestore: true, canFork: true },
+			{ responseId: 3, entryId: "e3", canRestore: false, canFork: true },
 		]);
 	});
 
 	it("returns nothing when there are no entries", () => {
-		expect(alignCheckpoints(withResponses(2), [])).toEqual([]);
+		expect(alignCheckpoints(withResponses(2), [], new Set())).toEqual([]);
 	});
 });

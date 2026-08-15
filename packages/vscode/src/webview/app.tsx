@@ -272,27 +272,33 @@ export function ResponseView(props: { group: ResponseGroup }) {
  * drives the RPC and rebuilds the transcript. */
 export function CheckpointBar(props: { checkpoint: Checkpoint }) {
 	return (
-		<div class="dreb-checkpoint">
-			<Show when={props.checkpoint.canRestore}>
-				<button
-					type="button"
-					class="dreb-checkpoint-btn"
-					title="Restore the conversation to this point"
-					onClick={() => postToHost({ type: "navigate-tree", entryId: props.checkpoint.entryId })}
-				>
-					Restore Checkpoint
-				</button>
-				<span class="dreb-checkpoint-sep">·</span>
-			</Show>
-			<button
-				type="button"
-				class="dreb-checkpoint-btn dreb-checkpoint-fork"
-				title="Fork a new branch from here"
-				onClick={() => postToHost({ type: "fork", entryId: props.checkpoint.entryId })}
-			>
-				⑃ Fork
-			</button>
-		</div>
+		<Show when={props.checkpoint.canRestore || props.checkpoint.canFork}>
+			<div class="dreb-checkpoint">
+				<Show when={props.checkpoint.canRestore}>
+					<button
+						type="button"
+						class="dreb-checkpoint-btn"
+						title="Restore the conversation to this point"
+						onClick={() => postToHost({ type: "navigate-tree", entryId: props.checkpoint.entryId })}
+					>
+						Restore Checkpoint
+					</button>
+				</Show>
+				<Show when={props.checkpoint.canRestore && props.checkpoint.canFork}>
+					<span class="dreb-checkpoint-sep">·</span>
+				</Show>
+				<Show when={props.checkpoint.canFork}>
+					<button
+						type="button"
+						class="dreb-checkpoint-btn dreb-checkpoint-fork"
+						title="Fork a new branch from here"
+						onClick={() => postToHost({ type: "fork", entryId: props.checkpoint.entryId })}
+					>
+						⑃ Fork
+					</button>
+				</Show>
+			</div>
+		</Show>
 	);
 }
 

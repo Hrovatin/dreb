@@ -78,6 +78,10 @@ class FakeClient implements RpcClientLike {
 	navigateResult: { cancelled: boolean; editorText?: string } = { cancelled: false };
 	treeCalls = 0;
 	treeResult: { roots: SessionTreeNodeDto[]; leafId: string | null } = { roots: [], leafId: null };
+	forkMessagesCalls = 0;
+	/** When set, `getForkMessages` returns this verbatim; otherwise it derives
+	 * "every assistant entry in the tree is forkable" from `treeResult`. */
+	forkMessagesOverride: Array<{ entryId: string; text: string; role: "user" | "assistant" }> | undefined;
 
 	private eventListener: ((event: any) => void) | undefined;
 	private exitListener: ((info: any) => void) | undefined;
@@ -186,6 +190,21 @@ class FakeClient implements RpcClientLike {
 		if (this.callError) throw this.callError;
 		this.treeCalls += 1;
 		return this.treeResult;
+	}
+	async getForkMessages(): Promise<Array<{ entryId: string; text: string; role: "user" | "assistant" }>> {
+		if (this.callError) throw this.callError;
+		this.forkMessagesCalls += 1;
+		if (this.forkMessagesOverride) return this.forkMessagesOverride;
+		// Default: every assistant entry in the current tree is forkable.
+		const out: Array<{ entryId: string; text: string; role: "user" | "assistant" }> = [];
+		const walk = (nodes: SessionTreeNodeDto[]): void => {
+			for (const n of nodes) {
+				if (n.role === "assistant") out.push({ entryId: n.id, text: n.preview, role: "assistant" });
+				walk(n.children);
+			}
+		};
+		walk(this.treeResult.roots);
+		return out;
 	}
 	emit(event: unknown): void {
 		this.eventListener?.(event);
@@ -1195,8 +1214,28 @@ describe("SessionController session tree (Phase 6)", () => {
 		await flush();
 
 		const latest = checkpointUpdates.at(-1);
-		expect(latest).toEqual([{ responseId: 1, entryId: "a1", canRestore: false }]);
-		expect(controller.getCheckpoints()).toEqual([{ responseId: 1, entryId: "a1", canRestore: false }]);
+		expect(latest).toEqual([{ responseId: 1, entryId: "a1", canRestore: false, canFork: true }]);
+		expect(controller.getCheckpoints()).toEqual([{ responseId: 1, entryId: "a1", canRestore: false, canFork: true }]);
+	});
+
+	it("gates canFork from get_fork_messages — a non-forkable turn omits its entry (finding A)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = { roots: [node("u1", "user", "hi", [node("a1", "assistant", "hello")])], leafId: "a1" };
+		// The backend reports a1 as NOT forkable (e.g. it used a tool / errored).
+		fake.forkMessagesOverride = [];
+		const controller = makeController(fake);
+		await controller.start();
+
+		fake.emit({ type: "agent_start" });
+		fake.emit({ type: "message_start", message: { role: "assistant" } });
+		fake.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hello" } });
+		fake.emit({ type: "agent_end" });
+		await flush();
+
+		expect(controller.getCheckpoints()).toEqual([
+			{ responseId: 1, entryId: "a1", canRestore: false, canFork: false },
+		]);
+		expect(fake.forkMessagesCalls).toBeGreaterThan(0);
 	});
 
 	it("surfaces a notice when a fork throws (fire-and-forget from the bridge)", async () => {

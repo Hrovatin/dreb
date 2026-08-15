@@ -83,6 +83,9 @@ class BridgeFakeClient implements RpcClientLike {
 	async getTree(): Promise<{ roots: any[]; leafId: string | null }> {
 		return { roots: [], leafId: null };
 	}
+	async getForkMessages(): Promise<Array<{ entryId: string; text: string; role: "user" | "assistant" }>> {
+		return [];
+	}
 	emit(event: unknown): void {
 		this.ev?.(event);
 	}
@@ -400,7 +403,9 @@ describe("connectWebview", () => {
 	it("posts current checkpoints on ready (so inline controls survive reload)", async () => {
 		const fake = new BridgeFakeClient();
 		const controller = await makeController(fake);
-		vi.spyOn(controller, "getCheckpoints").mockReturnValue([{ responseId: 1, entryId: "a1", canRestore: false }]);
+		vi.spyOn(controller, "getCheckpoints").mockReturnValue([
+			{ responseId: 1, entryId: "a1", canRestore: false, canFork: true },
+		]);
 		const { webview, posted, send } = makeWebview();
 		connectWebview(webview as any, controller);
 		send({ type: "ready" });
@@ -408,7 +413,7 @@ describe("connectWebview", () => {
 		const cp = posted.find((m) => m.type === "checkpoints") as
 			| Extract<HostToWebview, { type: "checkpoints" }>
 			| undefined;
-		expect(cp?.checkpoints).toEqual([{ responseId: 1, entryId: "a1", canRestore: false }]);
+		expect(cp?.checkpoints).toEqual([{ responseId: 1, entryId: "a1", canRestore: false, canFork: true }]);
 	});
 
 	it("forwards checkpoints / tree / composer-prefill updates as messages when live", async () => {
@@ -420,13 +425,13 @@ describe("connectWebview", () => {
 
 		(controller as any).emit({
 			kind: "checkpoints",
-			checkpoints: [{ responseId: 2, entryId: "a2", canRestore: true }],
+			checkpoints: [{ responseId: 2, entryId: "a2", canRestore: true, canFork: true }],
 		});
 		(controller as any).emit({ kind: "tree", tree: { roots: [], leafId: "a2" } });
 		(controller as any).emit({ kind: "composer-prefill", text: "re-ask" });
 
 		expect((posted.filter((m) => m.type === "checkpoints").at(-1) as any)?.checkpoints).toEqual([
-			{ responseId: 2, entryId: "a2", canRestore: true },
+			{ responseId: 2, entryId: "a2", canRestore: true, canFork: true },
 		]);
 		expect((posted.find((m) => m.type === "tree") as any)?.tree.leafId).toBe("a2");
 		expect((posted.find((m) => m.type === "composer-prefill") as any)?.text).toBe("re-ask");
