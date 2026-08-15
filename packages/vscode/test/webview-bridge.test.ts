@@ -336,6 +336,34 @@ describe("connectWebview", () => {
 		expect(posted.length).toBe(afterReady); // nothing new posted post-dispose
 	});
 
+	it("reattaches after detach: a fresh bridge re-snapshots the still-live controller (Phase 7)", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+
+		// First view: stream a turn, then detach (dispose only the bridge).
+		const first = makeWebview();
+		const firstBridge = connectWebview(first.webview as any, controller);
+		first.send({ type: "ready" });
+		fake.emit({ type: "agent_start" });
+		fake.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "background work" } });
+		firstBridge.dispose(); // tab closed → view detached; controller keeps running
+
+		// The controller is untouched by detach — it can still receive events.
+		fake.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: " continued" } });
+
+		// Reopen: a brand-new webview + bridge over the SAME controller re-snapshots
+		// the current transcript (full history restored, no re-stream duplication).
+		const second = makeWebview();
+		connectWebview(second.webview as any, controller);
+		second.send({ type: "ready" });
+
+		const snapshots = second.posted.filter((m) => m.type === "snapshot");
+		expect(snapshots).toHaveLength(1);
+		const snap = snapshots[0] as Extract<HostToWebview, { type: "snapshot" }>;
+		const group = snap.state.items.find((i) => i.kind === "response");
+		expect(group && group.kind === "response" && group.answer).toBe("background work continued");
+	});
+
 	it("posts the current review state on ready (so review survives reload)", async () => {
 		const fake = new BridgeFakeClient();
 		const controller = await makeController(fake);

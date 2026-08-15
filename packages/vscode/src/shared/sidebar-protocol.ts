@@ -2,7 +2,7 @@
  * Message protocol for the sessions sidebar webview.
  *
  * The host pushes the reconciled {@link SessionListDto} down; the webview sends
- * user intents (open/new/rename/pin/archive/delete) and lifecycle signals
+ * user intents (open/new/rename/pin/archive/delete/stop) and lifecycle signals
  * (`ready`/`refresh`) back up. Like the rest of `shared/`, this module carries
  * only plain data types and is free of `vscode` and `node:` imports.
  */
@@ -21,4 +21,8 @@ export type SidebarToHost =
 	| { type: "rename"; key: string; name: string }
 	| { type: "pin"; key: string; pinned: boolean }
 	| { type: "archive"; key: string; archived: boolean }
-	| { type: "delete"; key: string };
+	| { type: "delete"; key: string }
+	/** Abort the session's current turn and end it (release its RPC child). The
+	 * only way to deliberately interrupt a working agent — closing a tab never
+	 * does. */
+	| { type: "stop"; key: string };
