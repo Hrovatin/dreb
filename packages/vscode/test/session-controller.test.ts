@@ -82,6 +82,10 @@ class FakeClient implements RpcClientLike {
 	/** When set, `getForkMessages` returns this verbatim; otherwise it derives
 	 * "every assistant entry in the tree is forkable" from `treeResult`. */
 	forkMessagesOverride: Array<{ entryId: string; text: string; role: "user" | "assistant" }> | undefined;
+	/** When set, `getForkMessages` throws this — independent of the blanket
+	 * `callError` — so a get_fork_messages-only failure (e.g. an older/partial
+	 * backend) can be exercised while `getTree`/`fork`/`navigateTree` still succeed. */
+	forkMessagesError: Error | undefined;
 
 	private eventListener: ((event: any) => void) | undefined;
 	private exitListener: ((info: any) => void) | undefined;
@@ -192,6 +196,7 @@ class FakeClient implements RpcClientLike {
 		return this.treeResult;
 	}
 	async getForkMessages(): Promise<Array<{ entryId: string; text: string; role: "user" | "assistant" }>> {
+		if (this.forkMessagesError) throw this.forkMessagesError;
 		if (this.callError) throw this.callError;
 		this.forkMessagesCalls += 1;
 		if (this.forkMessagesOverride) return this.forkMessagesOverride;
@@ -1119,6 +1124,46 @@ describe("SessionController session tree (Phase 6)", () => {
 			| { checkpoints: Array<{ entryId: string; canRestore: boolean }> }
 			| undefined;
 		expect(cp?.checkpoints.map((c) => `${c.entryId}:${c.canRestore}`)).toEqual(["a1:true", "a2:false"]);
+	});
+
+	it("gates canFork on the rebuild path too, not just the live path (finding 1)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		// Only the first assistant turn is forkable (e.g. a2 errored / used a tool).
+		fake.forkMessagesOverride = [{ entryId: "a1", text: "hello", role: "assistant" }];
+		const controller = makeController(fake);
+		await controller.start();
+
+		// fork() → rebuildTranscript() must thread the forkable set through
+		// alignCheckpoints exactly like the live refreshCheckpoints path does.
+		await controller.fork("a1");
+
+		expect(fake.forkMessagesCalls).toBeGreaterThan(0);
+		expect(controller.getCheckpoints().map((c) => `${c.entryId}:${c.canRestore}:${c.canFork}`)).toEqual([
+			"a1:true:true",
+			"a2:false:false",
+		]);
+	});
+
+	it("hides Fork (canFork false) without a spurious notice when get_fork_messages fails on rebuild (finding 2)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		// Only get_fork_messages fails (older/partial backend); getTree + fork work.
+		fake.forkMessagesError = new Error("get_fork_messages unsupported");
+		const controller = makeController(fake);
+		await controller.start();
+		const updates: Array<{ kind: string }> = [];
+		controller.onUpdate((u) => updates.push(u as never));
+
+		await controller.fork("a1");
+
+		// The fork itself succeeded and the transcript rebuilt: forkableEntryIds()
+		// swallows the RPC failure and returns an empty set, so Fork is hidden
+		// (canFork false) rather than the outer fork() catch firing a bogus
+		// "Couldn't fork" notice for a fork that actually worked.
+		expect(updates.some((u) => u.kind === "resync")).toBe(true);
+		expect(controller.getCheckpoints().map((c) => `${c.entryId}:${c.canFork}`)).toEqual(["a1:false", "a2:false"]);
+		expect(controller.getTranscript().statusText ?? "").not.toMatch(/Couldn't fork/);
 	});
 
 	it("pre-fills the composer on a user-message fork (re-ask text), not an assistant fork", async () => {
