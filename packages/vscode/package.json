@@ -52,12 +52,6 @@
 				"icon": "$(refresh)"
 			},
 			{
-				"command": "dreb.sessions.stopSession",
-				"title": "Stop Session",
-				"category": "dreb",
-				"icon": "$(debug-stop)"
-			},
-			{
 				"command": "dreb.tagSelectionToChat",
 				"title": "Add Selection to Chat",
 				"category": "dreb"

@@ -117,15 +117,6 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand("dreb.openChat", () => void openActiveOrNew(context)),
 		vscode.commands.registerCommand("dreb.sessions.newSession", () => void openNewSession(context)),
 		vscode.commands.registerCommand("dreb.sessions.refresh", () => sessionsView?.refresh()),
-		vscode.commands.registerCommand("dreb.sessions.stopSession", () => {
-			// Palette / keybinding entry point for Stop. The sidebar has a per-row
-			// button; from the command palette there is no row context, so this stops
-			// the active session — but only when it has a turn to interrupt, matching
-			// the sidebar button that is hidden on idle rows (idle sessions are ended
-			// via /quit or delete, not Stop).
-			const active = pool.active;
-			if (active && active.controller.runState !== "idle") void stopSession(active.key);
-		}),
 		vscode.commands.registerCommand("dreb.tagSelectionToChat", () =>
 			tagSelectionToChat({
 				captureSelection: () => {
