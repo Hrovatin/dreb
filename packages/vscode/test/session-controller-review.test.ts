@@ -323,6 +323,25 @@ describe("SessionController change review", () => {
 		expect(hostNotices(updates).some((m) => /could not revert/i.test(m))).toBe(true);
 	});
 
+	it("reports a notice instead of leaking an unhandled rejection when reviewOpenDiff fails", async () => {
+		// A ReviewUi whose openDiff always rejects (e.g. vscode.diff cancelled or
+		// the file is gone). The bridge dispatches reviewOpenDiff fire-and-forget
+		// (`void`), so the controller must swallow the rejection into a notice.
+		class FailingOpenReviewUi extends RecordingReviewUi {
+			override async openDiff(path: string): Promise<void> {
+				throw new Error(`diff boom for ${path}`);
+			}
+		}
+		const review = new FailingOpenReviewUi();
+		const { controller, updates } = await startController(repo, review);
+
+		// Must resolve, never reject — otherwise the bridge's `void` dispatch would
+		// produce an unhandled promise rejection.
+		await expect(controller.reviewOpenDiff("file.txt")).resolves.toBeUndefined();
+
+		expect(hostNotices(updates).some((m) => /couldn't open the diff/i.test(m))).toBe(true);
+	});
+
 	it("reverts what it can, keeps failures pending, and notices them on a partial reviewRevertAll", async () => {
 		writeFileSync(join(repo, "file2.txt"), body());
 		git(["add", "file2.txt"], repo);

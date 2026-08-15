@@ -426,6 +426,34 @@ describe("connectWebview", () => {
 		expect(openDiff).toHaveBeenCalledWith("src/a.ts");
 	});
 
+	it("routes a review-accept-all message to the controller's reviewAcceptAll", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const acceptAll = vi.spyOn(controller, "reviewAcceptAll").mockResolvedValue();
+		const openDiff = vi.spyOn(controller, "reviewOpenDiff").mockResolvedValue();
+		const { webview, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+
+		send({ type: "review-accept-all" });
+		expect(acceptAll).toHaveBeenCalledTimes(1);
+		// The accept-all dispatch must not touch the per-file open-diff path.
+		expect(openDiff).not.toHaveBeenCalled();
+	});
+
+	it("does not call reviewAcceptAll for unrelated webview messages", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const acceptAll = vi.spyOn(controller, "reviewAcceptAll").mockResolvedValue();
+		vi.spyOn(controller, "reviewOpenDiff").mockResolvedValue();
+		const { webview, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+
+		send({ type: "review-open-diff", path: "src/a.ts" });
+		expect(acceptAll).not.toHaveBeenCalled();
+	});
+
 	// ── Session tree: fork + restore (Phase 6) ─────────────────────────────
 
 	it("posts current checkpoints on ready (so inline controls survive reload)", async () => {

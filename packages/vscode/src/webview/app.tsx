@@ -170,6 +170,14 @@ export function App() {
 						<span class="dreb-review-title">
 							{review().files.length} change{review().files.length === 1 ? "" : "s"} pending review
 						</span>
+						<button
+							type="button"
+							class="dreb-review-accept-all"
+							title="Accept all pending edits — clears them from change review (no commit)"
+							onClick={() => postToHost({ type: "review-accept-all" })}
+						>
+							Accept all
+						</button>
 						<For each={review().files}>
 							{(file) => (
 								<button
