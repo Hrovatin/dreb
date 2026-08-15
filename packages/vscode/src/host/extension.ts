@@ -23,7 +23,12 @@ import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
 import { createSessionInventory, deletePersistedSession, type SessionInventory } from "./session-inventory.js";
 import { SessionPool } from "./session-registry.js";
-import { revealOrReattach, type SleepableSession, SleepController } from "./session-view-lifecycle.js";
+import {
+	readSleepSetting,
+	revealOrReattach,
+	type SleepableSession,
+	SleepController,
+} from "./session-view-lifecycle.js";
 import { SessionsViewProvider } from "./sessions-view.js";
 import { tagSelectionToChat } from "./tag-selection.js";
 import { createVscodeHostUi } from "./vscode-host-ui.js";
@@ -56,12 +61,16 @@ interface ChatSession {
  *
  * `isDisposed` reflects the *controller*, not the view: a backgrounded session
  * (panel closed, controller still alive) is NOT disposed, so `reveal` reattaches
- * a fresh panel to the surviving controller instead of rebuilding it. */
+ * a fresh panel to the surviving controller instead of rebuilding it. A *failed*
+ * controller (child exited / start failed) is treated as not-reusable so
+ * reopening rebuilds a fresh child resuming from the persisted transcript
+ * instead of revealing a dead panel (Phase 9, Item 1). */
 const pool = new SessionPool<ChatSession>({
-	isDisposed: (s) => s.controller.isDisposed(),
+	isDisposed: (s) => s.controller.isDisposed() || s.controller.hasFailed(),
 	reveal: (s) => revealSession(s),
 	teardown: async (s) => {
 		s.disposing = true;
+		s.sleep.dispose(); // cancel the idle / inactivity-cap timers so they don't retain the session graph
 		s.connection?.dispose();
 		await s.controller.dispose();
 		s.reviewUi.dispose();
@@ -208,8 +217,19 @@ export async function deactivate(): Promise<void> {
  * controller resuming that session's `.jsonl` (disk-only rows key by path). */
 async function openSession(context: vscode.ExtensionContext, key: string): Promise<ChatSession | undefined> {
 	try {
-		const sessionPath = key.startsWith("new:") ? undefined : key;
-		const session = await pool.open(key, () => createSession(context, key, sessionPath));
+		const keyPath = key.startsWith("new:") ? undefined : key;
+		// A crashed session (child gone, controller not disposed) is treated as
+		// not-reusable by the pool predicate, so `pool.open` tears it down and
+		// rebuilds. Resume that rebuild from the crashed controller's actual
+		// persisted transcript — which may be a real `.jsonl` even under a `new:`
+		// key once the child wrote its first entry — so the restart is lossless.
+		const existing = pool.get(key);
+		const crashedPath =
+			existing?.controller.hasFailed() && !existing.controller.isDisposed()
+				? existing.controller.sessionPath
+				: undefined;
+		const resumePath = keyPath ?? crashedPath;
+		const session = await pool.open(key, () => createSession(context, key, resumePath));
 		pool.setActive(key);
 		scheduleSidebarRefresh();
 		return session;
@@ -228,7 +248,7 @@ async function openNewSession(context: vscode.ExtensionContext): Promise<ChatSes
  * the "Add Selection to Chat" flow (which need *some* live target). */
 async function openActiveOrNew(context: vscode.ExtensionContext): Promise<ChatSession | undefined> {
 	const active = pool.active;
-	if (active && !active.controller.isDisposed()) {
+	if (active && !active.controller.isDisposed() && !active.controller.hasFailed()) {
 		revealSession(active);
 		return active;
 	}
@@ -273,9 +293,23 @@ function createSession(context: vscode.ExtensionContext, key: string, sessionPat
 		runState: () => controller.runState,
 		hasView: () => session.panel !== undefined,
 	};
-	session.sleep = new SleepController(sleepable, { sleep: () => void sleepSession(session) });
+	// Two configurable inactivity timers (Phase 9): an idle-deactivation period
+	// for detached + idle sessions, and a longer no-user-input cap that sleeps
+	// any session regardless of state. `0` disables a timer; any invalid entry
+	// (non-number / NaN / Infinity / negative, past VS Code's schema warning)
+	// falls back to the default rather than the previous silent 0-ms self-sleep.
+	const idleMinutes = readSleepSetting(config.get<unknown>("session.idleSleepMinutes"), 60);
+	const inactivityHours = readSleepSetting(config.get<unknown>("session.inactivitySleepHours"), 4);
+	session.sleep = new SleepController(
+		sleepable,
+		{ sleep: () => void sleepSession(session) },
+		{
+			idleMs: idleMinutes * 60_000,
+			capMs: inactivityHours * 60 * 60_000,
+		},
+	);
 
-	// Controller-lifetime listener (survives view reattach): keep the sidebar in
+	// Controller-lifetime listeners (survive view reattach): keep the sidebar in
 	// sync (debounced so a turn doesn't scan disk per event), drive sleep-on-idle
 	// for a backgrounded session, and reflect run-state in the tab title.
 	controller.onUpdate(() => {
@@ -283,6 +317,8 @@ function createSession(context: vscode.ExtensionContext, key: string, sessionPat
 		session.sleep.onUpdate();
 		updateTabTitle(session);
 	});
+	// Reset the inactivity cap whenever the user drives the session.
+	controller.onUserInput(() => session.sleep.onUserInput());
 
 	attachView(context, session);
 
@@ -377,9 +413,10 @@ function updateTabTitle(session: ChatSession): void {
 	if (session.panel) session.panel.title = panelTitle(session.controller.runState);
 }
 
-/** Put a backgrounded, idle session to sleep: release its controller / RPC child
- * (via the pool teardown), leaving a resumable on-disk row that reopening
- * restores from the persisted transcript. */
+/** Put a session to sleep: release its controller / RPC child (via the pool
+ * teardown), leaving a resumable on-disk row that reopening restores from the
+ * persisted transcript. Driven by the idle timer (detached + idle) or the
+ * no-user-input cap (any session, regardless of attach state / run-state). */
 async function sleepSession(session: ChatSession): Promise<void> {
 	await pool.disposeSession(session);
 	scheduleSidebarRefresh();
