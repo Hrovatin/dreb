@@ -162,6 +162,20 @@ function SessionRow(props: { session: SessionSummaryDto; groupKind: SessionGroup
 			</Show>
 
 			<div class="dreb-side-actions">
+				<Show when={session().live && session().state !== "idle"}>
+					<button
+						type="button"
+						class="dreb-side-action dreb-side-action-stop"
+						title="Stop (abort current turn)"
+						aria-label="Stop session"
+						onClick={(e) => {
+							stop(e);
+							postToHost({ type: "stop", key: session().key });
+						}}
+					>
+						⏹
+					</button>
+				</Show>
 				<button
 					type="button"
 					class="dreb-side-action"
