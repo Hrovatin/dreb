@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { HostUi, HostUiPickItem } from "../src/host/host-ui.js";
 import { type RpcClientLike, SessionController } from "../src/host/session-controller.js";
 import type { SourceLinkUi } from "../src/host/source-link-ui.js";
-import type { OpenSourceRef } from "../src/shared/protocol.js";
+import type { OpenSourceRef, SessionTreeNodeDto } from "../src/shared/protocol.js";
 
 /** Fake RpcClient that captures calls and lets a test drive events/exit. */
 class FakeClient implements RpcClientLike {
@@ -71,6 +71,21 @@ class FakeClient implements RpcClientLike {
 	exports: Array<string | undefined> = [];
 	imports: string[] = [];
 	importResult: { cancelled: boolean } = { cancelled: false };
+	// Session tree / fork (Phase 6).
+	forkCalls: string[] = [];
+	forkResult: { text: string; cancelled: boolean } = { text: "", cancelled: false };
+	navigateCalls: string[] = [];
+	navigateResult: { cancelled: boolean; editorText?: string } = { cancelled: false };
+	treeCalls = 0;
+	treeResult: { roots: SessionTreeNodeDto[]; leafId: string | null } = { roots: [], leafId: null };
+	forkMessagesCalls = 0;
+	/** When set, `getForkMessages` returns this verbatim; otherwise it derives
+	 * "every assistant entry in the tree is forkable" from `treeResult`. */
+	forkMessagesOverride: Array<{ entryId: string; text: string; role: "user" | "assistant" }> | undefined;
+	/** When set, `getForkMessages` throws this — independent of the blanket
+	 * `callError` — so a get_fork_messages-only failure (e.g. an older/partial
+	 * backend) can be exercised while `getTree`/`fork`/`navigateTree` still succeed. */
+	forkMessagesError: Error | undefined;
 
 	private eventListener: ((event: any) => void) | undefined;
 	private exitListener: ((info: any) => void) | undefined;
@@ -164,6 +179,37 @@ class FakeClient implements RpcClientLike {
 		if (this.callError) throw this.callError;
 		this.imports.push(inputPath);
 		return this.importResult;
+	}
+	async fork(entryId: string): Promise<{ text: string; cancelled: boolean }> {
+		if (this.callError) throw this.callError;
+		this.forkCalls.push(entryId);
+		return this.forkResult;
+	}
+	async navigateTree(targetId: string): Promise<{ cancelled: boolean; editorText?: string }> {
+		if (this.callError) throw this.callError;
+		this.navigateCalls.push(targetId);
+		return this.navigateResult;
+	}
+	async getTree(): Promise<{ roots: SessionTreeNodeDto[]; leafId: string | null }> {
+		if (this.callError) throw this.callError;
+		this.treeCalls += 1;
+		return this.treeResult;
+	}
+	async getForkMessages(): Promise<Array<{ entryId: string; text: string; role: "user" | "assistant" }>> {
+		if (this.forkMessagesError) throw this.forkMessagesError;
+		if (this.callError) throw this.callError;
+		this.forkMessagesCalls += 1;
+		if (this.forkMessagesOverride) return this.forkMessagesOverride;
+		// Default: every assistant entry in the current tree is forkable.
+		const out: Array<{ entryId: string; text: string; role: "user" | "assistant" }> = [];
+		const walk = (nodes: SessionTreeNodeDto[]): void => {
+			for (const n of nodes) {
+				if (n.role === "assistant") out.push({ entryId: n.id, text: n.preview, role: "assistant" });
+				walk(n.children);
+			}
+		};
+		walk(this.treeResult.roots);
+		return out;
 	}
 	emit(event: unknown): void {
 		this.eventListener?.(event);
@@ -1026,5 +1072,284 @@ describe("SessionController.openSource", () => {
 		});
 		// Must not reject — an unhandled rejection is exactly what we're guarding.
 		await expect(controller.openSource({ symbol: "Widget" })).resolves.toBeUndefined();
+	});
+});
+
+/** Build a session-tree node (Phase 6). */
+function node(
+	id: string,
+	role: "user" | "assistant",
+	preview: string,
+	children: SessionTreeNodeDto[] = [],
+): SessionTreeNodeDto {
+	return { id, parentId: null, type: "message", role, preview, timestamp: "2026-01-01T00:00:00.000Z", children };
+}
+
+/** A three-turn branch: user → assistant(a1) → user → assistant(a2). */
+function twoResponseTree(): { roots: SessionTreeNodeDto[]; leafId: string } {
+	return {
+		roots: [
+			node("u1", "user", "hi", [
+				node("a1", "assistant", "hello", [node("u2", "user", "again", [node("a2", "assistant", "world")])]),
+			]),
+		],
+		leafId: "a2",
+	};
+}
+
+const flush = async () => {
+	for (let i = 0; i < 10; i++) await Promise.resolve();
+};
+
+describe("SessionController session tree (Phase 6)", () => {
+	it("forks from an entry, rebuilds the transcript from the branch, and resyncs", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const controller = makeController(fake);
+		await controller.start();
+		const updates: Array<{ kind: string; [k: string]: unknown }> = [];
+		controller.onUpdate((u) => updates.push(u as never));
+
+		await controller.fork("a1");
+
+		expect(fake.forkCalls).toEqual(["a1"]);
+		expect(fake.treeCalls).toBeGreaterThan(0); // rebuild fetched the tree
+		// Transcript rebuilt from tree previews: user/assistant turns in order.
+		const items = controller.getTranscript().items;
+		expect(
+			items.map((i) => (i.kind === "user" ? `u:${i.text}` : i.kind === "response" ? `a:${i.answer}` : i.text)),
+		).toEqual(["u:hi", "a:hello", "u:again", "a:world"]);
+		expect(updates.some((u) => u.kind === "resync")).toBe(true);
+		const cp = updates.find((u) => u.kind === "checkpoints") as
+			| { checkpoints: Array<{ entryId: string; canRestore: boolean }> }
+			| undefined;
+		expect(cp?.checkpoints.map((c) => `${c.entryId}:${c.canRestore}`)).toEqual(["a1:true", "a2:false"]);
+	});
+
+	it("gates canFork on the rebuild path too, not just the live path (finding 1)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		// Only the first assistant turn is forkable (e.g. a2 errored / used a tool).
+		fake.forkMessagesOverride = [{ entryId: "a1", text: "hello", role: "assistant" }];
+		const controller = makeController(fake);
+		await controller.start();
+
+		// fork() → rebuildTranscript() must thread the forkable set through
+		// alignCheckpoints exactly like the live refreshCheckpoints path does.
+		await controller.fork("a1");
+
+		expect(fake.forkMessagesCalls).toBeGreaterThan(0);
+		expect(controller.getCheckpoints().map((c) => `${c.entryId}:${c.canRestore}:${c.canFork}`)).toEqual([
+			"a1:true:true",
+			"a2:false:false",
+		]);
+	});
+
+	it("hides Fork (canFork false) without a spurious notice when get_fork_messages fails on rebuild (finding 2)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		// Only get_fork_messages fails (older/partial backend); getTree + fork work.
+		fake.forkMessagesError = new Error("get_fork_messages unsupported");
+		const controller = makeController(fake);
+		await controller.start();
+		const updates: Array<{ kind: string }> = [];
+		controller.onUpdate((u) => updates.push(u as never));
+
+		await controller.fork("a1");
+
+		// The fork itself succeeded and the transcript rebuilt: forkableEntryIds()
+		// swallows the RPC failure and returns an empty set, so Fork is hidden
+		// (canFork false) rather than the outer fork() catch firing a bogus
+		// "Couldn't fork" notice for a fork that actually worked.
+		expect(updates.some((u) => u.kind === "resync")).toBe(true);
+		expect(controller.getCheckpoints().map((c) => `${c.entryId}:${c.canFork}`)).toEqual(["a1:false", "a2:false"]);
+		expect(controller.getTranscript().statusText ?? "").not.toMatch(/Couldn't fork/);
+	});
+
+	it("pre-fills the composer on a user-message fork (re-ask text), not an assistant fork", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		fake.forkResult = { text: "re-ask this", cancelled: false };
+		const controller = makeController(fake);
+		await controller.start();
+		const prefills: string[] = [];
+		controller.onUpdate((u) => {
+			if ((u as { kind: string }).kind === "composer-prefill") prefills.push((u as { text: string }).text);
+		});
+
+		await controller.fork("u2");
+		expect(prefills).toEqual(["re-ask this"]);
+
+		// Assistant fork returns "" → no composer clobber.
+		fake.forkResult = { text: "", cancelled: false };
+		await controller.fork("a1");
+		expect(prefills).toEqual(["re-ask this"]);
+	});
+
+	it("surfaces a notice and does not rebuild when a fork is cancelled", async () => {
+		const fake = new FakeClient();
+		fake.forkResult = { text: "", cancelled: true };
+		const controller = makeController(fake);
+		await controller.start();
+		const treeCallsBefore = fake.treeCalls;
+
+		await controller.fork("a1");
+
+		expect(controller.getTranscript().statusText).toMatch(/Fork cancelled/);
+		expect(fake.treeCalls).toBe(treeCallsBefore); // no rebuild
+	});
+
+	it("restores (navigates) to an entry and rebuilds the transcript", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const controller = makeController(fake);
+		await controller.start();
+		const updates: Array<{ kind: string }> = [];
+		controller.onUpdate((u) => updates.push(u as never));
+
+		await controller.navigateTree("a1");
+
+		expect(fake.navigateCalls).toEqual(["a1"]);
+		expect(updates.some((u) => u.kind === "resync")).toBe(true);
+		expect(updates.some((u) => u.kind === "checkpoints")).toBe(true);
+	});
+
+	it("surfaces a notice when a restore is cancelled", async () => {
+		const fake = new FakeClient();
+		fake.navigateResult = { cancelled: true };
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.navigateTree("a1");
+		expect(controller.getTranscript().statusText).toMatch(/Restore cancelled/);
+	});
+
+	it("emits the session tree on request", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const controller = makeController(fake);
+		await controller.start();
+		let tree: { roots: unknown[]; leafId: string | null } | undefined;
+		controller.onUpdate((u) => {
+			if ((u as { kind: string }).kind === "tree")
+				tree = (u as { tree: { roots: unknown[]; leafId: string | null } }).tree;
+		});
+
+		await controller.requestTree();
+		expect(tree?.leafId).toBe("a2");
+		expect(tree?.roots.length).toBe(1);
+	});
+
+	it("recomputes checkpoints after each completed turn, keyed to response groups", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = { roots: [node("u1", "user", "hi", [node("a1", "assistant", "hello")])], leafId: "a1" };
+		const controller = makeController(fake);
+		await controller.start();
+		const checkpointUpdates: Array<Array<{ responseId: number; entryId: string; canRestore: boolean }>> = [];
+		controller.onUpdate((u) => {
+			if ((u as { kind: string }).kind === "checkpoints")
+				checkpointUpdates.push((u as { checkpoints: never[] }).checkpoints);
+		});
+
+		// A live turn builds one response group (id 1) from events.
+		fake.emit({ type: "agent_start" });
+		fake.emit({ type: "message_start", message: { role: "assistant" } });
+		fake.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hello" } });
+		fake.emit({ type: "agent_end" });
+		await flush();
+
+		const latest = checkpointUpdates.at(-1);
+		expect(latest).toEqual([{ responseId: 1, entryId: "a1", canRestore: false, canFork: true }]);
+		expect(controller.getCheckpoints()).toEqual([{ responseId: 1, entryId: "a1", canRestore: false, canFork: true }]);
+	});
+
+	it("gates canFork from get_fork_messages — a non-forkable turn omits its entry (finding A)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = { roots: [node("u1", "user", "hi", [node("a1", "assistant", "hello")])], leafId: "a1" };
+		// The backend reports a1 as NOT forkable (e.g. it used a tool / errored).
+		fake.forkMessagesOverride = [];
+		const controller = makeController(fake);
+		await controller.start();
+
+		fake.emit({ type: "agent_start" });
+		fake.emit({ type: "message_start", message: { role: "assistant" } });
+		fake.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hello" } });
+		fake.emit({ type: "agent_end" });
+		await flush();
+
+		expect(controller.getCheckpoints()).toEqual([
+			{ responseId: 1, entryId: "a1", canRestore: false, canFork: false },
+		]);
+		expect(fake.forkMessagesCalls).toBeGreaterThan(0);
+	});
+
+	it("surfaces a notice when a fork throws (fire-and-forget from the bridge)", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+		fake.callError = new Error("boom");
+
+		await expect(controller.fork("a1")).resolves.toBeUndefined();
+		expect(controller.getTranscript().statusText).toMatch(/Couldn't fork: boom/);
+	});
+
+	it("clears checkpoints on /new so a stale prior-session control can't render (finding 2)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const controller = makeController(fake);
+		await controller.start();
+		await controller.fork("a1"); // populate checkpoints from the current session
+		expect(controller.getCheckpoints().length).toBeGreaterThan(0);
+		const updates: Array<{ kind: string }> = [];
+		controller.onUpdate((u) => updates.push(u as never));
+
+		await controller.submit("/new");
+
+		// Durable state is cleared; the resync then re-posts the empty checkpoints
+		// to the webview (bridge-level, covered in webview-bridge.test.ts).
+		expect(controller.getCheckpoints()).toEqual([]);
+		expect(updates.some((u) => u.kind === "resync")).toBe(true);
+	});
+
+	it("clears checkpoints on /import as well (finding 2)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const ui = new FakeUi();
+		ui.openReturn = "/tmp/in.jsonl";
+		const controller = makeController(fake, { ui });
+		await controller.start();
+		await controller.fork("a1");
+		expect(controller.getCheckpoints().length).toBeGreaterThan(0);
+
+		await controller.submit("/import");
+		expect(controller.getCheckpoints()).toEqual([]);
+	});
+
+	it("rebuilds only the branch matching the leaf, not a sibling branch (finding 4)", async () => {
+		// A real fork: a1 has TWO children (two divergent branches). The leaf is in
+		// branch A, so the rebuilt transcript must follow branch A and ignore B.
+		const fake = new FakeClient();
+		fake.treeResult = {
+			roots: [
+				node("u1", "user", "hi", [
+					node("a1", "assistant", "hello", [
+						node("u2a", "user", "ask-A", [node("a2a", "assistant", "answer-A")]),
+						node("u2b", "user", "ask-B", [node("a2b", "assistant", "answer-B")]),
+					]),
+				]),
+			],
+			leafId: "a2a",
+		};
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.navigateTree("a2a");
+
+		const items = controller.getTranscript().items;
+		expect(
+			items.map((i) => (i.kind === "user" ? `u:${i.text}` : i.kind === "response" ? `a:${i.answer}` : i.text)),
+		).toEqual(["u:hi", "a:hello", "u:ask-A", "a:answer-A"]);
+		// Checkpoints key to branch-A entries only (the sibling branch is absent).
+		expect(controller.getCheckpoints().map((c) => c.entryId)).toEqual(["a1", "a2a"]);
 	});
 });

@@ -74,6 +74,18 @@ class BridgeFakeClient implements RpcClientLike {
 	async importJsonl(): Promise<{ cancelled: boolean }> {
 		return { cancelled: false };
 	}
+	async fork(): Promise<{ text: string; cancelled: boolean }> {
+		return { text: "", cancelled: false };
+	}
+	async navigateTree(): Promise<{ cancelled: boolean; editorText?: string }> {
+		return { cancelled: false };
+	}
+	async getTree(): Promise<{ roots: any[]; leafId: string | null }> {
+		return { roots: [], leafId: null };
+	}
+	async getForkMessages(): Promise<Array<{ entryId: string; text: string; role: "user" | "assistant" }>> {
+		return [];
+	}
 	emit(event: unknown): void {
 		this.ev?.(event);
 	}
@@ -384,5 +396,75 @@ describe("connectWebview", () => {
 
 		send({ type: "review-open-diff", path: "src/a.ts" });
 		expect(openDiff).toHaveBeenCalledWith("src/a.ts");
+	});
+
+	// ── Session tree: fork + restore (Phase 6) ─────────────────────────────
+
+	it("posts current checkpoints on ready (so inline controls survive reload)", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		vi.spyOn(controller, "getCheckpoints").mockReturnValue([
+			{ responseId: 1, entryId: "a1", canRestore: false, canFork: true },
+		]);
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+
+		const cp = posted.find((m) => m.type === "checkpoints") as
+			| Extract<HostToWebview, { type: "checkpoints" }>
+			| undefined;
+		expect(cp?.checkpoints).toEqual([{ responseId: 1, entryId: "a1", canRestore: false, canFork: true }]);
+	});
+
+	it("forwards checkpoints / tree / composer-prefill updates as messages when live", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+
+		(controller as any).emit({
+			kind: "checkpoints",
+			checkpoints: [{ responseId: 2, entryId: "a2", canRestore: true, canFork: true }],
+		});
+		(controller as any).emit({ kind: "tree", tree: { roots: [], leafId: "a2" } });
+		(controller as any).emit({ kind: "composer-prefill", text: "re-ask" });
+
+		expect((posted.filter((m) => m.type === "checkpoints").at(-1) as any)?.checkpoints).toEqual([
+			{ responseId: 2, entryId: "a2", canRestore: true, canFork: true },
+		]);
+		expect((posted.find((m) => m.type === "tree") as any)?.tree.leafId).toBe("a2");
+		expect((posted.find((m) => m.type === "composer-prefill") as any)?.text).toBe("re-ask");
+	});
+
+	it("re-posts checkpoints on a resync update", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+		const before = posted.filter((m) => m.type === "checkpoints").length;
+
+		await controller.submit("/new");
+		expect(posted.filter((m) => m.type === "checkpoints").length).toBeGreaterThan(before);
+	});
+
+	it("routes fork / navigate-tree / show-tree messages to the controller", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const fork = vi.spyOn(controller, "fork").mockResolvedValue();
+		const navigate = vi.spyOn(controller, "navigateTree").mockResolvedValue();
+		const requestTree = vi.spyOn(controller, "requestTree").mockResolvedValue();
+		const { webview, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+
+		send({ type: "fork", entryId: "a1" });
+		send({ type: "navigate-tree", entryId: "a2" });
+		send({ type: "show-tree" });
+
+		expect(fork).toHaveBeenCalledWith("a1");
+		expect(navigate).toHaveBeenCalledWith("a2");
+		expect(requestTree).toHaveBeenCalledTimes(1);
 	});
 });
