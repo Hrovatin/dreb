@@ -13,12 +13,22 @@
  */
 
 import { formatSessionStats } from "../shared/format.js";
-import { applyEvent, createTranscriptState, type TranscriptState } from "../shared/projection.js";
+import {
+	alignCheckpoints,
+	applyEvent,
+	type BranchTurn,
+	type Checkpoint,
+	createTranscriptState,
+	foldBranchIntoState,
+	type TranscriptState,
+} from "../shared/projection.js";
 import type {
 	HostStatus,
 	OpenSourceRef,
 	ReviewFileDto,
 	ReviewStateDto,
+	SessionTreeDto,
+	SessionTreeNodeDto,
 	SlashCommandDto,
 	TaggedContextDto,
 	UiResponse,
@@ -113,6 +123,18 @@ export interface RpcClientLike {
 	setSessionName(name: string): Promise<void>;
 	exportHtml(outputPath?: string): Promise<{ path: string }>;
 	importJsonl(inputPath: string): Promise<{ cancelled: boolean }>;
+	// Session tree / fork (Phase 6).
+	/** Fork a new branch from a session entry. Returns the re-ask `text` for a
+	 * user-message fork (empty for an assistant continue-from-answer fork). */
+	fork(entryId: string): Promise<{ text: string; cancelled: boolean }>;
+	/** The session entries the backend will actually fork from (assistant turns
+	 * that are not errored/aborted and hold no unresolved tool calls, plus
+	 * non-empty user turns). Drives which inline Fork controls are shown. */
+	getForkMessages(): Promise<Array<{ entryId: string; text: string; role: "user" | "assistant" }>>;
+	/** Navigate (restore/branch-jump) the session leaf to a tree entry. */
+	navigateTree(targetId: string): Promise<{ cancelled: boolean; editorText?: string }>;
+	/** The session branch tree plus the current leaf. */
+	getTree(): Promise<{ roots: SessionTreeNodeDto[]; leafId: string | null }>;
 }
 
 export type RpcClientFactory = (options: {
@@ -153,6 +175,12 @@ export type ControllerUpdate =
 	| { kind: "review"; review: ReviewStateDto }
 	/** An editor selection was tagged into the chat (Phase 4). */
 	| { kind: "tag-context"; context: TaggedContextDto }
+	/** Inline restore/fork controls were recomputed (Phase 6). */
+	| { kind: "checkpoints"; checkpoints: Checkpoint[] }
+	/** The session branch tree, in response to a `show-tree` request (Phase 6). */
+	| { kind: "tree"; tree: SessionTreeDto }
+	/** Pre-fill the composer (a user-message fork's re-ask text) (Phase 6). */
+	| { kind: "composer-prefill"; text: string }
 	/** Transcript was replaced host-side (e.g. `/new`, `/import`); the bridge
 	 * re-sends a fresh snapshot. */
 	| { kind: "resync" };
@@ -167,6 +195,44 @@ const defaultClientFactory: RpcClientFactory = async (options) => {
 function formatExit(info: { code?: number | null; signal?: string | null; error?: Error }): string {
 	if (info?.error) return `dreb process failed: ${info.error.message}`;
 	return `dreb process exited (code ${info?.code ?? "null"}, signal ${info?.signal ?? "null"})`;
+}
+
+function errorText(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+/** The path of nodes from a root down to `targetId` (inclusive), via depth-first
+ * search over the nested `children`. Empty when the id is not in the tree. */
+function findPath(nodes: SessionTreeNodeDto[], targetId: string): SessionTreeNodeDto[] {
+	for (const node of nodes) {
+		if (node.id === targetId) return [node];
+		const rest = findPath(node.children, targetId);
+		if (rest.length > 0) return [node, ...rest];
+	}
+	return [];
+}
+
+/** Reduce a session tree to the current branch (root → leaf): the ordered
+ * user/assistant turns (preview text) plus the assistant entry ids on that
+ * branch. Non-message entries (labels, tool results) are skipped. Returns empty
+ * when there is no leaf (fresh/empty session). */
+function currentBranch(
+	roots: SessionTreeNodeDto[],
+	leafId: string | null,
+): { turns: BranchTurn[]; assistantEntryIds: string[] } {
+	const path = leafId ? findPath(roots, leafId) : [];
+	const turns: BranchTurn[] = [];
+	const assistantEntryIds: string[] = [];
+	for (const node of path) {
+		if (node.type !== "message") continue;
+		if (node.role === "user") {
+			turns.push({ entryId: node.id, role: "user", text: node.preview });
+		} else if (node.role === "assistant") {
+			turns.push({ entryId: node.id, role: "assistant", text: node.preview });
+			assistantEntryIds.push(node.id);
+		}
+	}
+	return { turns, assistantEntryIds };
 }
 
 export class SessionController {
@@ -187,6 +253,10 @@ export class SessionController {
 	/** Last-published review state (held so the bridge can include it in the
 	 * reload snapshot — review survives webview recreation). */
 	private reviewState: ReviewStateDto = { enabled: false, files: [] };
+	/** Last-computed inline restore/fork controls (Phase 6), aligned to the
+	 * current transcript's response groups. Held so the bridge can include them
+	 * in the ready/resync snapshot. */
+	private checkpoints: Checkpoint[] = [];
 	private readonly logger: (line: string) => void;
 	private readonly options: SessionControllerOptions;
 	private client: RpcClientLike | undefined;
@@ -266,6 +336,12 @@ export class SessionController {
 	 * the reload snapshot so review survives webview recreation. */
 	getReviewState(): ReviewStateDto {
 		return this.reviewState;
+	}
+
+	/** The current inline restore/fork controls (Phase 6); included by the bridge
+	 * in the ready/resync snapshot so they survive webview recreation. */
+	getCheckpoints(): Checkpoint[] {
+		return this.checkpoints;
 	}
 
 	getCommandList(): SlashCommandDto[] {
@@ -617,6 +693,11 @@ export class SessionController {
 		this.state.statusText = undefined;
 		this.state.hostError = undefined;
 		this.state.nextResponseId = 1;
+		// Drop the prior session's checkpoints so a new/imported session doesn't
+		// render stale Restore/Fork controls on its first turn (the new session's
+		// first response group reuses id 1 and would otherwise match a stale
+		// `{responseId: 1}`). The subsequent `resync` re-posts this empty array.
+		this.checkpoints = [];
 	}
 
 	/** Append a persistent host-side line to the transcript (e.g. `/session`). */
@@ -706,6 +787,103 @@ export class SessionController {
 			await this.sourceLinkUi.openSource(ref);
 		} catch (err) {
 			this.emitNotice(`Couldn't open the reference: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	// ── Session tree: fork + restore checkpoint (Phase 6) ──────────────────
+
+	/** Fork a new branch from a session entry. A user-message fork returns re-ask
+	 * text that pre-fills the composer; an assistant fork returns "" (continue
+	 * from that answer) and must not clobber the composer. Rebuilds the transcript
+	 * to the forked branch. Fire-and-forget from the bridge, so guard throws into
+	 * a notice. */
+	async fork(entryId: string): Promise<void> {
+		if (!this.client) return;
+		try {
+			const result = await this.client.fork(entryId);
+			if (result.cancelled) {
+				this.emitNotice("Fork cancelled — no new branch was created.");
+				return;
+			}
+			await this.rebuildTranscript();
+			// Only user (re-ask) forks return text; assistant forks return "" and
+			// must not clobber whatever the user has already typed.
+			if (result.text.length > 0) this.emit({ kind: "composer-prefill", text: result.text });
+		} catch (err) {
+			this.emitNotice(`Couldn't fork: ${errorText(err)}`);
+		}
+	}
+
+	/** Restore (navigate) the session to a tree entry — a linear rewind or a
+	 * branch-jump. Rebuilds the transcript to the target leaf. */
+	async navigateTree(entryId: string): Promise<void> {
+		if (!this.client) return;
+		try {
+			const result = await this.client.navigateTree(entryId);
+			if (result.cancelled) {
+				this.emitNotice("Restore cancelled.");
+				return;
+			}
+			await this.rebuildTranscript();
+		} catch (err) {
+			this.emitNotice(`Couldn't restore the checkpoint: ${errorText(err)}`);
+		}
+	}
+
+	/** Fetch the session branch tree and emit it for the branch-tree view. */
+	async requestTree(): Promise<void> {
+		if (!this.client) return;
+		try {
+			const tree = await this.client.getTree();
+			this.emit({ kind: "tree", tree: { roots: tree.roots, leafId: tree.leafId } });
+		} catch (err) {
+			this.emitNotice(`Couldn't load the session tree: ${errorText(err)}`);
+		}
+	}
+
+	/** Rebuild the transcript from the current session branch (after a restore or
+	 * fork moved the leaf), realign checkpoints, and resync the webview. Turn text
+	 * uses the tree's per-entry previews — historical full text and tool activity
+	 * are not reconstructed (MVP). */
+	private async rebuildTranscript(): Promise<void> {
+		if (!this.client) return;
+		const tree = await this.client.getTree();
+		const branch = currentBranch(tree.roots, tree.leafId);
+		foldBranchIntoState(this.state, branch.turns);
+		this.checkpoints = alignCheckpoints(this.state, branch.assistantEntryIds, await this.forkableEntryIds());
+		await this.refreshStatus(true);
+		this.emit({ kind: "resync" });
+		this.emit({ kind: "checkpoints", checkpoints: this.checkpoints });
+	}
+
+	/** Recompute inline restore/fork controls for the current (event-built)
+	 * transcript. Runs after each completed turn so the controls attach to the
+	 * right entry. Best-effort: a tree fetch failure leaves the last controls in
+	 * place rather than surfacing a notice. */
+	private async refreshCheckpoints(): Promise<void> {
+		if (!this.client) return;
+		try {
+			const tree = await this.client.getTree();
+			const branch = currentBranch(tree.roots, tree.leafId);
+			this.checkpoints = alignCheckpoints(this.state, branch.assistantEntryIds, await this.forkableEntryIds());
+			this.emit({ kind: "checkpoints", checkpoints: this.checkpoints });
+		} catch (err) {
+			this.logger(`checkpoint refresh failed: ${errorText(err)}`);
+		}
+	}
+
+	/** The set of session entry ids the backend will fork from, used to gate the
+	 * inline Fork control (via {@link alignCheckpoints}). Best-effort: on failure
+	 * returns an empty set, which hides Fork rather than showing a control that
+	 * would only produce a "Couldn't fork…" notice. */
+	private async forkableEntryIds(): Promise<ReadonlySet<string>> {
+		if (!this.client) return new Set();
+		try {
+			const messages = await this.client.getForkMessages();
+			return new Set(messages.map((m) => m.entryId));
+		} catch (err) {
+			this.logger(`fork-messages fetch failed: ${errorText(err)}`);
+			return new Set();
 		}
 	}
 
@@ -799,6 +977,7 @@ export class SessionController {
 		if (type === "agent_end") {
 			void this.refreshStatus(true);
 			void this.refreshReview();
+			void this.refreshCheckpoints();
 		}
 	}
 
