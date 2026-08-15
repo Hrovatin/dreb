@@ -164,6 +164,18 @@
 					"type": "string",
 					"default": "",
 					"description": "Optional model id or pattern passed to dreb. Leave empty to use dreb's configured default."
+				},
+				"dreb.session.idleSleepMinutes": {
+					"type": "number",
+					"default": 60,
+					"minimum": 0,
+					"markdownDescription": "Minutes a **detached + idle** session (chat tab closed, turn finished, nothing pending) stays alive before it sleeps — its RPC child is released, leaving a resumable session that reopening restores. Reopening the tab before this elapses reattaches instantly with no loss. Set to `0` to disable idle sleep."
+				},
+				"dreb.session.inactivitySleepHours": {
+					"type": "number",
+					"default": 4,
+					"minimum": 0,
+					"markdownDescription": "Hours without **user input** after which a session sleeps regardless of its state — including a focused tab, a session awaiting input, and a running turn. This is the abandonment/runaway backstop so an unanswered prompt or a hung agent cannot hold an RPC child indefinitely; the session becomes a resumable row that reopening restores. The timer resets on every submit or prompt answer. Set to `0` to disable."
 				}
 			}
 		}

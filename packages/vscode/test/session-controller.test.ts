@@ -909,6 +909,101 @@ describe("SessionController", () => {
 		expect(fake.stopped).toBe(1);
 	});
 
+	describe("hasFailed() (Phase 9 — reopen restarts a crashed session)", () => {
+		it("is false for a brand-new session that is merely still starting", () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			// Constructed but start() not called: connected false, but no error yet.
+			expect(controller.getStatus().connected).toBe(false);
+			expect(controller.hasFailed()).toBe(false);
+		});
+
+		it("is false for a live, connected session", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+			expect(controller.hasFailed()).toBe(false);
+		});
+
+		it("is true after the RPC child exits unexpectedly", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+			fake.emitExit({ code: 1, signal: null });
+			expect(controller.hasFailed()).toBe(true);
+			expect(controller.isDisposed()).toBe(false); // still live, just failed
+		});
+
+		it("is true after a failed start() handshake", async () => {
+			const fake = new FakeClient();
+			fake.startError = new Error("spawn failed");
+			const controller = makeController(fake);
+			await expect(controller.start()).rejects.toThrow("spawn failed");
+			expect(controller.hasFailed()).toBe(true);
+		});
+
+		it("is true after a fatal (e.g. CLI not found)", () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			controller.reportFatal("dreb CLI not found");
+			expect(controller.hasFailed()).toBe(true);
+		});
+
+		it("is false after /quit (disposed, not failed)", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+			await controller.submit("/quit");
+			expect(controller.isDisposed()).toBe(true);
+			expect(controller.hasFailed()).toBe(false);
+		});
+	});
+
+	describe("onUserInput() (Phase 9 — resets the inactivity cap)", () => {
+		it("fires on a composer submit (even one short-circuited while disconnected)", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			let inputs = 0;
+			controller.onUserInput(() => {
+				inputs += 1;
+			});
+			await controller.start();
+			await controller.submit("hello");
+			expect(inputs).toBe(1);
+
+			// A disconnected submit is short-circuited but is still user engagement.
+			fake.emitExit({ code: 1, signal: null });
+			await controller.submit("still typing");
+			expect(inputs).toBe(2);
+		});
+
+		it("fires when answering a blocking UI request", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			let inputs = 0;
+			controller.onUserInput(() => {
+				inputs += 1;
+			});
+			await controller.start();
+			controller.respondUi({ id: "u1", confirmed: true });
+			expect(inputs).toBe(1);
+		});
+
+		it("stops firing after the listener unsubscribes", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			let inputs = 0;
+			const off = controller.onUserInput(() => {
+				inputs += 1;
+			});
+			await controller.start();
+			await controller.submit("one");
+			off();
+			await controller.submit("two");
+			expect(inputs).toBe(1);
+		});
+	});
+
 	it("drops a submit with a notice when the client is not started yet", async () => {
 		const fake = new FakeClient();
 		const controller = makeController(fake);

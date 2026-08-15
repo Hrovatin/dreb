@@ -238,6 +238,10 @@ function currentBranch(
 export class SessionController {
 	private readonly state: TranscriptState = createTranscriptState();
 	private readonly listeners = new Set<(update: ControllerUpdate) => void>();
+	/** User-input listeners (Phase 9): fired whenever the user actively drives
+	 * the session (a composer submit or an answer to a blocking UI request), so
+	 * the sleep controller can reset its "no user input" inactivity cap. */
+	private readonly inputListeners = new Set<() => void>();
 	private readonly factory: RpcClientFactory;
 	private readonly ui: HostUi;
 	private readonly reviewUi: ReviewUi;
@@ -353,6 +357,23 @@ export class SessionController {
 		return () => this.listeners.delete(listener);
 	}
 
+	/** Subscribe to user-input events (composer submit / UI-request answer). Used
+	 * by the sleep controller to reset the inactivity cap on genuine engagement. */
+	onUserInput(listener: () => void): () => void {
+		this.inputListeners.add(listener);
+		return () => this.inputListeners.delete(listener);
+	}
+
+	private emitUserInput(): void {
+		for (const listener of this.inputListeners) {
+			try {
+				listener();
+			} catch (err) {
+				this.logger(`user-input listener failed: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+	}
+
 	/** Spawn the RPC child, wire event/exit handlers, and prime the command list. */
 	async start(): Promise<void> {
 		if (this.disposed) throw new Error("SessionController is disposed");
@@ -422,6 +443,10 @@ export class SessionController {
 	 * isn't ready, and every awaited RPC call is wrapped so a rejection becomes
 	 * a visible notice rather than an unhandled promise rejection. */
 	async submit(text: string, attachments?: TaggedContextDto[]): Promise<void> {
+		// Any composer submit is genuine user engagement — reset the inactivity
+		// cap before anything else (even a submit that races the spawn window or
+		// lands after a crash and is short-circuited below).
+		this.emitUserInput();
 		if (!this.client || !this.status.connected) {
 			this.emitNotice(
 				this.status.error
@@ -714,6 +739,8 @@ export class SessionController {
 
 	/** Answer a blocking extension-UI request. */
 	respondUi(response: UiResponse): void {
+		// Answering a prompt is user engagement — reset the inactivity cap.
+		this.emitUserInput();
 		this.client?.sendExtensionUIResponse({ type: "extension_ui_response", ...response });
 	}
 
@@ -962,6 +989,17 @@ export class SessionController {
 	 * controller cannot be restarted; the host must build a fresh one. */
 	isDisposed(): boolean {
 		return this.disposed;
+	}
+
+	/** Whether the RPC child is gone / unusable while the controller itself is
+	 * still live (an unexpected child exit, a failed `start()` handshake, or a
+	 * fatal like CLI-not-found). Distinguished from a brand-new session that is
+	 * merely still starting (no error yet) and from a `/quit`-ended session
+	 * (`disposed`). The host treats a failed controller as not-reusable so
+	 * reopening rebuilds a fresh child resuming from the persisted transcript
+	 * instead of revealing a dead panel. */
+	hasFailed(): boolean {
+		return !this.disposed && !this.status.connected && this.status.error !== undefined;
 	}
 
 	private handleEvent(event: unknown): void {
