@@ -36,6 +36,8 @@ export interface SessionsViewDeps {
 	renameSession: (key: string, name: string) => void | Promise<void>;
 	/** Delete a session by row key (host owns the confirmation prompt). */
 	deleteSession: (key: string) => void | Promise<void>;
+	/** Abort a session's current turn and end it (release its RPC child). */
+	stopSession: (key: string) => void | Promise<void>;
 	logger?: (line: string) => void;
 }
 
@@ -84,6 +86,13 @@ export class SessionsViewModel {
 			}
 			case "delete":
 				await this.deps.deleteSession(msg.key);
+				await this.refresh();
+				return;
+			case "stop":
+				// Stopping tears the controller down; the host refreshes the list as a
+				// side effect of the pool change. Refresh anyway so a slept/aborted row
+				// updates even if the pool change didn't already schedule one.
+				await this.deps.stopSession(msg.key);
 				await this.refresh();
 				return;
 		}

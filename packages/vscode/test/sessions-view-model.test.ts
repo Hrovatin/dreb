@@ -50,6 +50,7 @@ function makeModel(over: Partial<SessionsViewDeps> = {}) {
 		newSession: vi.fn(async () => {}),
 		renameSession: vi.fn(async () => {}),
 		deleteSession: vi.fn(async () => {}),
+		stopSession: vi.fn(async () => {}),
 		...over,
 	};
 	const model = new SessionsViewModel(deps);
@@ -136,6 +137,13 @@ describe("SessionsViewModel", () => {
 		const { model, deps, posted } = makeModel();
 		await model.handle({ type: "delete", key: "/p/a.jsonl" });
 		expect(deps.deleteSession).toHaveBeenCalledWith("/p/a.jsonl");
+		expect(posted.some((m) => m.type === "list")).toBe(true);
+	});
+
+	it("stop delegates to stopSession then refreshes", async () => {
+		const { model, deps, posted } = makeModel();
+		await model.handle({ type: "stop", key: "/p/a.jsonl" });
+		expect(deps.stopSession).toHaveBeenCalledWith("/p/a.jsonl");
 		expect(posted.some((m) => m.type === "list")).toBe(true);
 	});
 

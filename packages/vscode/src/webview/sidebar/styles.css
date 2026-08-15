@@ -265,6 +265,9 @@ body {
 	outline: 1px solid var(--vscode-focusBorder, #38f);
 	outline-offset: -1px;
 }
+.dreb-side-action-stop:hover {
+	color: var(--vscode-errorForeground, #e51400);
+}
 
 /* Empty state ------------------------------------------------------------- */
 .dreb-side-empty {
