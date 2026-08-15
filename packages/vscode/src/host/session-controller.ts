@@ -800,9 +800,15 @@ export class SessionController {
 		this.emit({ kind: "review", review: this.reviewState });
 	}
 
-	/** Open the baseline↔current diff for a reviewed file. */
+	/** Open the baseline↔current diff for a reviewed file. Fire-and-forget from
+	 * the bridge, so guard the async `vscode.diff` call and surface a notice
+	 * instead of leaking an unhandled rejection (mirrors `openSource`). */
 	async reviewOpenDiff(path: string): Promise<void> {
-		await this.reviewUi.openDiff(path);
+		try {
+			await this.reviewUi.openDiff(path);
+		} catch (err) {
+			this.emitNotice(`Couldn't open the diff for ${path}: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	}
 
 	/** Open a code reference the user clicked in an answer (Phase 5b). The

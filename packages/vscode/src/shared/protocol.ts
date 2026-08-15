@@ -191,6 +191,10 @@ export type WebviewToHost =
 	| { type: "pick-file" }
 	/** Open the baseline→current diff for a reviewed file (indicator click). */
 	| { type: "review-open-diff"; path: string }
+	/** Accept all pending edits, clearing them from the change-review
+	 * accumulation area (review-bar "Accept all"). Routes to the same
+	 * `reviewAcceptAll()` path as the SCM title-menu action. */
+	| { type: "review-accept-all" }
 	/** Open a code reference clicked in an answer (Phase 5b) — a file location
 	 * and/or a symbol to resolve to its definition. */
 	| { type: "open-source"; ref: OpenSourceRef }
