@@ -109,3 +109,48 @@ export class SleepController {
 		});
 	}
 }
+
+/** The vscode-free view of a session being (re)opened, for {@link revealOrReattach}. */
+export interface RevealTarget {
+	/** Whether the session still has a live webview panel. */
+	hasPanel(): boolean;
+	/** Whether the extension is active (a context exists to rebuild a panel). */
+	hasContext(): boolean;
+}
+
+/** Injected side effects for {@link revealOrReattach} (vscode work lives here). */
+export interface RevealActions {
+	/** Bring the session's existing panel to the foreground. */
+	reveal(): void;
+	/** Rebuild a fresh panel + bridge for a backgrounded session (`attachView`). */
+	rebuild(): void;
+}
+
+/** What {@link revealOrReattach} did, for observability and tests. */
+export type RevealOutcome = "revealed" | "rebuilt" | "skipped";
+
+/**
+ * Decide how to surface a (re)opened session:
+ *
+ *   - a live panel still exists → **reveal** it (bring the tab to the front);
+ *   - the session was backgrounded (panel closed, controller still alive) but the
+ *     extension is active → **rebuild** a fresh view (`attachView`) over the
+ *     surviving controller — the headline Phase 7 reopen flow;
+ *   - the extension is shutting down (no context) → **skip** (do not create a
+ *     panel after deactivation).
+ *
+ * Kept vscode-free so the branch that distinguishes reveal-vs-rebuild — the one
+ * that makes reopening a backgrounded session actually work — is unit-testable
+ * without a webview mock.
+ */
+export function revealOrReattach(target: RevealTarget, actions: RevealActions): RevealOutcome {
+	if (target.hasPanel()) {
+		actions.reveal();
+		return "revealed";
+	}
+	if (target.hasContext()) {
+		actions.rebuild();
+		return "rebuilt";
+	}
+	return "skipped";
+}

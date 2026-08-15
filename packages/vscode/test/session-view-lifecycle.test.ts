@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { type Deferrer, type SleepableSession, SleepController } from "../src/host/session-view-lifecycle.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+	type Deferrer,
+	revealOrReattach,
+	type SleepableSession,
+	SleepController,
+} from "../src/host/session-view-lifecycle.js";
 import type { SessionRunState } from "../src/shared/session-list.js";
 
 /**
@@ -152,5 +157,47 @@ describe("SleepController (sleep-on-idle)", () => {
 		h.sleep.onUpdate();
 		h.flush();
 		expect(h.sleepCalls()).toBe(0);
+	});
+});
+
+describe("revealOrReattach", () => {
+	it("reveals an existing panel and never rebuilds", () => {
+		const reveal = vi.fn();
+		const rebuild = vi.fn();
+		const outcome = revealOrReattach({ hasPanel: () => true, hasContext: () => true }, { reveal, rebuild });
+		expect(outcome).toBe("revealed");
+		expect(reveal).toHaveBeenCalledTimes(1);
+		expect(rebuild).not.toHaveBeenCalled();
+	});
+
+	it("rebuilds a backgrounded (panel-less) session when the extension is active", () => {
+		// The headline Phase 7 reopen flow: controller alive, panel closed → a
+		// fresh view is rebuilt. A regression that mixed up this branch would make
+		// clicking a backgrounded session silently do nothing.
+		const reveal = vi.fn();
+		const rebuild = vi.fn();
+		const outcome = revealOrReattach({ hasPanel: () => false, hasContext: () => true }, { reveal, rebuild });
+		expect(outcome).toBe("rebuilt");
+		expect(rebuild).toHaveBeenCalledTimes(1);
+		expect(reveal).not.toHaveBeenCalled();
+	});
+
+	it("skips (no reveal, no rebuild) when the extension is shutting down", () => {
+		// No context after deactivate() → do not create a panel post-shutdown.
+		const reveal = vi.fn();
+		const rebuild = vi.fn();
+		const outcome = revealOrReattach({ hasPanel: () => false, hasContext: () => false }, { reveal, rebuild });
+		expect(outcome).toBe("skipped");
+		expect(reveal).not.toHaveBeenCalled();
+		expect(rebuild).not.toHaveBeenCalled();
+	});
+
+	it("prefers revealing an existing panel even if a context is also available", () => {
+		const reveal = vi.fn();
+		const rebuild = vi.fn();
+		const outcome = revealOrReattach({ hasPanel: () => true, hasContext: () => false }, { reveal, rebuild });
+		expect(outcome).toBe("revealed");
+		expect(reveal).toHaveBeenCalledTimes(1);
+		expect(rebuild).not.toHaveBeenCalled();
 	});
 });

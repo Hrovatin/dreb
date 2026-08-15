@@ -23,7 +23,7 @@ import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
 import { createSessionInventory, deletePersistedSession, type SessionInventory } from "./session-inventory.js";
 import { SessionPool } from "./session-registry.js";
-import { type SleepableSession, SleepController } from "./session-view-lifecycle.js";
+import { revealOrReattach, type SleepableSession, SleepController } from "./session-view-lifecycle.js";
 import { SessionsViewProvider } from "./sessions-view.js";
 import { tagSelectionToChat } from "./tag-selection.js";
 import { createVscodeHostUi } from "./vscode-host-ui.js";
@@ -117,6 +117,15 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand("dreb.openChat", () => void openActiveOrNew(context)),
 		vscode.commands.registerCommand("dreb.sessions.newSession", () => void openNewSession(context)),
 		vscode.commands.registerCommand("dreb.sessions.refresh", () => sessionsView?.refresh()),
+		vscode.commands.registerCommand("dreb.sessions.stopSession", () => {
+			// Palette / keybinding entry point for Stop. The sidebar has a per-row
+			// button; from the command palette there is no row context, so this stops
+			// the active session — but only when it has a turn to interrupt, matching
+			// the sidebar button that is hidden on idle rows (idle sessions are ended
+			// via /quit or delete, not Stop).
+			const active = pool.active;
+			if (active && active.controller.runState !== "idle") void stopSession(active.key);
+		}),
 		vscode.commands.registerCommand("dreb.tagSelectionToChat", () =>
 			tagSelectionToChat({
 				captureSelection: () => {
@@ -345,13 +354,19 @@ function detachView(session: ChatSession): void {
 }
 
 /** Reveal a session's panel, rebuilding it if the session was backgrounded (its
- * panel closed) since it was last viewed. */
+ * panel closed) since it was last viewed. Does nothing if the extension is
+ * shutting down (no context to rebuild into). */
 function revealSession(session: ChatSession): void {
-	if (session.panel) {
-		session.panel.reveal(vscode.ViewColumn.Active);
-		return;
-	}
-	if (extensionContext) attachView(extensionContext, session);
+	const ctx = extensionContext;
+	revealOrReattach(
+		{ hasPanel: () => session.panel !== undefined, hasContext: () => ctx !== undefined },
+		{
+			reveal: () => session.panel?.reveal(vscode.ViewColumn.Active),
+			rebuild: () => {
+				if (ctx) attachView(ctx, session);
+			},
+		},
+	);
 }
 
 /** The chat tab title reflecting run-state, so a backgrounded / unfocused
