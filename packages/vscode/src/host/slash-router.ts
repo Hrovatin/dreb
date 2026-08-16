@@ -22,6 +22,7 @@ import type { SlashCommandDto } from "../shared/protocol.js";
 export const BUILTIN_COMMANDS: SlashCommandDto[] = [
 	{ name: "model", description: "Switch the active model", source: "builtin" },
 	{ name: "compact", description: "Summarize and compact the conversation context", source: "builtin" },
+	{ name: "ask", description: "Toggle read-only Ask mode (on/off)", source: "builtin" },
 	{ name: "new", description: "Start a new session", source: "builtin" },
 	{ name: "reload", description: "Reload skills, extensions, prompts, and settings", source: "builtin" },
 	{ name: "dream", description: "Consolidate and prune memories", source: "builtin" },

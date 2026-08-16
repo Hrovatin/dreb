@@ -69,6 +69,9 @@ export type RpcCommand =
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
 	| { id?: string; type: "abort_compaction" }
 
+	// Ask mode (read-only)
+	| { id?: string; type: "set_ask_mode"; enabled: boolean }
+
 	// Retry
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
 	| { id?: string; type: "abort_retry" }
@@ -248,6 +251,8 @@ export interface RpcSessionState {
 	sessionId: string;
 	sessionName?: string;
 	autoCompactionEnabled: boolean;
+	/** Whether read-only Ask mode is currently active. */
+	askModeEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
 	/**
@@ -350,6 +355,9 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "compact"; success: true; data: CompactionResult }
 	| { id?: string; type: "response"; command: "set_auto_compaction"; success: true }
 	| { id?: string; type: "response"; command: "abort_compaction"; success: true }
+
+	// Ask mode (read-only)
+	| { id?: string; type: "response"; command: "set_ask_mode"; success: true; data: { enabled: boolean } }
 
 	// Retry
 	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }
