@@ -447,6 +447,38 @@ describe("SessionController", () => {
 		expect(controller.getTranscript().statusText).toMatch(/Usage: \/ask/);
 	});
 
+	it("/ask on when already ON is a no-op reporting 'already ON' (terminal parity)", async () => {
+		const fake = new FakeClient();
+		fake.state = { askModeEnabled: true };
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("/ask on");
+		expect(fake.askModeCalls).toEqual([]);
+		expect(controller.getTranscript().statusText).toMatch(/already ON/);
+	});
+
+	it("/ask off when already OFF is a no-op reporting 'already OFF' (terminal parity)", async () => {
+		const fake = new FakeClient();
+		fake.state = { askModeEnabled: false };
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("/ask off");
+		expect(fake.askModeCalls).toEqual([]);
+		expect(controller.getTranscript().statusText).toMatch(/already OFF/);
+	});
+
+	it("/ask toggle is not a keyword — shows usage and does not toggle (terminal parity)", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("/ask toggle");
+		expect(fake.askModeCalls).toEqual([]);
+		expect(controller.getTranscript().statusText).toMatch(/Usage: \/ask/);
+	});
+
 	it("folds tagged attachments into the prompt as located context", async () => {
 		const fake = new FakeClient();
 		const controller = makeController(fake);

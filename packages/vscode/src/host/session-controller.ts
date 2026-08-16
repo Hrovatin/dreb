@@ -508,21 +508,22 @@ export class SessionController {
 				return;
 			case "ask": {
 				const sub = arg?.trim().toLowerCase() ?? "";
-				let enable: boolean;
-				if (sub === "on") {
-					enable = true;
-				} else if (sub === "off") {
-					enable = false;
-				} else if (sub === "" || sub === "toggle") {
-					// Bare `/ask` (or `/ask toggle`) flips the current state.
-					const state = await client.getState();
-					enable = !state.askModeEnabled;
-				} else if (sub === "status") {
-					const state = await client.getState();
-					this.emitNotice(`Read-only Ask mode is currently ${state.askModeEnabled ? "ON" : "OFF"}.`);
-					return;
-				} else {
+				if (sub !== "on" && sub !== "off" && sub !== "" && sub !== "status") {
 					this.emitNotice("Usage: /ask [on | off | status] (bare /ask toggles).");
+					return;
+				}
+				// Fetch the authoritative live state once: it drives the bare-toggle
+				// direction, the `status` report, and the already-in-mode guard.
+				const current = (await client.getState()).askModeEnabled ?? false;
+				if (sub === "status") {
+					this.emitNotice(`Read-only Ask mode is currently ${current ? "ON" : "OFF"}.`);
+					return;
+				}
+				const enable = sub === "on" ? true : sub === "off" ? false : !current;
+				// Match the terminal: a no-op (already in the requested state) reports
+				// "already ON/OFF" instead of re-emitting the full activation notice.
+				if (enable === current) {
+					this.emitNotice(`Read-only Ask mode is already ${enable ? "ON" : "OFF"}.`);
 					return;
 				}
 				const { enabled } = await client.setAskMode(enable);
