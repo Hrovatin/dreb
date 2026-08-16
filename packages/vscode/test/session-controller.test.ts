@@ -247,12 +247,13 @@ class FakeUi implements HostUi {
 	}
 }
 
-function makeController(fake: FakeClient, opts: { cwd?: string; ui?: HostUi } = {}) {
+function makeController(fake: FakeClient, opts: { cwd?: string; ui?: HostUi; sessionPath?: string } = {}) {
 	return new SessionController({
 		cwd: opts.cwd ?? "/tmp/project",
 		cliPath: "/cli.js",
 		clientFactory: () => fake,
 		ui: opts.ui,
+		sessionPath: opts.sessionPath,
 	});
 }
 
@@ -1445,5 +1446,48 @@ describe("SessionController session tree (Phase 6)", () => {
 		).toEqual(["u:hi", "a:hello", "u:ask-A", "a:answer-A"]);
 		// Checkpoints key to branch-A entries only (the sibling branch is absent).
 		expect(controller.getCheckpoints().map((c) => c.entryId)).toEqual(["a1", "a2a"]);
+	});
+});
+
+describe("SessionController resume (Phase 5 — rebuild transcript on start)", () => {
+	it("folds the persisted branch into the transcript on start when resuming", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const controller = makeController(fake, { sessionPath: "/abs/sess.jsonl" });
+
+		await controller.start();
+
+		// The resumed child never replays historical events, so start() rebuilds
+		// the transcript from the persisted branch tree instead of leaving it blank.
+		expect(fake.treeCalls).toBeGreaterThan(0);
+		const items = controller.getTranscript().items;
+		expect(
+			items.map((i) => (i.kind === "user" ? `u:${i.text}` : i.kind === "response" ? `a:${i.answer}` : i.text)),
+		).toEqual(["u:hi", "a:hello", "u:again", "a:world"]);
+	});
+
+	it("does not fold on start for a brand-new session (no sessionPath)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const controller = makeController(fake); // no sessionPath
+
+		await controller.start();
+
+		// A fresh session keeps populating from the live event stream; start() must
+		// not fetch the tree or pre-fold any turns.
+		expect(fake.treeCalls).toBe(0);
+		expect(controller.getTranscript().items).toEqual([]);
+	});
+
+	it("still connects when the resume rebuild fails (best-effort, no throw)", async () => {
+		const fake = new FakeClient();
+		// getTree (invoked by rebuildTranscript) throws; start() must swallow it.
+		fake.callError = new Error("getTree boom");
+		const controller = makeController(fake, { sessionPath: "/abs/sess.jsonl" });
+
+		await expect(controller.start()).resolves.toBeUndefined();
+		expect(controller.getStatus().connected).toBe(true);
+		// The failed rebuild leaves an empty transcript rather than blocking startup.
+		expect(controller.getTranscript().items).toEqual([]);
 	});
 });
