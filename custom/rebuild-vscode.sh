@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# rebuild-vscode.sh — rebase the `vscode` integration branch onto current master.
+# rebuild-vscode.sh — rebase the `vscode` integration branch onto the `ask` branch.
 #
 # =============================================================================
 #  What `vscode` is
@@ -14,29 +14,46 @@
 # NOT list `worktree-cleaned` separately (see karin-branches.txt).
 #
 # =============================================================================
-#  Why this script exists
+#  Why `vscode` is based on `ask` (BASE=feature/issue-10-ask-mode)
+# =============================================================================
+# The read-only Ask mode (`/ask on` / `/ask off`, issue #10) lives on the
+# `feature/issue-10-ask-mode` branch. Wiring `/ask` through the extension needs
+# the ask-mode CLI code (AgentSession.setAskMode + a new RPC method) present in
+# the *same* lineage as the extension host code, so the extension can route the
+# `/ask` builtin to the RPC toggle instead of surfacing "isn't available yet".
+# We therefore rebase `vscode` onto `ask` (which is itself based on current
+# master), so the vscode branch carries ask-mode. Because `vscode` now contains
+# ask, karin lists `vscode` and does NOT list `feature/issue-10-ask-mode`
+# separately (see karin-branches.txt), mirroring the worktree-cleaned rule.
+#
+# NOTE: keep `feature/issue-10-ask-mode` rebased on current master (via its own
+# PR workflow) so that rebasing `vscode` onto it stays on the latest master.
+#
+# =============================================================================
+#  Skill-doc reconciliation
 # =============================================================================
 # The `vscode` branch's history forked before master's #458, which rewrote the
 # mach6 skill docs (mach6-review et al.) into the "counter-pressure" version.
 # vscode still carried the older lineage, so a naive merge into karin produced
-# a broken blend. Rebasing vscode onto current master replays its work on top
-# of #458 and reconciles those skill docs ONCE. The reconciliation is
-# deterministic: for the known collision files, take `worktree-cleaned`'s
-# versions (worktree-cleaned = the same worktree work already correctly rebased
-# onto #458, so its skill docs are the canonical "#458 + worktree" result).
+# a broken blend. Rebasing vscode onto `ask` (= master + ask commits) replays
+# its work on top of #458 and reconciles those skill docs ONCE. The
+# reconciliation is deterministic: for the known collision files, take
+# `worktree-cleaned`'s versions (worktree-cleaned = the same worktree work
+# already correctly rebased onto #458, so its skill docs are the canonical
+# "#458 + worktree" result).
 #
 # Corruption-safety (aebrer/dreb#461): uses only `rebase` (+ `checkout -- file`
 # to stage resolutions). `git rebase` never runs the test-running pre-commit
 # hook, so the GIT_* env-leak corruption bug cannot fire.
 #
 # Usage:
-#   ./rebuild-vscode.sh                 # rebase vscode onto master in a transient worktree
+#   ./rebuild-vscode.sh                 # rebase vscode onto ask in a transient worktree
 # Then review and push explicitly:
 #   git push --force-with-lease Hrovatin vscode
 #
 set -euo pipefail
 
-BASE="${BASE:-master}"
+BASE="${BASE:-feature/issue-10-ask-mode}"
 RECONCILE_FROM="${RECONCILE_FROM:-worktree-cleaned}"
 BUILD_PARENT="$(mktemp -d)"
 BUILD_WT="${BUILD_WT:-$BUILD_PARENT/vscode-rebase}"
