@@ -81,17 +81,17 @@ function kindRank(dto: TaggedContextDto): number {
 
 /** The lowercased (name, path) a query is matched against for one result. For a
  * symbol the "name" is the symbol identifier; for a file/folder it is the last
- * path segment. */
+ * path segment. (Selections never reach the mention dropdown; they fold through
+ * the file/path arm harmlessly.) */
 function matchText(dto: TaggedContextDto): { name: string; path: string } {
 	if (dto.kind === "symbol") return { name: dto.name.toLowerCase(), path: dto.path.toLowerCase() };
-	if (dto.kind === "file") return { name: filename(dto.path), path: dto.path.toLowerCase() };
-	return { name: "", path: "" };
+	return { name: filename(dto.path), path: dto.path.toLowerCase() };
 }
 
 /** The path used for tiebreaking (shorter/alpha) — the file/folder path or the
  * symbol's defining file path. */
 function pathOf(dto: TaggedContextDto): string {
-	return dto.kind === "selection" ? "" : dto.path;
+	return dto.path;
 }
 
 /**
