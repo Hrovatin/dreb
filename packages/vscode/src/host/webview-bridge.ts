@@ -144,6 +144,11 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 			case "pick-file":
 				void controller.tagFileFromPicker();
 				return;
+			case "search-files":
+				void controller
+					.searchWorkspaceFiles(raw.query)
+					.then((results) => post({ type: "file-results", requestId: raw.requestId, results }));
+				return;
 			case "review-open-diff":
 				void controller.reviewOpenDiff(raw.path);
 				return;

@@ -173,6 +173,9 @@ export type HostToWebview =
 	| { type: "checkpoints"; checkpoints: Checkpoint[] }
 	/** The session branch tree, in response to a `show-tree` request (Phase 6). */
 	| { type: "tree"; tree: SessionTreeDto }
+	/** Results for an inline `@`-mention file search, matched to the request's
+	 * `requestId` so the webview can drop stale (out-of-order) responses. */
+	| { type: "file-results"; requestId: number; results: FileContextDto[] }
 	/** Pre-fill the composer (e.g. a user-message fork's re-ask text) (Phase 6). */
 	| { type: "composer-prefill"; text: string };
 
@@ -187,8 +190,11 @@ export type WebviewToHost =
 	| { type: "pick-model" }
 	/** Open the native thinking-level picker (header click). */
 	| { type: "pick-thinking" }
-	/** Open the native file/folder picker to tag context (composer `@`). */
+	/** Open the native file/folder picker to tag context (composer `@@`). */
 	| { type: "pick-file" }
+	/** Inline `@`-mention file search: the host replies with a `file-results`
+	 * message carrying the same `requestId` (composer typeahead dropdown). */
+	| { type: "search-files"; query: string; requestId: number }
 	/** Open the baseline→current diff for a reviewed file (indicator click). */
 	| { type: "review-open-diff"; path: string }
 	/** Accept all pending edits, clearing them from the change-review

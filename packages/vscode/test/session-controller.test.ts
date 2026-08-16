@@ -228,6 +228,8 @@ class FakeUi implements HostUi {
 	openReturn: string | undefined;
 	filesReturn: Array<{ fsPath: string; isDirectory: boolean }> | undefined;
 	filesCalls = 0;
+	searchReturn: Array<{ fsPath: string; isDirectory: boolean }> = [];
+	searchQueries: string[] = [];
 	async quickPick(items: HostUiPickItem[]): Promise<string | undefined> {
 		this.pickItems = items;
 		return this.pickReturn;
@@ -244,6 +246,10 @@ class FakeUi implements HostUi {
 	async pickWorkspaceFiles(): Promise<Array<{ fsPath: string; isDirectory: boolean }> | undefined> {
 		this.filesCalls += 1;
 		return this.filesReturn;
+	}
+	async searchWorkspaceFiles(query: string): Promise<Array<{ fsPath: string; isDirectory: boolean }>> {
+		this.searchQueries.push(query);
+		return this.searchReturn;
 	}
 }
 
@@ -516,6 +522,40 @@ describe("SessionController", () => {
 
 		expect(ui.filesCalls).toBe(1);
 		expect(updates.some((u) => u.kind === "tag-context")).toBe(false);
+	});
+
+	it("searchWorkspaceFiles returns workspace-relative, ranked, capped file DTOs", async () => {
+		const fake = new FakeClient();
+		const ui = new FakeUi();
+		// Deliberately unranked: the deeper path and the substring-only match must
+		// sort after the filename prefix match ("app.ts").
+		ui.searchReturn = [
+			{ fsPath: "/tmp/project/src/components/wrap.ts", isDirectory: false },
+			{ fsPath: "/tmp/project/src/app.ts", isDirectory: false },
+		];
+		const controller = makeController(fake, { ui });
+		await controller.start();
+
+		const results = await controller.searchWorkspaceFiles("app");
+
+		expect(ui.searchQueries).toEqual(["app"]);
+		expect(results).toEqual([{ kind: "file", path: "src/app.ts" }]);
+	});
+
+	it("searchWorkspaceFiles caps results to the mention limit", async () => {
+		const fake = new FakeClient();
+		const ui = new FakeUi();
+		ui.searchReturn = Array.from({ length: 25 }, (_, i) => ({
+			fsPath: `/tmp/project/src/mod${i}.ts`,
+			isDirectory: false,
+		}));
+		const controller = makeController(fake, { ui });
+		await controller.start();
+
+		const results = await controller.searchWorkspaceFiles("mod");
+
+		expect(results.length).toBe(10);
+		expect(results.every((r) => r.kind === "file")).toBe(true);
 	});
 
 	it("folds a file tag into the prompt as a path reference with no contents", async () => {

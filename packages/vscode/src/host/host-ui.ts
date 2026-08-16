@@ -36,6 +36,10 @@ export interface HostUi {
 	/** Show the native file/folder picker (multi-select) for tagging context;
 	 * resolves to the chosen files/folders, or undefined if dismissed. */
 	pickWorkspaceFiles(): Promise<PickedFile[] | undefined>;
+	/** Search workspace files for the inline `@`-mention typeahead. Returns
+	 * absolute file paths (files only) matching `query`, capped by the host. An
+	 * empty query returns a bounded set of workspace files. */
+	searchWorkspaceFiles(query: string): Promise<PickedFile[]>;
 }
 
 /** No-op HostUi: every prompt resolves to undefined (as if dismissed). Used as
@@ -56,5 +60,8 @@ export const noopHostUi: HostUi = {
 	},
 	async pickWorkspaceFiles() {
 		return undefined;
+	},
+	async searchWorkspaceFiles() {
+		return [];
 	},
 };

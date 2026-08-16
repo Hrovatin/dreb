@@ -13,6 +13,7 @@
  */
 
 import { formatSessionStats } from "../shared/format.js";
+import { MENTION_RESULT_CAP, rankFileResults } from "../shared/mention.js";
 import {
 	alignCheckpoints,
 	applyEvent,
@@ -23,6 +24,7 @@ import {
 	type TranscriptState,
 } from "../shared/projection.js";
 import type {
+	FileContextDto,
 	HostStatus,
 	OpenSourceRef,
 	ReviewFileDto,
@@ -761,6 +763,17 @@ export class SessionController {
 		for (const pick of picks) {
 			this.tagContext(buildFileContext({ fsPath: pick.fsPath, cwd: this.cwd, isDirectory: pick.isDirectory }));
 		}
+	}
+
+	/** Search workspace files for the inline `@`-mention typeahead dropdown.
+	 * Returns ready-to-tag `FileContextDto`s (workspace-relative paths built with
+	 * the session `cwd`, so a webview selection needs no further host round-trip),
+	 * ranked by relevance to `query` and capped. Stays vscode-free: the search is
+	 * injected via the `HostUi` port. */
+	async searchWorkspaceFiles(query: string): Promise<FileContextDto[]> {
+		const picks = await this.ui.searchWorkspaceFiles(query);
+		const results = picks.map((pick) => buildFileContext({ fsPath: pick.fsPath, cwd: this.cwd }));
+		return rankFileResults(results, query, MENTION_RESULT_CAP);
 	}
 
 	// ── Change review ──────────────────────────────────────────────────────

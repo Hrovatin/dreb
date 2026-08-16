@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { formatContextUsage, formatCost, formatModel, formatThinking } from "../shared/format.js";
+import { activeMention, isFullPickerTrigger, replaceMention } from "../shared/mention.js";
 import {
 	activitySummary,
 	applyEvent,
@@ -12,6 +13,7 @@ import {
 	type UiRequest,
 } from "../shared/projection.js";
 import type {
+	FileContextDto,
 	HostStatus,
 	OpenSourceRef,
 	ReviewStateDto,
@@ -45,6 +47,15 @@ export function App() {
 	// A composer pre-fill request (a user-message fork's re-ask text). Bumped
 	// `nonce` retriggers the effect even when the text repeats.
 	const [prefill, setPrefill] = createSignal<{ text: string; nonce: number }>();
+	// Inline `@`-mention file search (Phase 4c): results for the composer's
+	// typeahead dropdown, plus a monotonic request id so out-of-order host
+	// responses are dropped (only the latest query's results are shown).
+	const [fileResults, setFileResults] = createSignal<FileContextDto[]>([]);
+	let fileSearchId = 0;
+	const searchFiles = (query: string) => {
+		fileSearchId += 1;
+		postToHost({ type: "search-files", query, requestId: fileSearchId });
+	};
 	const [tick, setTick] = createSignal(0);
 
 	let scrollEl: HTMLDivElement | undefined;
@@ -83,6 +94,11 @@ export function App() {
 					break;
 				case "composer-prefill":
 					setPrefill((prev) => ({ text: msg.text, nonce: (prev?.nonce ?? 0) + 1 }));
+					break;
+				case "file-results":
+					// Drop stale (out-of-order) responses: only the latest query's
+					// results are shown in the typeahead dropdown.
+					if (msg.requestId === fileSearchId) setFileResults(msg.results);
 					break;
 			}
 			setTick((t) => t + 1);
@@ -237,6 +253,7 @@ export function App() {
 				commands={commands()}
 				attachments={attachments()}
 				prefill={prefill()}
+				fileResults={fileResults()}
 				onRemoveAttachment={(index) => setAttachments((current) => current.filter((_, i) => i !== index))}
 				onSubmit={(text) => {
 					postToHost({ type: "submit", text, attachments: attachments() });
@@ -244,6 +261,8 @@ export function App() {
 				}}
 				onAbort={() => postToHost({ type: "abort" })}
 				onPickFile={() => postToHost({ type: "pick-file" })}
+				onSearchFiles={searchFiles}
+				onTagFile={(context) => setAttachments((current) => [...current, context])}
 			/>
 		</div>
 	);
@@ -598,12 +617,23 @@ function Composer(props: {
 	commands: SlashCommandDto[];
 	attachments: TaggedContextDto[];
 	prefill?: { text: string; nonce: number };
+	fileResults: FileContextDto[];
 	onRemoveAttachment: (index: number) => void;
 	onSubmit: (text: string) => void;
 	onAbort: () => void;
 	onPickFile: () => void;
+	onSearchFiles: (query: string) => void;
+	onTagFile: (context: FileContextDto) => void;
 }) {
 	const [text, setText] = createSignal("");
+	// Caret position, tracked so the `@`-mention parser knows which token the user
+	// is editing (updated on input and on caret moves via keyboard/mouse).
+	const [caret, setCaret] = createSignal(0);
+	// Set true when the user dismisses the file dropdown (Escape); reset whenever
+	// the mention token changes so a fresh `@` re-opens it.
+	const [mentionClosed, setMentionClosed] = createSignal(false);
+	let inputEl: HTMLTextAreaElement | undefined;
+	let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
 	// Apply a host-driven pre-fill (a user-message fork's re-ask text). The
 	// `nonce` makes the effect retrigger even when the same text is sent twice.
@@ -619,15 +649,65 @@ function Composer(props: {
 		return props.commands.filter((c) => c.name.toLowerCase().startsWith(query)).slice(0, 8);
 	});
 
-	// Typing a lone `@` opens the native file/folder picker (Phase 4b) rather than
-	// entering the character — mirroring the `/` command affordance.
-	const onInput = (value: string) => {
-		if (value === "@") {
-			setText("");
+	// The `@`-mention token the caret is editing, if any (drives the file
+	// typeahead dropdown). Host results are already ranked + capped.
+	const mention = createMemo(() => activeMention(text(), caret()));
+	const fileMenuOpen = createMemo(() => mention() !== null && !mentionClosed() && props.fileResults.length > 0);
+
+	const scheduleSearch = (query: string) => {
+		if (searchTimer) clearTimeout(searchTimer);
+		searchTimer = setTimeout(() => props.onSearchFiles(query), 120);
+	};
+	onCleanup(() => {
+		if (searchTimer) clearTimeout(searchTimer);
+	});
+
+	// Composer input: handle `@@` escalation to the native picker, drive the
+	// inline `@` typeahead, and otherwise just track the text + caret.
+	const onInput = (el: HTMLTextAreaElement) => {
+		const value = el.value;
+		const pos = el.selectionStart ?? value.length;
+		// `@@` (at the start of a token) opens the full native file/folder picker,
+		// stripping the two `@` first (Phase 4b behavior, now the explicit trigger).
+		if (isFullPickerTrigger(value, pos)) {
+			const stripped = replaceMention(value, { start: pos - 2, end: pos }, "");
+			setText(stripped.text);
+			setCaret(stripped.caret);
+			restoreCaret(stripped.caret);
 			props.onPickFile();
 			return;
 		}
 		setText(value);
+		setCaret(pos);
+		const token = activeMention(value, pos);
+		if (token) {
+			setMentionClosed(false);
+			scheduleSearch(token.query);
+		}
+	};
+
+	// Keep the caret signal in sync when the user moves the caret without typing
+	// (arrow keys, clicking) so the mention parser stays accurate.
+	const syncCaret = (el: HTMLTextAreaElement) => setCaret(el.selectionStart ?? el.value.length);
+
+	const restoreCaret = (pos: number) => {
+		queueMicrotask(() => {
+			if (!inputEl) return;
+			inputEl.focus();
+			inputEl.setSelectionRange(pos, pos);
+		});
+	};
+
+	// Select a file from the inline dropdown: strip the `@query` token and tag the
+	// file as a composer chip (the host already built the workspace-relative DTO).
+	const selectFile = (context: FileContextDto) => {
+		const token = mention();
+		if (!token) return;
+		const stripped = replaceMention(text(), token, "");
+		setText(stripped.text);
+		setCaret(stripped.caret);
+		props.onTagFile(context);
+		restoreCaret(stripped.caret);
 	};
 
 	const submit = () => {
@@ -637,11 +717,18 @@ function Composer(props: {
 		if (value.trim().length === 0 && props.attachments.length === 0) return;
 		props.onSubmit(value);
 		setText("");
+		setCaret(0);
 	};
 
 	const pick = (name: string) => setText(`/${name} `);
 
 	const onKeyDown = (event: KeyboardEvent) => {
+		// Escape closes the file typeahead without submitting or losing text.
+		if (event.key === "Escape" && fileMenuOpen()) {
+			event.preventDefault();
+			setMentionClosed(true);
+			return;
+		}
 		if (event.key === "Enter" && !event.shiftKey) {
 			event.preventDefault();
 			submit();
@@ -659,6 +746,23 @@ function Composer(props: {
 								<Show when={command.description}>
 									<span class="dreb-menu-desc">{command.description}</span>
 								</Show>
+							</button>
+						)}
+					</For>
+				</div>
+			</Show>
+			<Show when={fileMenuOpen()}>
+				<div class="dreb-menu">
+					<For each={props.fileResults}>
+						{(file) => (
+							<button
+								type="button"
+								class="dreb-menu-item"
+								title={taggedContextTitle(file)}
+								onClick={() => selectFile(file)}
+							>
+								<span class="dreb-menu-name">@{taggedContextLabel(file)}</span>
+								<span class="dreb-menu-desc">{file.path}</span>
 							</button>
 						)}
 					</For>
@@ -687,12 +791,15 @@ function Composer(props: {
 			</Show>
 			<div class="dreb-composer-row">
 				<textarea
+					ref={inputEl}
 					class="dreb-input"
 					rows={2}
-					placeholder="Message dreb…  (/ for commands, @ for files)"
+					placeholder="Message dreb…  (/ for commands, @ for files, @@ for picker)"
 					value={text()}
-					onInput={(e) => onInput(e.currentTarget.value)}
+					onInput={(e) => onInput(e.currentTarget)}
 					onKeyDown={onKeyDown}
+					onKeyUp={(e) => syncCaret(e.currentTarget)}
+					onClick={(e) => syncCaret(e.currentTarget)}
 				/>
 				<Show
 					when={props.streaming}

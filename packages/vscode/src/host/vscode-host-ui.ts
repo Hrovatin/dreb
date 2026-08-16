@@ -68,7 +68,35 @@ export function createVscodeHostUi(): HostUi {
 				})),
 			);
 		},
+		async searchWorkspaceFiles(query: string): Promise<PickedFile[]> {
+			// Match anywhere in the path segment (`**/*query*`) so partial names
+			// filter as the user types; an empty query lists a bounded workspace set.
+			// `findFiles` respects `files.exclude`/`search.exclude` when the exclude
+			// arg is undefined. Fetch a generous cap; the webview ranks + trims.
+			const include = query.trim().length > 0 ? `**/*${escapeGlob(query.trim())}*` : "**/*";
+			const uris = await vscode.workspace.findFiles(include, undefined, SEARCH_FETCH_CAP);
+			// `findFiles` returns files only — never directories — so isDirectory is
+			// always false here (folders are added via the `@@` native picker).
+			return uris.map((uri) => ({ fsPath: uri.fsPath, isDirectory: false }));
+		},
 	};
+}
+
+/** Upper bound on files fetched per inline search before webview-side ranking. */
+const SEARCH_FETCH_CAP = 200;
+
+/** Escape glob metacharacters so a typed query is matched literally within the
+ * include pattern (a stray `{`, `[`, `*`, `?` would otherwise corrupt the glob).
+ * Path separators in the query are dropped to a single `*` wildcard. */
+function escapeGlob(query: string): string {
+	const special = new Set(["*", "?", "{", "}", "[", "]", "(", ")", "!", "+", "@"]);
+	let out = "";
+	for (const ch of query) {
+		if (ch === "/" || ch === "\\") out += "*";
+		else if (special.has(ch)) out += `\\${ch}`;
+		else out += ch;
+	}
+	return out;
 }
 
 /** Whether `uri` points at a directory (defaults to false when it can't be
