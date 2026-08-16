@@ -412,14 +412,26 @@ export class SessionController {
 		// event stream, so a resumed session would render a blank window. Fold the
 		// persisted branch in now (same path as restore/fork) so prior turns render
 		// immediately. Guarded on `sessionPath` so a brand-new session keeps
-		// populating from the live stream and doesn't fold on start. Best-effort: a
-		// rebuild failure logs and leaves an empty transcript rather than throwing
-		// out of `start()`.
+		// populating from the live stream and doesn't fold on start.
 		if (this.options.sessionPath) {
 			try {
 				await this.rebuildTranscript();
 			} catch (err) {
 				this.logger(`resume transcript rebuild failed: ${errorText(err)}`);
+				// A failure partway through the rebuild can leave a half-folded
+				// transcript (`foldBranchIntoState` clears items before repopulating).
+				// Reset to a clean empty state (and clear checkpoints) so the webview
+				// never shows a partial conversation, then resync so an already-live
+				// webview reflects that clean state. Finally surface a notice — parity
+				// with fork()/navigateTree() — so the user knows their prior turns are
+				// saved and will reload on reopen, rather than silently facing a blank
+				// window indistinguishable from a brand-new session. Best-effort: this
+				// never rethrows out of `start()`.
+				this.resetTranscriptState();
+				this.emitNotice(
+					"Couldn't restore the previous conversation — it's still saved and will reload when you reopen the chat.",
+				);
+				this.emit({ kind: "resync" });
 			}
 		}
 	}

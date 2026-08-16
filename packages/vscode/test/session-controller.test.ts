@@ -1454,6 +1454,8 @@ describe("SessionController resume (Phase 5 — rebuild transcript on start)", (
 		const fake = new FakeClient();
 		fake.treeResult = twoResponseTree();
 		const controller = makeController(fake, { sessionPath: "/abs/sess.jsonl" });
+		const updates: Array<{ kind: string }> = [];
+		controller.onUpdate((u) => updates.push(u as never));
 
 		await controller.start();
 
@@ -1464,6 +1466,11 @@ describe("SessionController resume (Phase 5 — rebuild transcript on start)", (
 		expect(
 			items.map((i) => (i.kind === "user" ? `u:${i.text}` : i.kind === "response" ? `a:${i.answer}` : i.text)),
 		).toEqual(["u:hi", "a:hello", "u:again", "a:world"]);
+		// The rebuild resyncs an already-live webview (finding 4) and realigns the
+		// inline restore/fork controls to the folded turns (finding 5) — keyed to
+		// the branch's assistant entries, with the current leaf non-restorable.
+		expect(updates.some((u) => u.kind === "resync")).toBe(true);
+		expect(controller.getCheckpoints().map((c) => `${c.entryId}:${c.canRestore}`)).toEqual(["a1:true", "a2:false"]);
 	});
 
 	it("does not fold on start for a brand-new session (no sessionPath)", async () => {
@@ -1479,15 +1486,29 @@ describe("SessionController resume (Phase 5 — rebuild transcript on start)", (
 		expect(controller.getTranscript().items).toEqual([]);
 	});
 
-	it("still connects when the resume rebuild fails (best-effort, no throw)", async () => {
+	it("resets to a clean state and notifies the user when the resume rebuild fails", async () => {
 		const fake = new FakeClient();
 		// getTree (invoked by rebuildTranscript) throws; start() must swallow it.
 		fake.callError = new Error("getTree boom");
 		const controller = makeController(fake, { sessionPath: "/abs/sess.jsonl" });
+		const updates: Array<{ kind: string }> = [];
+		controller.onUpdate((u) => updates.push(u as never));
 
 		await expect(controller.start()).resolves.toBeUndefined();
+
+		// Best-effort: the failure does not block startup — the session stays
+		// connected and usable.
 		expect(controller.getStatus().connected).toBe(true);
-		// The failed rebuild leaves an empty transcript rather than blocking startup.
+		// The transcript is reset to a clean empty state (no half-folded turns) and
+		// checkpoints are cleared, so the webview never shows a partial conversation
+		// (finding 3).
 		expect(controller.getTranscript().items).toEqual([]);
+		expect(controller.getCheckpoints()).toEqual([]);
+		// A resync pushes that clean state to an already-live webview...
+		expect(updates.some((u) => u.kind === "resync")).toBe(true);
+		// ...and the user is told the prior conversation is saved rather than facing
+		// a silent blank window indistinguishable from a brand-new session
+		// (finding 1).
+		expect(controller.getTranscript().statusText).toMatch(/still saved/i);
 	});
 });
