@@ -148,6 +148,19 @@ describe("RPC dashboard state/resources DTOs", () => {
 		}
 	});
 
+	it("reflects read-only Ask mode state in get_state data", () => {
+		const { session, cleanup } = createTestSession({ inMemory: true });
+		try {
+			expect(getStateForRpc(session).askModeEnabled).toBe(false);
+			session.setAskMode(true);
+			expect(getStateForRpc(session).askModeEnabled).toBe(true);
+			session.setAskMode(false);
+			expect(getStateForRpc(session).askModeEnabled).toBe(false);
+		} finally {
+			cleanup();
+		}
+	});
+
 	it("includes automatic retry activity in get_state data", () => {
 		const { session, cleanup } = createTestSession({ inMemory: true });
 		const retryingSession = session as unknown as {
@@ -536,6 +549,7 @@ describe("RpcClient dashboard command methods", () => {
 				followUpMode: "all",
 				sessionId: "session-1",
 				autoCompactionEnabled: false,
+				askModeEnabled: false,
 				messageCount: 0,
 				pendingMessageCount: 0,
 			},

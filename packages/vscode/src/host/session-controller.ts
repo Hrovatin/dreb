@@ -60,6 +60,7 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 interface RpcSessionStateLike {
 	model?: { provider: string; id: string; name?: string };
 	thinkingLevel?: string;
+	askModeEnabled?: boolean;
 	usingSubscription?: boolean;
 	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
 	sessionFile?: string;
@@ -96,6 +97,8 @@ export interface RpcClientLike {
 	prompt(message: string, images?: unknown[]): Promise<void>;
 	abort(): Promise<void>;
 	compact(customInstructions?: string): Promise<unknown>;
+	/** Toggle read-only Ask mode; resolves with the resulting state. */
+	setAskMode(enabled: boolean): Promise<{ enabled: boolean }>;
 	getCommands(): Promise<
 		Array<{
 			name: string;
@@ -503,6 +506,33 @@ export class SessionController {
 			case "compact":
 				await client.compact(arg);
 				return;
+			case "ask": {
+				const sub = arg?.trim().toLowerCase() ?? "";
+				let enable: boolean;
+				if (sub === "on") {
+					enable = true;
+				} else if (sub === "off") {
+					enable = false;
+				} else if (sub === "" || sub === "toggle") {
+					// Bare `/ask` (or `/ask toggle`) flips the current state.
+					const state = await client.getState();
+					enable = !state.askModeEnabled;
+				} else if (sub === "status") {
+					const state = await client.getState();
+					this.emitNotice(`Read-only Ask mode is currently ${state.askModeEnabled ? "ON" : "OFF"}.`);
+					return;
+				} else {
+					this.emitNotice("Usage: /ask [on | off | status] (bare /ask toggles).");
+					return;
+				}
+				const { enabled } = await client.setAskMode(enable);
+				this.emitNotice(
+					enabled
+						? "Read-only Ask mode ON — edits/writes disabled, no shell (use the typed read-only git tool), subagents limited to read-only agents. Use /ask off to exit."
+						: "Read-only Ask mode OFF — normal tools restored.",
+				);
+				return;
+			}
 			case "model":
 				await this.pickModel();
 				return;

@@ -26,6 +26,7 @@ class FakeClient implements RpcClientLike {
 	state: {
 		model?: { provider: string; id: string; name?: string };
 		thinkingLevel?: string;
+		askModeEnabled?: boolean;
 		usingSubscription?: boolean;
 		contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
 		sessionFile?: string;
@@ -109,6 +110,15 @@ class FakeClient implements RpcClientLike {
 		if (this.callError) throw this.callError;
 		this.compactions.push(customInstructions);
 		return {};
+	}
+	// Ask mode (read-only). Tracks each requested value; mirrors the RPC verb by
+	// updating `state.askModeEnabled` and returning the resulting state.
+	askModeCalls: boolean[] = [];
+	async setAskMode(enabled: boolean): Promise<{ enabled: boolean }> {
+		if (this.callError) throw this.callError;
+		this.askModeCalls.push(enabled);
+		this.state.askModeEnabled = enabled;
+		return { enabled };
 	}
 	async getCommands() {
 		return this.commandsResult;
@@ -387,6 +397,54 @@ describe("SessionController", () => {
 
 		expect(fake.prompts).toEqual(["hello"]);
 		expect(fake.compactions).toEqual(["now"]);
+	});
+
+	it("/ask on and /ask off toggle read-only Ask mode over RPC", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("/ask on");
+		expect(fake.askModeCalls).toEqual([true]);
+		expect(controller.getTranscript().statusText).toMatch(/Ask mode ON/);
+
+		await controller.submit("/ask off");
+		expect(fake.askModeCalls).toEqual([true, false]);
+		expect(controller.getTranscript().statusText).toMatch(/Ask mode OFF/);
+	});
+
+	it("bare /ask toggles based on the current state", async () => {
+		const fake = new FakeClient();
+		fake.state = { askModeEnabled: false };
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("/ask");
+		expect(fake.askModeCalls).toEqual([true]);
+
+		await controller.submit("/ask");
+		expect(fake.askModeCalls).toEqual([true, false]);
+	});
+
+	it("/ask status reports the current state without changing it", async () => {
+		const fake = new FakeClient();
+		fake.state = { askModeEnabled: true };
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("/ask status");
+		expect(fake.askModeCalls).toEqual([]);
+		expect(controller.getTranscript().statusText).toMatch(/currently ON/);
+	});
+
+	it("/ask with an invalid argument shows usage and does not toggle", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("/ask bogus");
+		expect(fake.askModeCalls).toEqual([]);
+		expect(controller.getTranscript().statusText).toMatch(/Usage: \/ask/);
 	});
 
 	it("folds tagged attachments into the prompt as located context", async () => {

@@ -55,6 +55,19 @@ describe("toRpcSessionInfo", () => {
 });
 
 describe("RPC session commands", () => {
+	it("RpcClient.setAskMode sends the set_ask_mode command and unwraps the resulting state", async () => {
+		const client = new RpcClient() as any;
+		client.send = vi.fn().mockResolvedValue({
+			type: "response",
+			command: "set_ask_mode",
+			success: true,
+			data: { enabled: true },
+		});
+
+		await expect(client.setAskMode(true)).resolves.toEqual({ enabled: true });
+		expect(client.send).toHaveBeenCalledWith({ type: "set_ask_mode", enabled: true });
+	});
+
 	it("RpcClient.listAllSessions sends the list_all_sessions command and unwraps sessions", async () => {
 		const client = new RpcClient() as any;
 		const sessions: RpcSessionInfo[] = [
