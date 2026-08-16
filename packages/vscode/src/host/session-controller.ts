@@ -13,6 +13,7 @@
  */
 
 import { formatSessionStats } from "../shared/format.js";
+import { MENTION_RESULT_CAP, rankMentionResults } from "../shared/mention.js";
 import {
 	alignCheckpoints,
 	applyEvent,
@@ -34,7 +35,7 @@ import type {
 	UiResponse,
 } from "../shared/protocol.js";
 import { deriveSessionStatus, type SessionRunState } from "../shared/session-list.js";
-import { buildFileContext, buildPromptWithContext } from "../shared/tagged-context.js";
+import { buildFileContext, buildPromptWithContext, buildSymbolContext } from "../shared/tagged-context.js";
 import { hunkIndexForLine, parseFileDiff } from "./diff-hunks.js";
 import {
 	baselineContent,
@@ -820,6 +821,28 @@ export class SessionController {
 		for (const pick of picks) {
 			this.tagContext(buildFileContext({ fsPath: pick.fsPath, cwd: this.cwd, isDirectory: pick.isDirectory }));
 		}
+	}
+
+	/** Search the workspace for the inline `@`-mention typeahead dropdown. Returns
+	 * ready-to-tag `TaggedContextDto`s (folders, files, and code symbols, with
+	 * workspace-relative paths built from the session `cwd` so a webview selection
+	 * needs no further host round-trip), ranked by kind then relevance to `query`
+	 * and capped. Stays vscode-free: the search is injected via the `HostUi` port. */
+	async searchWorkspace(query: string): Promise<TaggedContextDto[]> {
+		const hits = await this.ui.searchWorkspace(query);
+		const results: TaggedContextDto[] = hits.map((hit) => {
+			if (hit.kind === "symbol") {
+				return buildSymbolContext({
+					fsPath: hit.fsPath,
+					cwd: this.cwd,
+					name: hit.name,
+					symbolKind: hit.symbolKind,
+					line: hit.line,
+				});
+			}
+			return buildFileContext({ fsPath: hit.fsPath, cwd: this.cwd, isDirectory: hit.kind === "folder" });
+		});
+		return rankMentionResults(results, query, MENTION_RESULT_CAP);
 	}
 
 	// ── Change review ──────────────────────────────────────────────────────

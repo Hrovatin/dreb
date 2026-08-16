@@ -112,10 +112,27 @@ export interface FileContextDto {
 	isDirectory?: boolean;
 }
 
-/** A context attachment tagged into the chat: an editor selection or a
- * file/folder reference. Carried across the host↔webview boundary and folded
- * into the next prompt. */
-export type TaggedContextDto = SelectionContextDto | FileContextDto;
+/** A code symbol (class / function / method / …) tagged into the chat via the
+ * inline `@` picker (Phase 4c). Shown as a removable composer chip and folded
+ * into the next prompt as a **located reference** (path + line + symbol name)
+ * so the agent can jump straight to the definition — never the body text. */
+export interface SymbolContextDto {
+	kind: "symbol";
+	/** Symbol name, e.g. "SessionController" or "handleClick". */
+	name: string;
+	/** Human-readable kind label, e.g. "class", "function", "method". */
+	symbolKind: string;
+	/** Workspace-relative path (forward slashes) of the file that defines the
+	 * symbol, or the absolute path when it lives outside the workspace. */
+	path: string;
+	/** 1-based line of the symbol's definition. */
+	line: number;
+}
+
+/** A context attachment tagged into the chat: an editor selection, a file/folder
+ * reference, or a code symbol. Carried across the host↔webview boundary and
+ * folded into the next prompt. */
+export type TaggedContextDto = SelectionContextDto | FileContextDto | SymbolContextDto;
 
 /** A clickable code reference the user activated in an answer (Phase 5b). Either
  * a concrete file `path` (optionally with a 1-based `line`/`column`), a `symbol`
@@ -173,6 +190,10 @@ export type HostToWebview =
 	| { type: "checkpoints"; checkpoints: Checkpoint[] }
 	/** The session branch tree, in response to a `show-tree` request (Phase 6). */
 	| { type: "tree"; tree: SessionTreeDto }
+	/** Results for an inline `@`-mention workspace search, matched to the
+	 * request's `requestId` so the webview can drop stale (out-of-order)
+	 * responses. Mixes folders, files, and code symbols (in that order). */
+	| { type: "mention-results"; requestId: number; results: TaggedContextDto[] }
 	/** Pre-fill the composer (e.g. a user-message fork's re-ask text) (Phase 6). */
 	| { type: "composer-prefill"; text: string };
 
@@ -187,8 +208,12 @@ export type WebviewToHost =
 	| { type: "pick-model" }
 	/** Open the native thinking-level picker (header click). */
 	| { type: "pick-thinking" }
-	/** Open the native file/folder picker to tag context (composer `@`). */
+	/** Open the native file/folder picker to tag context (composer `@@`). */
 	| { type: "pick-file" }
+	/** Inline `@`-mention workspace search: the host replies with a
+	 * `mention-results` message carrying the same `requestId` (composer typeahead
+	 * dropdown of folders, files, and code symbols). */
+	| { type: "search-workspace"; query: string; requestId: number }
 	/** Open the baseline→current diff for a reviewed file (indicator click). */
 	| { type: "review-open-diff"; path: string }
 	/** Accept all pending edits, clearing them from the change-review
