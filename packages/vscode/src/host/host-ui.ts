@@ -24,6 +24,14 @@ export interface PickedFile {
 	isDirectory: boolean;
 }
 
+/** One hit from the inline `@`-mention workspace search: a folder, a file, or a
+ * code symbol (class/function/method). Absolute `fsPath`s so the controller can
+ * relativize them against the session cwd. */
+export type WorkspaceSearchResult =
+	| { kind: "folder"; fsPath: string }
+	| { kind: "file"; fsPath: string }
+	| { kind: "symbol"; name: string; symbolKind: string; fsPath: string; line: number };
+
 export interface HostUi {
 	/** Show a quick pick; resolves to the chosen item's `value`, or undefined if dismissed. */
 	quickPick(items: HostUiPickItem[], options?: { placeholder?: string }): Promise<string | undefined>;
@@ -36,6 +44,10 @@ export interface HostUi {
 	/** Show the native file/folder picker (multi-select) for tagging context;
 	 * resolves to the chosen files/folders, or undefined if dismissed. */
 	pickWorkspaceFiles(): Promise<PickedFile[] | undefined>;
+	/** Search the workspace for the inline `@`-mention typeahead. Returns folders,
+	 * files, and code symbols matching `query`, capped by the host. An empty query
+	 * returns a bounded set of workspace files (folders/symbols need a query). */
+	searchWorkspace(query: string): Promise<WorkspaceSearchResult[]>;
 }
 
 /** No-op HostUi: every prompt resolves to undefined (as if dismissed). Used as
@@ -56,5 +68,8 @@ export const noopHostUi: HostUi = {
 	},
 	async pickWorkspaceFiles() {
 		return undefined;
+	},
+	async searchWorkspace() {
+		return [];
 	},
 };

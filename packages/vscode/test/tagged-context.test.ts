@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { FileContextDto, SelectionContextDto } from "../src/shared/protocol.js";
+import type { FileContextDto, SelectionContextDto, SymbolContextDto } from "../src/shared/protocol.js";
 import {
 	buildFileContext,
 	buildPromptWithContext,
+	buildSymbolContext,
 	buildTaggedContext,
 	formatTaggedContext,
 	MAX_INLINE_SELECTION_CHARS,
@@ -90,6 +91,36 @@ describe("buildFileContext", () => {
 	});
 });
 
+describe("buildSymbolContext", () => {
+	it("relativizes the defining file path and carries name/kind/line", () => {
+		const dto = buildSymbolContext({
+			fsPath: "/home/me/proj/src/host/session-controller.ts",
+			cwd: "/home/me/proj",
+			name: "SessionController",
+			symbolKind: "class",
+			line: 42,
+		});
+		expect(dto).toEqual({
+			kind: "symbol",
+			name: "SessionController",
+			symbolKind: "class",
+			path: "src/host/session-controller.ts",
+			line: 42,
+		});
+	});
+
+	it("uses the absolute path for a symbol defined outside the workspace", () => {
+		const dto = buildSymbolContext({
+			fsPath: "/usr/lib/node_modules/x/index.d.ts",
+			cwd: "/home/me/proj",
+			name: "Widget",
+			symbolKind: "interface",
+			line: 7,
+		});
+		expect(dto.path).toBe("/usr/lib/node_modules/x/index.d.ts");
+	});
+});
+
 describe("taggedContextLabel", () => {
 	const base: SelectionContextDto = {
 		kind: "selection",
@@ -115,6 +146,18 @@ describe("taggedContextLabel", () => {
 	it("shows a trailing slash for a folder tag", () => {
 		expect(taggedContextLabel({ kind: "file", path: "src/host", isDirectory: true })).toBe("host/");
 	});
+
+	it("shows the symbol name for a symbol tag", () => {
+		expect(
+			taggedContextLabel({
+				kind: "symbol",
+				name: "handleClick",
+				symbolKind: "function",
+				path: "src/ui.ts",
+				line: 3,
+			}),
+		).toBe("handleClick");
+	});
 });
 
 describe("taggedContextTitle", () => {
@@ -134,6 +177,12 @@ describe("taggedContextTitle", () => {
 	it("shows the path for a file and a (directory) note for a folder", () => {
 		expect(taggedContextTitle({ kind: "file", path: "src/app.ts" })).toBe("src/app.ts");
 		expect(taggedContextTitle({ kind: "file", path: "src/host", isDirectory: true })).toBe("src/host/ (directory)");
+	});
+
+	it("shows name, kind, and location for a symbol", () => {
+		expect(
+			taggedContextTitle({ kind: "symbol", name: "AppRunner", symbolKind: "class", path: "src/app.ts", line: 12 }),
+		).toBe("AppRunner — class in src/app.ts:12");
 	});
 });
 
@@ -209,6 +258,17 @@ describe("formatTaggedContext", () => {
 	it("folds an out-of-workspace file tag as its absolute path (unambiguous)", () => {
 		expect(formatTaggedContext({ kind: "file", path: "/etc/hosts" })).toBe("`/etc/hosts`");
 	});
+
+	it("folds a symbol tag as a located reference (path:line + kind + name), never the body", () => {
+		const out = formatTaggedContext({
+			kind: "symbol",
+			name: "handleClick",
+			symbolKind: "function",
+			path: "src/ui/button.ts",
+			line: 12,
+		});
+		expect(out).toBe("`src/ui/button.ts:12` (function `handleClick`)");
+	});
 });
 
 describe("buildPromptWithContext", () => {
@@ -222,6 +282,7 @@ describe("buildPromptWithContext", () => {
 	};
 	const file: FileContextDto = { kind: "file", path: "src/app.ts" };
 	const dir: FileContextDto = { kind: "file", path: "src", isDirectory: true };
+	const sym: SymbolContextDto = { kind: "symbol", name: "run", symbolKind: "function", path: "src/app.ts", line: 8 };
 
 	it("returns the text unchanged when there are no attachments", () => {
 		expect(buildPromptWithContext("hello", [])).toBe("hello");
@@ -235,6 +296,12 @@ describe("buildPromptWithContext", () => {
 	it("folds mixed selection + file + folder tags then the text", () => {
 		const out = buildPromptWithContext("compare", [sel, file, dir]);
 		expect(out).toBe("`a.ts` (line 1):\n```ts\nA\n```\n\n`src/app.ts`\n\n`src/` (directory)\n\ncompare");
+	});
+
+	it("folds a symbol tag as a located reference before the text", () => {
+		expect(buildPromptWithContext("what does this do?", [sym])).toBe(
+			"`src/app.ts:8` (function `run`)\n\nwhat does this do?",
+		);
 	});
 
 	it("returns just the blocks when the text is empty", () => {

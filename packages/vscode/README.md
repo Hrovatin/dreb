@@ -26,6 +26,7 @@ src/
     sessions-view-model.ts sidebar list-building + action routing (pure, vscode-free, tested)
     sessions-view.ts    the `dreb.sessions` WebviewView glue (postMessage transport + HTML shell)
     tag-selection.ts    tag-selection-into-chat orchestration (pure, vscode-free, tested)
+    workspace-search.ts @-typeahead pure helpers — folder ancestor-walk (workspace-boundary guarded) + structural-symbol filtering (vscode-free, tested)
     host-ui.ts          native-prompt port (quick pick / input / dialogs); vscode-free
     vscode-host-ui.ts   the real `HostUi` backed by `vscode.window`
     git-snapshot.ts     per-turn baseline capture + diff + `git apply -R` (pure node, tested)
@@ -37,7 +38,8 @@ src/
     vscode-source-link-ui.ts the real `SourceLinkUi` (open file / resolve symbol → definition)
   shared/
     format.ts           status-header + `/session` display formatters (pure, tested)
-    tagged-context.ts   selection + file/folder context DTOs, chip label, prompt fold + threshold (pure, tested)
+    tagged-context.ts   selection + file/folder/symbol context DTOs, chip label, prompt fold + threshold (pure, tested)
+    mention.ts          `@`/`@@` composer trigger parsing, glob escaping, and typeahead result ranking (pure, tested)
     session-list.ts     disk+live session reconciliation, grouping, deterministic ordering, status (pure, tested)
     sidebar-protocol.ts host ↔ sessions-sidebar message envelopes (no @dreb import)
   webview/       # SolidJS UI — bundled with Vite → dist/webview (chat) + dist/webview-sidebar (sessions)
@@ -113,11 +115,13 @@ Tag context into the chat as removable chips. Two kinds of context can be tagged
 
 **Editor selection.** Select any range (a whole line or part of one) and run **dreb: Add Selection to Chat** — from the command palette or the editor right-click menu (shown only when there is a selection, `when: editorHasSelection`). The selection is added as a **removable chip** labelled `basename:line` (or `basename:start-end`). On send, a small selection is folded into the prompt as a located, fenced code block (workspace-relative path + line range) so the agent knows exactly where the code came from. A **large** selection (over `MAX_INLINE_SELECTION_LINES` = 40 lines, or `MAX_INLINE_SELECTION_CHARS` = 2000 characters) instead folds as a `` `path` (lines a-b) `` reference only, to keep the prompt short. The selection is captured **at tag time** (a pre-resolved snapshot, not a lazy reference).
 
-**File / folder.** Type `@` in the composer to open the native VS Code file/folder picker (`showOpenDialog` with files and folders selectable, multi-select). Each chosen path is added as a **removable chip** (`basename`, or `basename/` for a folder). On send, a file/folder tag folds into the prompt as a **path reference only — never the contents** (e.g. `` `src/app.ts` `` or `` `src/host/` (directory) ``), so the agent can open and explore it as needed without bloating the prompt. Paths are workspace-relative when the pick is inside the workspace; the workspace root itself folds as `` `./` (directory) ``, and a pick outside the workspace uses its **absolute** path so the reference stays unambiguous (rather than a bare basename that could collide with a same-named file under the workspace).
+**File / folder / symbol.** Type `@` in the composer to open an **inline typeahead** that filters the workspace as you keep typing — matching **folders**, **files**, and code **symbols** (classes/functions/methods/…), ordered folders → files → symbols. Pick an entry to add it as a chip. Type `@@` instead to open the full **native** VS Code file/folder picker (`showOpenDialog` with files and folders selectable, multi-select) for cases the typeahead doesn't surface. Each chosen entry is added as a **removable chip** (`basename`, `basename/` for a folder, or the symbol name). On send, a file/folder tag folds into the prompt as a **path reference only — never the contents** (e.g. `` `src/app.ts` `` or `` `src/host/` (directory) ``), so the agent can open and explore it as needed without bloating the prompt. Paths are workspace-relative when the pick is inside the workspace; the workspace root itself folds as `` `./` (directory) ``, and a pick outside the workspace uses its **absolute** path so the reference stays unambiguous (rather than a bare basename that could collide with a same-named file under the workspace).
+
+The typeahead search runs host-side (debounced, capped, and ranked by filename-prefix match): folders come from `findFiles` ancestors constrained to the open workspace roots, files from `findFiles`, and symbols from the workspace symbol provider — each source degrades independently, so a failing source just drops its own rows rather than emptying the dropdown.
 
 dreb's agent accepts text + images only, so there is no separate structured-context channel: all tags are folded into the prompt text. Sending with only chips and no typed text is allowed. Tagging with no chat open opens one first, then attaches.
 
-The pure DTO builders, chip label/title, threshold logic, and prompt formatter are unit-tested in `shared/tagged-context.ts`; the selection command orchestration lives in the vscode-free `host/tag-selection.ts`; the file picker is driven through the `HostUi` port (`pickWorkspaceFiles`), so the controller stays vscode-free. Delivery to the composer is queued until the webview is `ready` so tagging into a freshly opened chat still lands.
+The pure DTO builders, chip label/title, threshold logic, and prompt formatter are unit-tested in `shared/tagged-context.ts`; the selection command orchestration lives in the vscode-free `host/tag-selection.ts`; the native picker and the typeahead search are driven through the `HostUi` port (`pickWorkspaceFiles`, `searchWorkspace`), so the controller stays vscode-free. The typeahead's pure derivation logic (folder ancestor-walk with workspace-boundary guard, structural-symbol filtering) lives in `host/workspace-search.ts` and the `@`/`@@` trigger parsing in `shared/mention.ts` — both vscode-free and unit-tested. Delivery to the composer is queued until the webview is `ready` so tagging into a freshly opened chat still lands.
 
 
 ## Clickable code links
