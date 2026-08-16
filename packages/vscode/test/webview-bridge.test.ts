@@ -281,30 +281,51 @@ describe("connectWebview", () => {
 		expect(tagFileFromPicker).toHaveBeenCalledTimes(1);
 	});
 
-	it("routes search-files to the controller and posts file-results with the same requestId", async () => {
+	it("routes search-workspace to the controller and posts mention-results with the same requestId", async () => {
 		const fake = new BridgeFakeClient();
 		const controller = await makeController(fake);
 		const results = [
 			{ kind: "file" as const, path: "src/app.ts" },
 			{ kind: "file" as const, path: "src/host.ts" },
 		];
-		const search = vi.spyOn(controller, "searchWorkspaceFiles").mockResolvedValue(results);
+		const search = vi.spyOn(controller, "searchWorkspace").mockResolvedValue(results);
 
 		const { webview, posted, send } = makeWebview();
 		connectWebview(webview as any, controller);
 
-		send({ type: "search-files", query: "app", requestId: 7 });
+		send({ type: "search-workspace", query: "app", requestId: 7 });
 		// Let the mocked promise resolve.
 		await Promise.resolve();
 		await Promise.resolve();
 
 		expect(search).toHaveBeenCalledWith("app");
-		const fileResults = posted.find((m) => m.type === "file-results") as
-			| Extract<HostToWebview, { type: "file-results" }>
+		const mentionResults = posted.find((m) => m.type === "mention-results") as
+			| Extract<HostToWebview, { type: "mention-results" }>
 			| undefined;
-		expect(fileResults).toBeDefined();
-		expect(fileResults?.requestId).toBe(7);
-		expect(fileResults?.results).toEqual(results);
+		expect(mentionResults).toBeDefined();
+		expect(mentionResults?.requestId).toBe(7);
+		expect(mentionResults?.results).toEqual(results);
+	});
+
+	it("posts empty mention-results (same requestId) when the workspace search rejects", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		vi.spyOn(controller, "searchWorkspace").mockRejectedValue(new Error("findFiles failed"));
+
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+
+		send({ type: "search-workspace", query: "app", requestId: 9 });
+		// Let the rejected promise settle through the .catch.
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const mentionResults = posted.find((m) => m.type === "mention-results") as
+			| Extract<HostToWebview, { type: "mention-results" }>
+			| undefined;
+		expect(mentionResults).toBeDefined();
+		expect(mentionResults?.requestId).toBe(9);
+		expect(mentionResults?.results).toEqual([]);
 	});
 
 	it("routes an open-source message to the controller with the parsed ref", async () => {

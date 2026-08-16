@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { HostUi, HostUiPickItem } from "../src/host/host-ui.js";
+import type { HostUi, HostUiPickItem, WorkspaceSearchResult } from "../src/host/host-ui.js";
 import { type RpcClientLike, SessionController } from "../src/host/session-controller.js";
 import type { SourceLinkUi } from "../src/host/source-link-ui.js";
 import type { OpenSourceRef, SessionTreeNodeDto } from "../src/shared/protocol.js";
@@ -228,7 +228,7 @@ class FakeUi implements HostUi {
 	openReturn: string | undefined;
 	filesReturn: Array<{ fsPath: string; isDirectory: boolean }> | undefined;
 	filesCalls = 0;
-	searchReturn: Array<{ fsPath: string; isDirectory: boolean }> = [];
+	searchReturn: WorkspaceSearchResult[] = [];
 	searchQueries: string[] = [];
 	async quickPick(items: HostUiPickItem[]): Promise<string | undefined> {
 		this.pickItems = items;
@@ -247,7 +247,7 @@ class FakeUi implements HostUi {
 		this.filesCalls += 1;
 		return this.filesReturn;
 	}
-	async searchWorkspaceFiles(query: string): Promise<Array<{ fsPath: string; isDirectory: boolean }>> {
+	async searchWorkspace(query: string): Promise<WorkspaceSearchResult[]> {
 		this.searchQueries.push(query);
 		return this.searchReturn;
 	}
@@ -524,35 +524,77 @@ describe("SessionController", () => {
 		expect(updates.some((u) => u.kind === "tag-context")).toBe(false);
 	});
 
-	it("searchWorkspaceFiles returns workspace-relative, ranked, capped file DTOs", async () => {
+	it("searchWorkspace returns workspace-relative, ranked, capped file DTOs", async () => {
 		const fake = new FakeClient();
 		const ui = new FakeUi();
 		// Deliberately unranked: the deeper path and the substring-only match must
 		// sort after the filename prefix match ("app.ts").
 		ui.searchReturn = [
-			{ fsPath: "/tmp/project/src/components/wrap.ts", isDirectory: false },
-			{ fsPath: "/tmp/project/src/app.ts", isDirectory: false },
+			{ kind: "file", fsPath: "/tmp/project/src/components/wrap.ts" },
+			{ kind: "file", fsPath: "/tmp/project/src/app.ts" },
 		];
 		const controller = makeController(fake, { ui });
 		await controller.start();
 
-		const results = await controller.searchWorkspaceFiles("app");
+		const results = await controller.searchWorkspace("app");
 
 		expect(ui.searchQueries).toEqual(["app"]);
 		expect(results).toEqual([{ kind: "file", path: "src/app.ts" }]);
 	});
 
-	it("searchWorkspaceFiles caps results to the mention limit", async () => {
+	it("searchWorkspace orders folders, then files, then symbols", async () => {
+		const fake = new FakeClient();
+		const ui = new FakeUi();
+		ui.searchReturn = [
+			{ kind: "symbol", name: "AppRunner", symbolKind: "class", fsPath: "/tmp/project/src/app.ts", line: 4 },
+			{ kind: "file", fsPath: "/tmp/project/src/app.ts" },
+			{ kind: "folder", fsPath: "/tmp/project/src/app" },
+		];
+		const controller = makeController(fake, { ui });
+		await controller.start();
+
+		const results = await controller.searchWorkspace("app");
+
+		expect(results).toEqual([
+			{ kind: "file", path: "src/app", isDirectory: true },
+			{ kind: "file", path: "src/app.ts" },
+			{ kind: "symbol", name: "AppRunner", symbolKind: "class", path: "src/app.ts", line: 4 },
+		]);
+	});
+
+	it("searchWorkspace builds a workspace-relative symbol DTO from an absolute hit", async () => {
+		const fake = new FakeClient();
+		const ui = new FakeUi();
+		ui.searchReturn = [
+			{
+				kind: "symbol",
+				name: "handleClick",
+				symbolKind: "function",
+				fsPath: "/tmp/project/src/ui/button.ts",
+				line: 12,
+			},
+		];
+		const controller = makeController(fake, { ui });
+		await controller.start();
+
+		const results = await controller.searchWorkspace("handle");
+
+		expect(results).toEqual([
+			{ kind: "symbol", name: "handleClick", symbolKind: "function", path: "src/ui/button.ts", line: 12 },
+		]);
+	});
+
+	it("searchWorkspace caps results to the mention limit", async () => {
 		const fake = new FakeClient();
 		const ui = new FakeUi();
 		ui.searchReturn = Array.from({ length: 25 }, (_, i) => ({
+			kind: "file" as const,
 			fsPath: `/tmp/project/src/mod${i}.ts`,
-			isDirectory: false,
 		}));
 		const controller = makeController(fake, { ui });
 		await controller.start();
 
-		const results = await controller.searchWorkspaceFiles("mod");
+		const results = await controller.searchWorkspace("mod");
 
 		expect(results.length).toBe(10);
 		expect(results.every((r) => r.kind === "file")).toBe(true);

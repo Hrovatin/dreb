@@ -144,10 +144,14 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 			case "pick-file":
 				void controller.tagFileFromPicker();
 				return;
-			case "search-files":
+			case "search-workspace":
+				// Fire-and-forget: post the results on success, or an empty set on
+				// failure so the dropdown degrades gracefully instead of leaking an
+				// unhandled rejection (findFiles/symbol-provider can reject).
 				void controller
-					.searchWorkspaceFiles(raw.query)
-					.then((results) => post({ type: "file-results", requestId: raw.requestId, results }));
+					.searchWorkspace(raw.query)
+					.then((results) => post({ type: "mention-results", requestId: raw.requestId, results }))
+					.catch(() => post({ type: "mention-results", requestId: raw.requestId, results: [] }));
 				return;
 			case "review-open-diff":
 				void controller.reviewOpenDiff(raw.path);

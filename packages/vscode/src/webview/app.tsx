@@ -13,7 +13,6 @@ import {
 	type UiRequest,
 } from "../shared/projection.js";
 import type {
-	FileContextDto,
 	HostStatus,
 	OpenSourceRef,
 	ReviewStateDto,
@@ -47,14 +46,15 @@ export function App() {
 	// A composer pre-fill request (a user-message fork's re-ask text). Bumped
 	// `nonce` retriggers the effect even when the text repeats.
 	const [prefill, setPrefill] = createSignal<{ text: string; nonce: number }>();
-	// Inline `@`-mention file search (Phase 4c): results for the composer's
-	// typeahead dropdown, plus a monotonic request id so out-of-order host
-	// responses are dropped (only the latest query's results are shown).
-	const [fileResults, setFileResults] = createSignal<FileContextDto[]>([]);
-	let fileSearchId = 0;
-	const searchFiles = (query: string) => {
-		fileSearchId += 1;
-		postToHost({ type: "search-files", query, requestId: fileSearchId });
+	// Inline `@`-mention workspace search (Phase 4c): results for the composer's
+	// typeahead dropdown (folders, files, then code symbols), plus a monotonic
+	// request id so out-of-order host responses are dropped (only the latest
+	// query's results are shown).
+	const [mentionResults, setMentionResults] = createSignal<TaggedContextDto[]>([]);
+	let mentionSearchId = 0;
+	const searchWorkspace = (query: string) => {
+		mentionSearchId += 1;
+		postToHost({ type: "search-workspace", query, requestId: mentionSearchId });
 	};
 	const [tick, setTick] = createSignal(0);
 
@@ -95,10 +95,10 @@ export function App() {
 				case "composer-prefill":
 					setPrefill((prev) => ({ text: msg.text, nonce: (prev?.nonce ?? 0) + 1 }));
 					break;
-				case "file-results":
+				case "mention-results":
 					// Drop stale (out-of-order) responses: only the latest query's
 					// results are shown in the typeahead dropdown.
-					if (msg.requestId === fileSearchId) setFileResults(msg.results);
+					if (msg.requestId === mentionSearchId) setMentionResults(msg.results);
 					break;
 			}
 			setTick((t) => t + 1);
@@ -253,7 +253,7 @@ export function App() {
 				commands={commands()}
 				attachments={attachments()}
 				prefill={prefill()}
-				fileResults={fileResults()}
+				mentionResults={mentionResults()}
 				onRemoveAttachment={(index) => setAttachments((current) => current.filter((_, i) => i !== index))}
 				onSubmit={(text) => {
 					postToHost({ type: "submit", text, attachments: attachments() });
@@ -261,8 +261,8 @@ export function App() {
 				}}
 				onAbort={() => postToHost({ type: "abort" })}
 				onPickFile={() => postToHost({ type: "pick-file" })}
-				onSearchFiles={searchFiles}
-				onTagFile={(context) => setAttachments((current) => [...current, context])}
+				onSearchWorkspace={searchWorkspace}
+				onTagContext={(context) => setAttachments((current) => [...current, context])}
 			/>
 		</div>
 	);
@@ -612,18 +612,21 @@ function AskResponse(props: { request: UiRequest; onRespond: (response: UiRespon
 	);
 }
 
-function Composer(props: {
+/** The message composer: text input plus the `/`-command and inline `@`-mention
+ * dropdowns. Exported for component tests (`composer.test.tsx`) that drive the
+ * `@`/`@@` typeahead orchestration directly. */
+export function Composer(props: {
 	streaming: boolean;
 	commands: SlashCommandDto[];
 	attachments: TaggedContextDto[];
 	prefill?: { text: string; nonce: number };
-	fileResults: FileContextDto[];
+	mentionResults: TaggedContextDto[];
 	onRemoveAttachment: (index: number) => void;
 	onSubmit: (text: string) => void;
 	onAbort: () => void;
 	onPickFile: () => void;
-	onSearchFiles: (query: string) => void;
-	onTagFile: (context: FileContextDto) => void;
+	onSearchWorkspace: (query: string) => void;
+	onTagContext: (context: TaggedContextDto) => void;
 }) {
 	const [text, setText] = createSignal("");
 	// Caret position, tracked so the `@`-mention parser knows which token the user
@@ -652,11 +655,11 @@ function Composer(props: {
 	// The `@`-mention token the caret is editing, if any (drives the file
 	// typeahead dropdown). Host results are already ranked + capped.
 	const mention = createMemo(() => activeMention(text(), caret()));
-	const fileMenuOpen = createMemo(() => mention() !== null && !mentionClosed() && props.fileResults.length > 0);
+	const mentionMenuOpen = createMemo(() => mention() !== null && !mentionClosed() && props.mentionResults.length > 0);
 
 	const scheduleSearch = (query: string) => {
 		if (searchTimer) clearTimeout(searchTimer);
-		searchTimer = setTimeout(() => props.onSearchFiles(query), 120);
+		searchTimer = setTimeout(() => props.onSearchWorkspace(query), 120);
 	};
 	onCleanup(() => {
 		if (searchTimer) clearTimeout(searchTimer);
@@ -698,15 +701,16 @@ function Composer(props: {
 		});
 	};
 
-	// Select a file from the inline dropdown: strip the `@query` token and tag the
-	// file as a composer chip (the host already built the workspace-relative DTO).
-	const selectFile = (context: FileContextDto) => {
+	// Select a result from the inline dropdown: strip the `@query` token and tag
+	// the folder/file/symbol as a composer chip (the host already built the
+	// workspace-relative DTO).
+	const selectResult = (context: TaggedContextDto) => {
 		const token = mention();
 		if (!token) return;
 		const stripped = replaceMention(text(), token, "");
 		setText(stripped.text);
 		setCaret(stripped.caret);
-		props.onTagFile(context);
+		props.onTagContext(context);
 		restoreCaret(stripped.caret);
 	};
 
@@ -723,8 +727,8 @@ function Composer(props: {
 	const pick = (name: string) => setText(`/${name} `);
 
 	const onKeyDown = (event: KeyboardEvent) => {
-		// Escape closes the file typeahead without submitting or losing text.
-		if (event.key === "Escape" && fileMenuOpen()) {
+		// Escape closes the mention typeahead without submitting or losing text.
+		if (event.key === "Escape" && mentionMenuOpen()) {
 			event.preventDefault();
 			setMentionClosed(true);
 			return;
@@ -751,18 +755,18 @@ function Composer(props: {
 					</For>
 				</div>
 			</Show>
-			<Show when={fileMenuOpen()}>
+			<Show when={mentionMenuOpen()}>
 				<div class="dreb-menu">
-					<For each={props.fileResults}>
-						{(file) => (
+					<For each={props.mentionResults}>
+						{(result) => (
 							<button
 								type="button"
 								class="dreb-menu-item"
-								title={taggedContextTitle(file)}
-								onClick={() => selectFile(file)}
+								title={taggedContextTitle(result)}
+								onClick={() => selectResult(result)}
 							>
-								<span class="dreb-menu-name">@{taggedContextLabel(file)}</span>
-								<span class="dreb-menu-desc">{file.path}</span>
+								<span class="dreb-menu-name">@{taggedContextLabel(result)}</span>
+								<span class="dreb-menu-desc">{mentionResultDesc(result)}</span>
 							</button>
 						)}
 					</For>
@@ -773,7 +777,9 @@ function Composer(props: {
 					<For each={props.attachments}>
 						{(attachment, index) => (
 							<span class="dreb-attachment" title={taggedContextTitle(attachment)}>
-								<span class="dreb-attachment-icon">{attachment.kind === "file" ? "@" : "{}"}</span>
+								<span class="dreb-attachment-icon">
+									{attachment.kind === "file" ? "@" : attachment.kind === "symbol" ? "#" : "{}"}
+								</span>
 								<span class="dreb-attachment-label">{taggedContextLabel(attachment)}</span>
 								<button
 									type="button"
@@ -852,4 +858,12 @@ function shortPath(path: string): string {
 	if (!path) return "";
 	const parts = path.split(/[/\\]/).filter(Boolean);
 	return parts.length <= 2 ? path : `…/${parts.slice(-2).join("/")}`;
+}
+
+/** Secondary line shown under a mention-dropdown result: the path for a
+ * file/folder, or `kind · path:line` for a code symbol. */
+function mentionResultDesc(context: TaggedContextDto): string {
+	if (context.kind === "symbol") return `${context.symbolKind} · ${context.path}:${context.line}`;
+	if (context.kind === "file") return context.isDirectory ? `${context.path}/` : context.path;
+	return context.path;
 }

@@ -1,15 +1,16 @@
 /**
  * Pure helpers for the composer's inline `@`-mention file picker (Phase 4c).
  *
- * Typing `@` opens a small typeahead dropdown that filters workspace files as
- * the user keeps typing; typing `@@` escalates to the full native file picker.
- * These functions parse the "active mention" out of the composer text at the
- * caret and rank host-supplied file results — kept free of `vscode` and any
- * `node:` builtins so the same code runs in the webview bundle and unit tests
- * (mirroring `shared/format.ts` and `shared/tagged-context.ts`).
+ * Typing `@` opens a small typeahead dropdown that filters the workspace as the
+ * user keeps typing (folders, files, then code symbols); typing `@@` escalates
+ * to the full native file picker. These functions parse the "active mention" out
+ * of the composer text at the caret, rank host-supplied results, and escape a
+ * query into a glob — kept free of `vscode` and any `node:` builtins so the same
+ * code runs in the webview bundle, the host search, and unit tests (mirroring
+ * `shared/format.ts` and `shared/tagged-context.ts`).
  */
 
-import type { FileContextDto } from "./protocol.js";
+import type { TaggedContextDto } from "./protocol.js";
 
 /** The active `@`-mention token immediately before the caret. */
 export interface MentionToken {
@@ -70,36 +71,87 @@ function filename(path: string): string {
 	return (parts.at(-1) ?? path).toLowerCase();
 }
 
+/** Ordering tier by result kind: folders first, then files, then symbols —
+ * so the dropdown reads folders → files → classes/functions top to bottom. */
+function kindRank(dto: TaggedContextDto): number {
+	if (dto.kind === "file") return dto.isDirectory ? 0 : 1;
+	if (dto.kind === "symbol") return 2;
+	return 1; // selections never appear in mention results; treat as a file tier.
+}
+
+/** The lowercased (name, path) a query is matched against for one result. For a
+ * symbol the "name" is the symbol identifier; for a file/folder it is the last
+ * path segment. */
+function matchText(dto: TaggedContextDto): { name: string; path: string } {
+	if (dto.kind === "symbol") return { name: dto.name.toLowerCase(), path: dto.path.toLowerCase() };
+	if (dto.kind === "file") return { name: filename(dto.path), path: dto.path.toLowerCase() };
+	return { name: "", path: "" };
+}
+
+/** The path used for tiebreaking (shorter/alpha) — the file/folder path or the
+ * symbol's defining file path. */
+function pathOf(dto: TaggedContextDto): string {
+	return dto.kind === "selection" ? "" : dto.path;
+}
+
 /**
- * Rank file results for an inline `@`-mention query and cap the list.
- *
- * Ordering (best first): filename prefix match, then filename substring, then
- * path substring, then non-matches; ties break by shorter path, then alpha. An
- * empty query keeps input order (already host-ordered) and just applies `cap`.
+ * Rank inline `@`-mention results and cap the list. Results are grouped by kind
+ * (folders, then files, then symbols) and, within each group, ordered by
+ * relevance to `query`: name prefix, then name substring, then path substring;
+ * non-matches are dropped. Ties break by shorter path, then alphabetically. An
+ * empty query keeps the host's per-kind order and just applies the kind grouping
+ * and `cap`.
  */
-export function rankFileResults(results: readonly FileContextDto[], query: string, cap: number): FileContextDto[] {
+export function rankMentionResults(
+	results: readonly TaggedContextDto[],
+	query: string,
+	cap: number,
+): TaggedContextDto[] {
 	const q = query.trim().toLowerCase();
-	if (q.length === 0) return results.slice(0, cap);
-	const score = (dto: FileContextDto): number => {
-		const name = filename(dto.path);
-		const path = dto.path.toLowerCase();
-		if (name.startsWith(q)) return 0;
-		if (name.includes(q)) return 1;
-		if (path.includes(q)) return 2;
-		return 3;
-	};
-	return results
-		.map((dto, index) => ({ dto, index, rank: score(dto) }))
-		.filter((entry) => entry.rank < 3)
+	const scored = results.map((dto, index) => {
+		const { name, path } = matchText(dto);
+		let match: number;
+		if (q.length === 0) match = 0;
+		else if (name.startsWith(q)) match = 0;
+		else if (name.includes(q)) match = 1;
+		else if (path.includes(q)) match = 2;
+		else match = 3;
+		return { dto, index, kind: kindRank(dto), match };
+	});
+	return scored
+		.filter((entry) => entry.match < 3)
 		.sort((a, b) => {
-			if (a.rank !== b.rank) return a.rank - b.rank;
-			if (a.dto.path.length !== b.dto.path.length) return a.dto.path.length - b.dto.path.length;
-			if (a.dto.path !== b.dto.path) return a.dto.path < b.dto.path ? -1 : 1;
+			if (a.kind !== b.kind) return a.kind - b.kind;
+			// Empty query: preserve the host's order within each kind group.
+			if (q.length === 0) return a.index - b.index;
+			if (a.match !== b.match) return a.match - b.match;
+			const ap = pathOf(a.dto);
+			const bp = pathOf(b.dto);
+			if (ap.length !== bp.length) return ap.length - bp.length;
+			if (ap !== bp) return ap < bp ? -1 : 1;
 			return a.index - b.index;
 		})
 		.slice(0, cap)
 		.map((entry) => entry.dto);
 }
 
-/** Maximum number of inline file suggestions shown in the dropdown. */
+/**
+ * Escape glob metacharacters so a typed query is matched literally within a
+ * `findFiles` include pattern (a stray `{`, `[`, `*`, `?`, `@` would otherwise
+ * corrupt the glob). Path separators in the query collapse to a single `*`
+ * wildcard so `src/app` still filters. Pure (no `vscode`), so the host search
+ * and its unit tests share one implementation.
+ */
+export function escapeGlob(query: string): string {
+	const special = new Set(["*", "?", "{", "}", "[", "]", "(", ")", "!", "+", "@"]);
+	let out = "";
+	for (const ch of query) {
+		if (ch === "/" || ch === "\\") out += "*";
+		else if (special.has(ch)) out += `\\${ch}`;
+		else out += ch;
+	}
+	return out;
+}
+
+/** Maximum number of inline mention suggestions shown in the dropdown. */
 export const MENTION_RESULT_CAP = 10;
