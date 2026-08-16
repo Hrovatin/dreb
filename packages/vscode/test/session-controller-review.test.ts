@@ -24,6 +24,9 @@ class MiniClient implements RpcClientLike {
 	async compact(): Promise<unknown> {
 		return {};
 	}
+	async setAskMode(enabled: boolean): Promise<{ enabled: boolean }> {
+		return { enabled };
+	}
 	async getCommands() {
 		return [];
 	}

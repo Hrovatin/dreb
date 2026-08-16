@@ -298,6 +298,7 @@ export function getStateForRpc(session: AgentSession, modelFallbackMessage?: str
 		sessionId: session.sessionId,
 		sessionName: session.sessionName,
 		autoCompactionEnabled: session.autoCompactionEnabled,
+		askModeEnabled: session.askModeEnabled,
 		messageCount: session.messages.length,
 		pendingMessageCount: session.pendingMessageCount,
 		contextUsage: session.getContextUsage(),
@@ -2104,6 +2105,15 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 			case "abort_compaction": {
 				session.abortCompaction();
 				return success(id, "abort_compaction");
+			}
+
+			// =================================================================
+			// Ask mode (read-only)
+			// =================================================================
+
+			case "set_ask_mode": {
+				const enabled = session.setAskMode(command.enabled);
+				return success(id, "set_ask_mode", { enabled });
 			}
 
 			// =================================================================
