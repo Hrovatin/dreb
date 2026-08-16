@@ -556,6 +556,14 @@ export class RpcClient {
 	}
 
 	/**
+	 * Toggle read-only Ask mode. Returns the resulting state.
+	 */
+	async setAskMode(enabled: boolean): Promise<{ enabled: boolean }> {
+		const response = await this.send({ type: "set_ask_mode", enabled });
+		return this.getData(response);
+	}
+
+	/**
 	 * Set auto-retry enabled/disabled.
 	 */
 	async setAutoRetry(enabled: boolean): Promise<void> {

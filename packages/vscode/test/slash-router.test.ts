@@ -27,6 +27,13 @@ describe("slash-router", () => {
 		expect(routeInput("/model")).toEqual({ kind: "builtin", command: "model", arg: undefined });
 	});
 
+	it("routes /ask (with on/off/bare) to the ask builtin", () => {
+		expect(routeInput("/ask")).toEqual({ kind: "builtin", command: "ask", arg: undefined });
+		expect(routeInput("/ask on")).toEqual({ kind: "builtin", command: "ask", arg: "on" });
+		expect(routeInput("/ask off")).toEqual({ kind: "builtin", command: "ask", arg: "off" });
+		expect(routeInput("/ask status")).toEqual({ kind: "builtin", command: "ask", arg: "status" });
+	});
+
 	it("prefers the builtin mapping over a same-named agent command", () => {
 		// A builtin like /compact must map to the RPC method, never be sent as a
 		// prompt, even if get_commands also advertised it.

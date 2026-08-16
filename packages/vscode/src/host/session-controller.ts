@@ -60,6 +60,7 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 interface RpcSessionStateLike {
 	model?: { provider: string; id: string; name?: string };
 	thinkingLevel?: string;
+	askModeEnabled?: boolean;
 	usingSubscription?: boolean;
 	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
 	sessionFile?: string;
@@ -96,6 +97,8 @@ export interface RpcClientLike {
 	prompt(message: string, images?: unknown[]): Promise<void>;
 	abort(): Promise<void>;
 	compact(customInstructions?: string): Promise<unknown>;
+	/** Toggle read-only Ask mode; resolves with the resulting state. */
+	setAskMode(enabled: boolean): Promise<{ enabled: boolean }>;
 	getCommands(): Promise<
 		Array<{
 			name: string;
@@ -503,6 +506,34 @@ export class SessionController {
 			case "compact":
 				await client.compact(arg);
 				return;
+			case "ask": {
+				const sub = arg?.trim().toLowerCase() ?? "";
+				if (sub !== "on" && sub !== "off" && sub !== "" && sub !== "status") {
+					this.emitNotice("Usage: /ask [on | off | status] (bare /ask toggles).");
+					return;
+				}
+				// Fetch the authoritative live state once: it drives the bare-toggle
+				// direction, the `status` report, and the already-in-mode guard.
+				const current = (await client.getState()).askModeEnabled ?? false;
+				if (sub === "status") {
+					this.emitNotice(`Read-only Ask mode is currently ${current ? "ON" : "OFF"}.`);
+					return;
+				}
+				const enable = sub === "on" ? true : sub === "off" ? false : !current;
+				// Match the terminal: a no-op (already in the requested state) reports
+				// "already ON/OFF" instead of re-emitting the full activation notice.
+				if (enable === current) {
+					this.emitNotice(`Read-only Ask mode is already ${enable ? "ON" : "OFF"}.`);
+					return;
+				}
+				const { enabled } = await client.setAskMode(enable);
+				this.emitNotice(
+					enabled
+						? "Read-only Ask mode ON — edits/writes disabled, no shell (use the typed read-only git tool), subagents limited to read-only agents. Use /ask off to exit."
+						: "Read-only Ask mode OFF — normal tools restored.",
+				);
+				return;
+			}
 			case "model":
 				await this.pickModel();
 				return;
