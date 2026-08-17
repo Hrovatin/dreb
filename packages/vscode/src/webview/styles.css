@@ -300,6 +300,44 @@ body {
 	margin-right: 0;
 }
 
+/* Queued (steer/follow-up) messages waiting to be delivered ---------------- */
+.dreb-pending-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 12px;
+	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+}
+.dreb-pending-title {
+	font-size: 0.8em;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+	margin-right: 4px;
+}
+.dreb-pending-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 0.8em;
+	padding: 1px 6px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	background: var(--vscode-button-secondaryBackground, transparent);
+	color: var(--vscode-foreground);
+}
+.dreb-pending-kind {
+	font-size: 0.85em;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--vscode-descriptionForeground);
+}
+
 
 .dreb-status-line {
 	color: var(--vscode-descriptionForeground);
