@@ -922,34 +922,69 @@ export class SessionController {
 	 * a notice. */
 	async fork(entryId: string): Promise<void> {
 		if (!this.client) return;
+		let result: { text: string; cancelled: boolean };
 		try {
-			const result = await this.client.fork(entryId);
-			if (result.cancelled) {
-				this.emitNotice("Fork cancelled — no new branch was created.");
-				return;
-			}
-			await this.rebuildTranscript();
-			// Only user (re-ask) forks return text; assistant forks return "" and
-			// must not clobber whatever the user has already typed.
-			if (result.text.length > 0) this.emit({ kind: "composer-prefill", text: result.text });
+			result = await this.client.fork(entryId);
 		} catch (err) {
+			// The backend fork failed, so the leaf never moved — the current
+			// transcript is still valid. Just surface a notice; do NOT reset.
 			this.emitNotice(`Couldn't fork: ${errorText(err)}`);
+			return;
 		}
+		if (result.cancelled) {
+			this.emitNotice("Fork cancelled — no new branch was created.");
+			return;
+		}
+		try {
+			await this.rebuildTranscript();
+		} catch (err) {
+			// The backend already moved to the new branch, but the reload failed.
+			// Leaving the old transcript up would render a stale, wrong-branch
+			// conversation over a backend that has switched. Reset to a clean state
+			// (also clears checkpoints) and resync — parity with the resume guard —
+			// so the webview never shows the wrong branch.
+			this.logger(`fork transcript rebuild failed: ${errorText(err)}`);
+			this.resetTranscriptState();
+			this.emitNotice(
+				"Forked, but the chat couldn't reload — the new branch is saved and will show when you reopen the chat.",
+			);
+			this.emit({ kind: "resync" });
+			return;
+		}
+		// Only user (re-ask) forks return text; assistant forks return "" and
+		// must not clobber whatever the user has already typed.
+		if (result.text.length > 0) this.emit({ kind: "composer-prefill", text: result.text });
 	}
 
 	/** Restore (navigate) the session to a tree entry — a linear rewind or a
 	 * branch-jump. Rebuilds the transcript to the target leaf. */
 	async navigateTree(entryId: string): Promise<void> {
 		if (!this.client) return;
+		let result: { cancelled: boolean; editorText?: string };
 		try {
-			const result = await this.client.navigateTree(entryId);
-			if (result.cancelled) {
-				this.emitNotice("Restore cancelled.");
-				return;
-			}
+			result = await this.client.navigateTree(entryId);
+		} catch (err) {
+			// The backend navigation failed, so the leaf never moved — the current
+			// transcript is still valid. Just surface a notice; do NOT reset.
+			this.emitNotice(`Couldn't restore the checkpoint: ${errorText(err)}`);
+			return;
+		}
+		if (result.cancelled) {
+			this.emitNotice("Restore cancelled.");
+			return;
+		}
+		try {
 			await this.rebuildTranscript();
 		} catch (err) {
-			this.emitNotice(`Couldn't restore the checkpoint: ${errorText(err)}`);
+			// The backend already moved to the restored leaf, but the reload failed.
+			// Reset + resync (parity with the resume guard) so the webview never
+			// keeps rendering the pre-restore branch over a backend that has moved.
+			this.logger(`restore transcript rebuild failed: ${errorText(err)}`);
+			this.resetTranscriptState();
+			this.emitNotice(
+				"Restored, but the chat couldn't reload — the restored point is saved and will show when you reopen the chat.",
+			);
+			this.emit({ kind: "resync" });
 		}
 	}
 

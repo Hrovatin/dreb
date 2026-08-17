@@ -21,6 +21,9 @@ class FakeClient implements RpcClientLike {
 	startError: Error | undefined;
 	/** When set, the next prompt/compact/abort/builtin call rejects with this error. */
 	callError: Error | undefined;
+	/** When set, only the transcript-rebuild RPCs (`getMessages`/`getTree`) reject —
+	 * simulating a backend fork/navigate that succeeds while the reload fails. */
+	rebuildError: Error | undefined;
 
 	// Runtime status.
 	state: {
@@ -201,6 +204,7 @@ class FakeClient implements RpcClientLike {
 		return this.navigateResult;
 	}
 	async getTree(): Promise<{ roots: SessionTreeNodeDto[]; leafId: string | null }> {
+		if (this.rebuildError) throw this.rebuildError;
 		if (this.callError) throw this.callError;
 		this.treeCalls += 1;
 		return this.treeResult;
@@ -228,6 +232,7 @@ class FakeClient implements RpcClientLike {
 	 * tests that only set `treeResult` still get a matching full-content rebuild. */
 	messagesOverride: unknown[] | undefined;
 	async getMessages(): Promise<unknown[]> {
+		if (this.rebuildError) throw this.rebuildError;
 		if (this.callError) throw this.callError;
 		this.getMessagesCalls += 1;
 		if (this.messagesOverride) return this.messagesOverride;
@@ -1496,6 +1501,72 @@ describe("SessionController session tree (Phase 6)", () => {
 
 		expect(controller.getTranscript().statusText).toMatch(/Fork cancelled/);
 		expect(fake.treeCalls).toBe(treeCallsBefore); // no rebuild
+	});
+
+	it("resets and resyncs (never leaves a stale branch) when a fork succeeds but the reload fails", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const controller = makeController(fake, { sessionPath: "/abs/sess.jsonl" });
+		await controller.start();
+		// Resume folded the branch, so there is a (soon-to-be-stale) transcript.
+		expect(controller.getTranscript().items.length).toBeGreaterThan(0);
+
+		const updates: Array<{ kind: string }> = [];
+		controller.onUpdate((u) => updates.push(u as never));
+		// The backend fork succeeds and moves the leaf, but the transcript-reload
+		// RPCs (getMessages/getTree) then fail.
+		fake.rebuildError = new Error("reload boom");
+
+		await controller.fork("a1");
+
+		expect(fake.forkCalls).toContain("a1"); // backend already moved branch
+		// The webview is reset + resynced — it must NOT keep rendering the old
+		// branch over a backend that has switched.
+		expect(controller.getTranscript().items).toEqual([]);
+		expect(controller.getCheckpoints()).toEqual([]);
+		expect(updates.some((u) => u.kind === "resync")).toBe(true);
+		expect(controller.getTranscript().statusText).toMatch(/couldn't reload/i);
+	});
+
+	it("keeps the current transcript intact when the backend fork itself fails (no reset)", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const controller = makeController(fake, { sessionPath: "/abs/sess.jsonl" });
+		await controller.start();
+		const before = controller.getTranscript().items.length;
+		expect(before).toBeGreaterThan(0);
+
+		const updates: Array<{ kind: string }> = [];
+		controller.onUpdate((u) => updates.push(u as never));
+		// The backend fork call rejects — the leaf never moved, so the current
+		// transcript is still valid and must not be blanked.
+		fake.callError = new Error("fork boom");
+
+		await controller.fork("a1");
+
+		expect(controller.getTranscript().statusText).toMatch(/Couldn't fork/);
+		expect(controller.getTranscript().items.length).toBe(before); // preserved
+		expect(updates.some((u) => u.kind === "resync")).toBe(false); // no reset/resync
+	});
+
+	it("resets and resyncs when a restore succeeds but the reload fails", async () => {
+		const fake = new FakeClient();
+		fake.treeResult = twoResponseTree();
+		const controller = makeController(fake, { sessionPath: "/abs/sess.jsonl" });
+		await controller.start();
+		expect(controller.getTranscript().items.length).toBeGreaterThan(0);
+
+		const updates: Array<{ kind: string }> = [];
+		controller.onUpdate((u) => updates.push(u as never));
+		fake.rebuildError = new Error("reload boom");
+
+		await controller.navigateTree("a1");
+
+		expect(fake.navigateCalls).toContain("a1"); // backend already moved
+		expect(controller.getTranscript().items).toEqual([]);
+		expect(controller.getCheckpoints()).toEqual([]);
+		expect(updates.some((u) => u.kind === "resync")).toBe(true);
+		expect(controller.getTranscript().statusText).toMatch(/couldn't reload/i);
 	});
 
 	it("restores (navigates) to an entry and rebuilds the transcript", async () => {
