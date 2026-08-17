@@ -199,10 +199,21 @@ const defaultClientFactory: RpcClientFactory = async (options) => {
 	return new RpcClient({ cliPath: options.cliPath, cwd: options.cwd, args: options.args });
 };
 
-function formatExit(info: { code?: number | null; signal?: string | null; error?: Error }): string {
+function formatExit(info: { code?: number | null; signal?: string | null; error?: Error; stderr?: string }): string {
 	if (info?.error) return `dreb process failed: ${info.error.message}`;
 	return `dreb process exited (code ${info?.code ?? "null"}, signal ${info?.signal ?? "null"})`;
 }
+
+/** Recovery policy tuning (deliverable C, issue 53). Bounded auto-restart so a
+ * transient crash self-heals but a crash-loop (dead pipe / deterministic
+ * startup failure) degrades to a banner instead of spinning forever. */
+const RESTART_MAX_IN_WINDOW = 3;
+const RESTART_WINDOW_MS = 60_000;
+const RESTART_BACKOFF_MS = 500;
+/** How long a restarted child must stay up before the crash counter resets, so
+ * a *later* isolated crash still gets a fresh recovery budget. */
+const RESTART_STABLE_MS = 10_000;
+const RECOVERING_NOTICE = "dreb stopped unexpectedly — recovering…";
 
 function errorText(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
@@ -282,6 +293,18 @@ export class SessionController {
 	private unsubEvent: (() => void) | undefined;
 	private unsubExit: (() => void) | undefined;
 	private disposed = false;
+	/** Resume path for `start()`: the `--session` file to load. Starts as the
+	 * construction-time resume path and is re-pointed at the live session file on
+	 * an auto-restart so recovery is lossless. */
+	private resumePath: string | undefined;
+	/** Timestamps of recent auto-restart attempts (rolling window), used to bound
+	 * recovery against a crash-loop (deliverable C). */
+	private restartTimestamps: number[] = [];
+	/** Pending backoff timer for a scheduled restart. */
+	private restartTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Fires once a restarted child has stayed up long enough to be considered
+	 * stable, clearing the crash budget. */
+	private stableTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Serializes status refreshes: coalesces an overlapping request into one
 	 * trailing re-run so a new turn starting mid-refresh still ends up current.
 	 * `statusAgainIncludeDaily` accumulates the daily-cost intent of every
@@ -293,6 +316,7 @@ export class SessionController {
 
 	constructor(options: SessionControllerOptions) {
 		this.options = options;
+		this.resumePath = options.sessionPath;
 		this.factory = options.clientFactory ?? defaultClientFactory;
 		this.ui = options.ui ?? noopHostUi;
 		this.reviewUi = options.review ?? noopReviewUi;
@@ -389,10 +413,7 @@ export class SessionController {
 	/** Spawn the RPC child, wire event/exit handlers, and prime the command list. */
 	async start(): Promise<void> {
 		if (this.disposed) throw new Error("SessionController is disposed");
-		const args = [
-			...(this.options.args ?? []),
-			...(this.options.sessionPath ? ["--session", this.options.sessionPath] : []),
-		];
+		const args = [...(this.options.args ?? []), ...(this.resumePath ? ["--session", this.resumePath] : [])];
 		const client = await this.factory({
 			cliPath: this.options.cliPath,
 			cwd: this.options.cwd,
@@ -425,7 +446,7 @@ export class SessionController {
 		// persisted branch in now (same path as restore/fork) so prior turns render
 		// immediately. Guarded on `sessionPath` so a brand-new session keeps
 		// populating from the live stream and doesn't fold on start.
-		if (this.options.sessionPath) {
+		if (this.resumePath) {
 			try {
 				await this.rebuildTranscript();
 			} catch (err) {
@@ -1109,6 +1130,8 @@ export class SessionController {
 	async dispose(): Promise<void> {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.clearRestartTimer();
+		this.clearStableTimer();
 		this.unsubEvent?.();
 		this.unsubExit?.();
 		this.listeners.clear();
@@ -1147,17 +1170,130 @@ export class SessionController {
 		// the way the dashboard does on the streaming→idle transition, and
 		// recompute the change-review set from the baseline.
 		if (type === "agent_end") {
+			// A completed turn proves the child is alive and processing, so treat it
+			// as a stable run: clear the crash-recovery budget.
+			this.restartTimestamps = [];
+			this.clearStableTimer();
 			void this.refreshStatus(true);
 			void this.refreshReview();
 			void this.refreshCheckpoints();
 		}
 	}
 
-	private handleExit(info: { code?: number | null; signal?: string | null; error?: Error }): void {
+	private handleExit(info: { code?: number | null; signal?: string | null; error?: Error; stderr?: string }): void {
 		if (this.disposed) return;
 		const message = formatExit(info);
-		this.setStatus({ ...this.status, connected: false, error: message });
-		this.handleEvent({ type: "host_error", message });
+		// Surface the child's captured stderr (deliverable B) so a late crash's
+		// trigger is recorded for diagnosis instead of being discarded.
+		const stderr = info.stderr?.trim();
+		if (stderr) this.logger(`RPC child exited (${message}); stderr:\n${stderr}`);
+		else this.logger(`RPC child exited (${message})`);
+		// Drop the dead client + its stale listeners before attempting recovery so
+		// a leftover handler can't fire against the old process.
+		this.teardownClient();
+		// Automated in-place recovery (deliverable C): auto-restart from the
+		// persisted transcript, bounded by a crash-loop budget.
+		this.beginRecovery(message);
+	}
+
+	/** Tear down the current client's subscriptions and drop the reference. The
+	 * child is presumed already gone (called from the exit path), but stop() is
+	 * still invoked best-effort to release any client-side resources. */
+	private teardownClient(): void {
+		this.unsubEvent?.();
+		this.unsubExit?.();
+		this.unsubEvent = undefined;
+		this.unsubExit = undefined;
+		const dead = this.client;
+		this.client = undefined;
+		void Promise.resolve(dead?.stop()).catch(() => {});
+	}
+
+	/** Decide whether to auto-restart the crashed child (bounded) or give up with
+	 * a persistent banner. Called on an unexpected exit and on a failed restart. */
+	private beginRecovery(reason: string): void {
+		if (this.disposed) return;
+		if (!this.withinRestartBudget()) {
+			this.giveUpRecovery(reason);
+			return;
+		}
+		this.recordRestartAttempt();
+		// Clear the error so `hasFailed()` stays false and the host doesn't tear
+		// this controller down mid-recovery; show a transient notice rather than a
+		// fatal banner.
+		this.setStatus({ ...this.status, connected: false, error: undefined });
+		this.emitNotice(RECOVERING_NOTICE);
+		this.clearRestartTimer();
+		this.restartTimer = setTimeout(() => {
+			this.restartTimer = undefined;
+			void this.restart(reason);
+		}, RESTART_BACKOFF_MS);
+		this.restartTimer.unref?.();
+	}
+
+	/** Auto-restart the RPC child in place, resuming from the live session file so
+	 * the persisted transcript is reloaded losslessly. All controller-lifetime
+	 * listeners and the connected webview bridge stay attached. */
+	private async restart(reason: string): Promise<void> {
+		if (this.disposed) return;
+		// Resume from the live session file (falls back to the original resume
+		// path for a session that never wrote an entry before crashing).
+		this.resumePath = this.sessionPath;
+		try {
+			await this.start();
+		} catch {
+			// start() already surfaced its own failure status; route the failed
+			// attempt back through the bounded policy (retry or give up).
+			this.beginRecovery(reason);
+			return;
+		}
+		// Connected again. Arm a stable-run reset so a child that survives long
+		// enough clears the crash budget and a *later* isolated crash still gets a
+		// fresh recovery allowance.
+		this.armStableRunReset();
+	}
+
+	/** Terminal recovery state: repeated crashes within the window. Surface a
+	 * persistent, actionable banner. */
+	private giveUpRecovery(reason: string): void {
+		const banner = `${reason} — automatic recovery failed after repeated crashes. Reopen the chat to restart.`;
+		this.setStatus({ ...this.status, connected: false, error: banner });
+		this.handleEvent({ type: "host_error", message: banner });
+	}
+
+	/** True while the rolling window still has restart budget left. Prunes stale
+	 * attempts so the budget refills once the window passes. */
+	private withinRestartBudget(): boolean {
+		const now = Date.now();
+		this.restartTimestamps = this.restartTimestamps.filter((t) => now - t < RESTART_WINDOW_MS);
+		return this.restartTimestamps.length < RESTART_MAX_IN_WINDOW;
+	}
+
+	private recordRestartAttempt(): void {
+		this.restartTimestamps.push(Date.now());
+	}
+
+	private armStableRunReset(): void {
+		this.clearStableTimer();
+		this.stableTimer = setTimeout(() => {
+			this.stableTimer = undefined;
+			this.restartTimestamps = [];
+		}, RESTART_STABLE_MS);
+		this.stableTimer.unref?.();
+	}
+
+	private clearRestartTimer(): void {
+		if (this.restartTimer !== undefined) {
+			clearTimeout(this.restartTimer);
+			this.restartTimer = undefined;
+		}
+	}
+
+	private clearStableTimer(): void {
+		if (this.stableTimer !== undefined) {
+			clearTimeout(this.stableTimer);
+			this.stableTimer = undefined;
+		}
 	}
 
 	private emitNotice(message: string): void {

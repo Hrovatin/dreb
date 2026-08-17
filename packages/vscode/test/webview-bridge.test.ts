@@ -165,11 +165,12 @@ describe("connectWebview", () => {
 		connectWebview(webview as any, controller);
 		send({ type: "ready" });
 
-		// A child crash drives both a host_error event and a status update; both
-		// must reach the webview now that it is live.
+		// A child crash drives a recovering notice (host_notice event) and a
+		// status update while auto-restart is in progress; both must reach the
+		// webview now that it is live.
 		fake.emitExit({ code: 1, signal: null });
 		expect(posted.some((m) => m.type === "status")).toBe(true);
-		expect(posted.some((m) => m.type === "event" && (m.event as any)?.type === "host_error")).toBe(true);
+		expect(posted.some((m) => m.type === "event" && (m.event as any)?.type === "host_notice")).toBe(true);
 	});
 
 	it("dispatches webview messages to the controller", async () => {
