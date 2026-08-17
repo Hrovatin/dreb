@@ -1216,11 +1216,13 @@ describe("SessionController", () => {
 			expect(fake.clearPendingCalls).toBe(1);
 			expect(fake.pendingSteering).toEqual([]);
 			// The queued text is restored to the composer (joined, in order) rather
-			// than silently lost.
+			// than silently lost. `mode: "prepend"` tells the composer to insert
+			// before any in-progress draft rather than overwrite it.
 			const prefill = updates.filter(
 				(u): u is Extract<ControllerUpdate, { kind: "composer-prefill" }> => u.kind === "composer-prefill",
 			);
 			expect(prefill.at(-1)?.text).toBe("first follow-up\n\nsecond follow-up");
+			expect(prefill.at(-1)?.mode).toBe("prepend");
 			// And the chips are cleared.
 			expect(controller.getPending()).toEqual([]);
 		});

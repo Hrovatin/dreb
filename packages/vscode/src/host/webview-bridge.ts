@@ -102,7 +102,7 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				post({ type: "tree", tree: update.tree });
 				break;
 			case "composer-prefill":
-				post({ type: "composer-prefill", text: update.text });
+				post({ type: "composer-prefill", text: update.text, mode: update.mode });
 				break;
 			case "pending":
 				post({ type: "pending", messages: update.messages });

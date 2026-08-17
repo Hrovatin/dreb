@@ -8,6 +8,7 @@
  * node-only code — the mirror of the dashboard's `src/shared/protocol.ts`.
  */
 
+import type { ComposerPrefillMode } from "./composer-prefill.js";
 import type { Checkpoint, TranscriptState } from "./projection.js";
 
 /** A slash command offered in the composer dropdown. */
@@ -215,8 +216,11 @@ export type HostToWebview =
 	/** The queue of pending steer/follow-up messages changed — render them as
 	 * chips above the composer (empty clears the chips). */
 	| { type: "pending"; messages: QueuedMessageDto[] }
-	/** Pre-fill the composer (e.g. a user-message fork's re-ask text) (Phase 6). */
-	| { type: "composer-prefill"; text: string };
+	/** Pre-fill the composer. `mode` controls how it combines with any text the
+	 * user has already typed: `"replace"` (default — a user-message fork's re-ask
+	 * text) overwrites, while `"prepend"` (queued messages restored on abort)
+	 * inserts before the existing text so an in-progress draft is never lost. */
+	| { type: "composer-prefill"; text: string; mode?: ComposerPrefillMode };
 
 /** Messages sent from the webview to the host. */
 export type WebviewToHost =

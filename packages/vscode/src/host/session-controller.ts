@@ -12,6 +12,7 @@
  * events + status changes. The webview bridge adapts those to `postMessage`.
  */
 
+import type { ComposerPrefillMode } from "../shared/composer-prefill.js";
 import { formatSessionStats } from "../shared/format.js";
 import { MENTION_RESULT_CAP, rankMentionResults } from "../shared/mention.js";
 import {
@@ -202,8 +203,9 @@ export type ControllerUpdate =
 	| { kind: "checkpoints"; checkpoints: Checkpoint[] }
 	/** The session branch tree, in response to a `show-tree` request (Phase 6). */
 	| { kind: "tree"; tree: SessionTreeDto }
-	/** Pre-fill the composer (a user-message fork's re-ask text) (Phase 6). */
-	| { kind: "composer-prefill"; text: string }
+	/** Pre-fill the composer. `mode` (default `"replace"`) controls whether it
+	 * overwrites the composer or `"prepend"`s before any in-progress draft. */
+	| { kind: "composer-prefill"; text: string; mode?: ComposerPrefillMode }
 	/** The pending steer/follow-up queue changed — the bridge forwards it to the
 	 * webview as composer chips (empty clears them). */
 	| { kind: "pending"; messages: QueuedMessageDto[] }
@@ -587,7 +589,9 @@ export class SessionController {
 			const { steering, followUp } = await this.client.clearPendingMessages();
 			const restored = [...steering, ...followUp].filter((text) => text.trim().length > 0);
 			this.setPending([]);
-			if (restored.length > 0) this.emit({ kind: "composer-prefill", text: restored.join("\n\n") });
+			if (restored.length > 0) {
+				this.emit({ kind: "composer-prefill", text: restored.join("\n\n"), mode: "prepend" });
+			}
 		} catch (err) {
 			this.logger(`clearing pending on abort failed: ${err instanceof Error ? err.message : String(err)}`);
 		}

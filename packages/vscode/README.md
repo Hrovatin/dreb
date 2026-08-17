@@ -84,7 +84,7 @@ The webview renders a compact header mirroring the TUI: **model · thinking leve
 
 You don't have to wait for the agent to finish before typing your next instruction. Sending a message while a turn is in flight **steers** it — the message is injected into the running turn (rather than being rejected as a mid-stream `prompt`, which would silently drop it). Queued messages show as **chips above the composer** ("2 queued messages") until they're delivered, so nothing you send is invisible.
 
-Pressing **Stop** aborts the current turn. Because an abort leaves any still-queued messages undelivered, the extension **clears the queue and restores that text back into the composer** — you decide whether to resend it, rather than losing it. The pending queue is host-authoritative (refreshed from the RPC child on run transitions and after each queued submit) so the chips survive a webview reload.
+Pressing **Stop** aborts the current turn. Because an abort leaves any still-queued messages undelivered, the extension **clears the queue and restores that text back into the composer** — you decide whether to resend it, rather than losing it. If you'd already started typing a new message when you hit Stop, the restored text is **prepended before your draft** (queued messages first, then your in-progress text) so neither is lost — never overwriting what you were typing. The pending queue is host-authoritative (refreshed from the RPC child on run transitions and after each queued submit) so the chips survive a webview reload.
 
 ## Change review
 
