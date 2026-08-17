@@ -89,6 +89,9 @@ class BridgeFakeClient implements RpcClientLike {
 	async getForkMessages(): Promise<Array<{ entryId: string; text: string; role: "user" | "assistant" }>> {
 		return [];
 	}
+	async getMessages(): Promise<unknown[]> {
+		return [];
+	}
 	emit(event: unknown): void {
 		this.ev?.(event);
 	}

@@ -221,6 +221,25 @@ class FakeClient implements RpcClientLike {
 		walk(this.treeResult.roots);
 		return out;
 	}
+	getMessagesCalls = 0;
+	/** When set, `getMessages` returns this verbatim (full provider messages with
+	 * text/thinking/toolCall content + paired toolResults); otherwise it derives a
+	 * simple text-only message list from the current leaf branch's previews, so
+	 * tests that only set `treeResult` still get a matching full-content rebuild. */
+	messagesOverride: unknown[] | undefined;
+	async getMessages(): Promise<unknown[]> {
+		if (this.callError) throw this.callError;
+		this.getMessagesCalls += 1;
+		if (this.messagesOverride) return this.messagesOverride;
+		const messages: unknown[] = [];
+		for (const n of leafPath(this.treeResult.roots, this.treeResult.leafId)) {
+			if (n.type !== "message") continue;
+			if (n.role === "user") messages.push({ role: "user", content: n.preview });
+			else if (n.role === "assistant")
+				messages.push({ role: "assistant", content: [{ type: "text", text: n.preview }], stopReason: "stop" });
+		}
+		return messages;
+	}
 	emit(event: unknown): void {
 		this.eventListener?.(event);
 	}
@@ -1353,6 +1372,18 @@ function node(
 	return { id, parentId: null, type: "message", role, preview, timestamp: "2026-01-01T00:00:00.000Z", children };
 }
 
+/** The nodes from a root down to `leafId` (inclusive), root-first — mirrors the
+ * real branch the RPC child resolves for `get_messages`/`get_tree`. */
+function leafPath(nodes: SessionTreeNodeDto[], leafId: string | null): SessionTreeNodeDto[] {
+	if (!leafId) return [];
+	for (const n of nodes) {
+		if (n.id === leafId) return [n];
+		const rest = leafPath(n.children, leafId);
+		if (rest.length > 0) return [n, ...rest];
+	}
+	return [];
+}
+
 /** A three-turn branch: user → assistant(a1) → user → assistant(a2). */
 function twoResponseTree(): { roots: SessionTreeNodeDto[]; leafId: string } {
 	return {
@@ -1382,7 +1413,7 @@ describe("SessionController session tree (Phase 6)", () => {
 
 		expect(fake.forkCalls).toEqual(["a1"]);
 		expect(fake.treeCalls).toBeGreaterThan(0); // rebuild fetched the tree
-		// Transcript rebuilt from tree previews: user/assistant turns in order.
+		// Transcript rebuilt from the branch's full messages: user/assistant turns in order.
 		const items = controller.getTranscript().items;
 		expect(
 			items.map((i) => (i.kind === "user" ? `u:${i.text}` : i.kind === "response" ? `a:${i.answer}` : i.text)),
@@ -1480,6 +1511,92 @@ describe("SessionController session tree (Phase 6)", () => {
 		expect(fake.navigateCalls).toEqual(["a1"]);
 		expect(updates.some((u) => u.kind === "resync")).toBe(true);
 		expect(updates.some((u) => u.kind === "checkpoints")).toBe(true);
+	});
+
+	it("rebuilds a restored tool-using run into ONE full-content group (issue 47)", async () => {
+		// A tool-using run persists TWO assistant entries (the tool-call turn + the
+		// final answer) plus a toolResult between them. The rebuilt transcript must
+		// fold them into a single response group — full answer + a thinking/tool
+		// activity box — not three preview blocks with "(no content)" placeholders,
+		// and its one restore control must key to the run-terminal entry (a2).
+		const TS = "2026-01-01T00:00:00.000Z";
+		const fake = new FakeClient();
+		fake.treeResult = {
+			roots: [
+				{
+					id: "u1",
+					parentId: null,
+					type: "message",
+					role: "user",
+					preview: "do it",
+					timestamp: TS,
+					children: [
+						{
+							id: "a1",
+							parentId: "u1",
+							type: "message",
+							role: "assistant",
+							preview: "",
+							timestamp: TS,
+							children: [
+								{
+									id: "tr1",
+									parentId: "a1",
+									type: "message",
+									role: "toolResult",
+									preview: "[read]",
+									timestamp: TS,
+									children: [
+										{
+											id: "a2",
+											parentId: "tr1",
+											type: "message",
+											role: "assistant",
+											preview: "here is the answer",
+											timestamp: TS,
+											children: [],
+										},
+									],
+								},
+							],
+						},
+					],
+				},
+			],
+			leafId: "a2",
+		};
+		fake.messagesOverride = [
+			{ role: "user", content: "do it" },
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "let me check" },
+					{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a.txt" } },
+				],
+				stopReason: "toolUse",
+			},
+			{ role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "file body" }] },
+			{ role: "assistant", content: [{ type: "text", text: "here is the answer" }], stopReason: "stop" },
+		];
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.navigateTree("a2");
+
+		expect(fake.getMessagesCalls).toBeGreaterThan(0);
+		const items = controller.getTranscript().items;
+		// One user turn + exactly one response group (not per-assistant-entry blocks).
+		expect(items.map((i) => i.kind)).toEqual(["user", "response"]);
+		const group = items.find((i) => i.kind === "response");
+		if (group?.kind !== "response") throw new Error("expected a response group");
+		expect(group.answer).toBe("here is the answer");
+		expect(group.activity.filter((a) => a.kind === "thinking")).toHaveLength(1);
+		const tool = group.activity.find((a) => a.kind === "tool");
+		expect(tool).toMatchObject({ toolName: "read", status: "done", resultText: "file body" });
+		// The single restore/fork control keys to the run-terminal entry (a2).
+		expect(controller.getCheckpoints().map((c) => `${c.entryId}:${c.canRestore}:${c.canFork}`)).toEqual([
+			"a2:false:true",
+		]);
 	});
 
 	it("surfaces a notice when a restore is cancelled", async () => {
@@ -1632,7 +1749,7 @@ describe("SessionController resume (Phase 5 — rebuild transcript on start)", (
 		await controller.start();
 
 		// The resumed child never replays historical events, so start() rebuilds
-		// the transcript from the persisted branch tree instead of leaving it blank.
+		// the transcript from the persisted branch's full messages instead of leaving it blank.
 		expect(fake.treeCalls).toBeGreaterThan(0);
 		const items = controller.getTranscript().items;
 		expect(
@@ -1640,7 +1757,7 @@ describe("SessionController resume (Phase 5 — rebuild transcript on start)", (
 		).toEqual(["u:hi", "a:hello", "u:again", "a:world"]);
 		// The rebuild resyncs an already-live webview (finding 4) and realigns the
 		// inline restore/fork controls to the folded turns (finding 5) — keyed to
-		// the branch's assistant entries, with the current leaf non-restorable.
+		// the branch's run-terminal assistant entries, with the current leaf non-restorable.
 		expect(updates.some((u) => u.kind === "resync")).toBe(true);
 		expect(controller.getCheckpoints().map((c) => `${c.entryId}:${c.canRestore}`)).toEqual(["a1:true", "a2:false"]);
 	});
