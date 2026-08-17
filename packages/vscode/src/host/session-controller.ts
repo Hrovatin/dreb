@@ -17,10 +17,9 @@ import { MENTION_RESULT_CAP, rankMentionResults } from "../shared/mention.js";
 import {
 	alignCheckpoints,
 	applyEvent,
-	type BranchTurn,
 	type Checkpoint,
 	createTranscriptState,
-	foldBranchIntoState,
+	foldMessagesIntoState,
 	type TranscriptState,
 } from "../shared/projection.js";
 import type {
@@ -139,6 +138,10 @@ export interface RpcClientLike {
 	navigateTree(targetId: string): Promise<{ cancelled: boolean; editorText?: string }>;
 	/** The session branch tree plus the current leaf. */
 	getTree(): Promise<{ roots: SessionTreeNodeDto[]; leafId: string | null }>;
+	/** The full provider-message list for the current branch (updated after a
+	 * navigate/fork, and populated on resume). Used to rebuild the transcript with
+	 * complete content — answers, thinking, and tool calls — rather than previews. */
+	getMessages(): Promise<unknown[]>;
 }
 
 export type RpcClientFactory = (options: {
@@ -216,27 +219,32 @@ function findPath(nodes: SessionTreeNodeDto[], targetId: string): SessionTreeNod
 	return [];
 }
 
-/** Reduce a session tree to the current branch (root → leaf): the ordered
- * user/assistant turns (preview text) plus the assistant entry ids on that
- * branch. Non-message entries (labels, tool results) are skipped. Returns empty
- * when there is no leaf (fresh/empty session). */
-function currentBranch(
-	roots: SessionTreeNodeDto[],
-	leafId: string | null,
-): { turns: BranchTurn[]; assistantEntryIds: string[] } {
+/** Reduce a session tree to the current branch (root → leaf), returning one
+ * **run-terminal** assistant entry id per agent run. A run is delimited by user
+ * messages; within a run the backend persists several assistant entries (each
+ * tool-call turn plus the final answer), but the transcript renders one response
+ * group per run, so only the run's last assistant entry carries the inline
+ * restore/fork control. Non-message entries (labels, model changes, tool results)
+ * are skipped. Returns empty when there is no leaf (fresh/empty session). */
+function currentBranch(roots: SessionTreeNodeDto[], leafId: string | null): { runTerminalEntryIds: string[] } {
 	const path = leafId ? findPath(roots, leafId) : [];
-	const turns: BranchTurn[] = [];
-	const assistantEntryIds: string[] = [];
+	const runTerminalEntryIds: string[] = [];
+	let lastAssistantInRun: string | undefined;
 	for (const node of path) {
 		if (node.type !== "message") continue;
 		if (node.role === "user") {
-			turns.push({ entryId: node.id, role: "user", text: node.preview });
+			// A user turn closes the current run: commit its terminal assistant entry.
+			if (lastAssistantInRun) {
+				runTerminalEntryIds.push(lastAssistantInRun);
+				lastAssistantInRun = undefined;
+			}
 		} else if (node.role === "assistant") {
-			turns.push({ entryId: node.id, role: "assistant", text: node.preview });
-			assistantEntryIds.push(node.id);
+			lastAssistantInRun = node.id;
 		}
+		// toolResult / other roles stay within the current run.
 	}
-	return { turns, assistantEntryIds };
+	if (lastAssistantInRun) runTerminalEntryIds.push(lastAssistantInRun);
+	return { runTerminalEntryIds };
 }
 
 export class SessionController {
@@ -423,7 +431,7 @@ export class SessionController {
 			} catch (err) {
 				this.logger(`resume transcript rebuild failed: ${errorText(err)}`);
 				// A failure partway through the rebuild can leave a half-folded
-				// transcript (`foldBranchIntoState` clears items before repopulating).
+				// transcript (`foldMessagesIntoState` clears items before repopulating).
 				// Reset to a clean empty state (and clear checkpoints) so the webview
 				// never shows a partial conversation, then resync so an already-live
 				// webview reflects that clean state. Finally surface a notice — parity
@@ -914,34 +922,69 @@ export class SessionController {
 	 * a notice. */
 	async fork(entryId: string): Promise<void> {
 		if (!this.client) return;
+		let result: { text: string; cancelled: boolean };
 		try {
-			const result = await this.client.fork(entryId);
-			if (result.cancelled) {
-				this.emitNotice("Fork cancelled — no new branch was created.");
-				return;
-			}
-			await this.rebuildTranscript();
-			// Only user (re-ask) forks return text; assistant forks return "" and
-			// must not clobber whatever the user has already typed.
-			if (result.text.length > 0) this.emit({ kind: "composer-prefill", text: result.text });
+			result = await this.client.fork(entryId);
 		} catch (err) {
+			// The backend fork failed, so the leaf never moved — the current
+			// transcript is still valid. Just surface a notice; do NOT reset.
 			this.emitNotice(`Couldn't fork: ${errorText(err)}`);
+			return;
 		}
+		if (result.cancelled) {
+			this.emitNotice("Fork cancelled — no new branch was created.");
+			return;
+		}
+		try {
+			await this.rebuildTranscript();
+		} catch (err) {
+			// The backend already moved to the new branch, but the reload failed.
+			// Leaving the old transcript up would render a stale, wrong-branch
+			// conversation over a backend that has switched. Reset to a clean state
+			// (also clears checkpoints) and resync — parity with the resume guard —
+			// so the webview never shows the wrong branch.
+			this.logger(`fork transcript rebuild failed: ${errorText(err)}`);
+			this.resetTranscriptState();
+			this.emitNotice(
+				"Forked, but the chat couldn't reload — the new branch is saved and will show when you reopen the chat.",
+			);
+			this.emit({ kind: "resync" });
+			return;
+		}
+		// Only user (re-ask) forks return text; assistant forks return "" and
+		// must not clobber whatever the user has already typed.
+		if (result.text.length > 0) this.emit({ kind: "composer-prefill", text: result.text });
 	}
 
 	/** Restore (navigate) the session to a tree entry — a linear rewind or a
 	 * branch-jump. Rebuilds the transcript to the target leaf. */
 	async navigateTree(entryId: string): Promise<void> {
 		if (!this.client) return;
+		let result: { cancelled: boolean; editorText?: string };
 		try {
-			const result = await this.client.navigateTree(entryId);
-			if (result.cancelled) {
-				this.emitNotice("Restore cancelled.");
-				return;
-			}
+			result = await this.client.navigateTree(entryId);
+		} catch (err) {
+			// The backend navigation failed, so the leaf never moved — the current
+			// transcript is still valid. Just surface a notice; do NOT reset.
+			this.emitNotice(`Couldn't restore the checkpoint: ${errorText(err)}`);
+			return;
+		}
+		if (result.cancelled) {
+			this.emitNotice("Restore cancelled.");
+			return;
+		}
+		try {
 			await this.rebuildTranscript();
 		} catch (err) {
-			this.emitNotice(`Couldn't restore the checkpoint: ${errorText(err)}`);
+			// The backend already moved to the restored leaf, but the reload failed.
+			// Reset + resync (parity with the resume guard) so the webview never
+			// keeps rendering the pre-restore branch over a backend that has moved.
+			this.logger(`restore transcript rebuild failed: ${errorText(err)}`);
+			this.resetTranscriptState();
+			this.emitNotice(
+				"Restored, but the chat couldn't reload — the restored point is saved and will show when you reopen the chat.",
+			);
+			this.emit({ kind: "resync" });
 		}
 	}
 
@@ -957,15 +1000,18 @@ export class SessionController {
 	}
 
 	/** Rebuild the transcript from the current session branch (after a restore or
-	 * fork moved the leaf), realign checkpoints, and resync the webview. Turn text
-	 * uses the tree's per-entry previews — historical full text and tool activity
-	 * are not reconstructed (MVP). */
+	 * fork moved the leaf, or on resume), realign checkpoints, and resync the
+	 * webview. Uses the branch's full provider messages (`get_messages`) so answers,
+	 * thinking, and tool activity are reconstructed into the same response-group
+	 * model the live event stream builds — the rebuilt chat renders like a fresh
+	 * one. Checkpoints key to the tree's run-terminal assistant entries. */
 	private async rebuildTranscript(): Promise<void> {
 		if (!this.client) return;
+		const messages = await this.client.getMessages();
 		const tree = await this.client.getTree();
+		foldMessagesIntoState(this.state, messages);
 		const branch = currentBranch(tree.roots, tree.leafId);
-		foldBranchIntoState(this.state, branch.turns);
-		this.checkpoints = alignCheckpoints(this.state, branch.assistantEntryIds, await this.forkableEntryIds());
+		this.checkpoints = alignCheckpoints(this.state, branch.runTerminalEntryIds, await this.forkableEntryIds());
 		await this.refreshStatus(true);
 		this.emit({ kind: "resync" });
 		this.emit({ kind: "checkpoints", checkpoints: this.checkpoints });
@@ -980,7 +1026,7 @@ export class SessionController {
 		try {
 			const tree = await this.client.getTree();
 			const branch = currentBranch(tree.roots, tree.leafId);
-			this.checkpoints = alignCheckpoints(this.state, branch.assistantEntryIds, await this.forkableEntryIds());
+			this.checkpoints = alignCheckpoints(this.state, branch.runTerminalEntryIds, await this.forkableEntryIds());
 			this.emit({ kind: "checkpoints", checkpoints: this.checkpoints });
 		} catch (err) {
 			this.logger(`checkpoint refresh failed: ${errorText(err)}`);

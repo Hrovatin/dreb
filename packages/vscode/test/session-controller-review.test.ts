@@ -82,6 +82,9 @@ class MiniClient implements RpcClientLike {
 	async getTree(): Promise<{ roots: any[]; leafId: string | null }> {
 		return { roots: [], leafId: null };
 	}
+	async getMessages(): Promise<unknown[]> {
+		return [];
+	}
 	emit(event: unknown): void {
 		this.ev?.(event);
 	}
