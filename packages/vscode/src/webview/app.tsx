@@ -25,6 +25,7 @@ import type {
 import { taggedContextLabel, taggedContextTitle } from "../shared/tagged-context.js";
 import { buildGroundedRefs, linkifyAnswer } from "./code-links.js";
 import { renderMarkdown } from "./markdown.js";
+import { bindStickToBottom, createStickToBottom } from "./scrolling.js";
 import { onHostMessage, postToHost } from "./vscode-api.js";
 
 export function App() {
@@ -59,9 +60,12 @@ export function App() {
 	const [tick, setTick] = createSignal(0);
 
 	let scrollEl: HTMLDivElement | undefined;
-	const scrollToBottom = () => {
-		if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
-	};
+	let transcriptInnerEl: HTMLDivElement | undefined;
+	// Sticky-bottom autoscroll: follow new output only while the user is at the
+	// bottom. A manual scroll-up releases follow (so the view stays put as more
+	// output streams in); a deliberate scroll back to the bottom re-engages it.
+	// Shared controller vendored from the dashboard — see ./scrolling.ts.
+	const stickToBottom = createStickToBottom({ scroller: () => scrollEl });
 
 	onMount(() => {
 		const off = onHostMessage((msg) => {
@@ -107,11 +111,24 @@ export function App() {
 		onCleanup(off);
 	});
 
-	// Keep the transcript pinned to the latest output on any update.
+	// Follow the latest output on any update, but only while the user is pinned to
+	// the bottom. The controller re-reads the live follow state at fire time, so a
+	// manual scroll-up is respected even as more output streams in.
 	createEffect(() => {
 		tick();
-		queueMicrotask(scrollToBottom);
+		stickToBottom.notifyContentChanged();
 	});
+	// Re-pin when content grows asynchronously (e.g. late markdown/syntax
+	// rendering after a store update) and when the scroll viewport resizes
+	// (surrounding chrome — review bar, composer — changing clientHeight with no
+	// content change and no scroll event). Bind the scroll/wheel/key/touch
+	// listeners that drive follow-release detection once the scroller exists.
+	onMount(() => {
+		stickToBottom.observeContent(transcriptInnerEl);
+		stickToBottom.observeViewport(scrollEl);
+		if (scrollEl) onCleanup(bindStickToBottom(stickToBottom, scrollEl, { keyboard: "window" }));
+	});
+	onCleanup(() => stickToBottom.dispose());
 
 	const respondUi = (response: UiResponse) => postToHost({ type: "ui-response", response });
 
@@ -211,28 +228,32 @@ export function App() {
 			</Show>
 
 			<div class="dreb-transcript" ref={scrollEl}>
-				<For each={state.items}>
-					{(item) =>
-						item.kind === "user" ? (
-							<div class="dreb-user">{item.text}</div>
-						) : item.kind === "system" ? (
-							<pre class="dreb-system">{item.text}</pre>
-						) : (
-							<>
-								<ResponseView group={item} />
-								<Show when={checkpointByResponse().get(item.id)}>
-									{(checkpoint) => <CheckpointBar checkpoint={checkpoint()} />}
-								</Show>
-							</>
-						)
-					}
-				</For>
+				<div class="dreb-transcript-inner" ref={transcriptInnerEl}>
+					<For each={state.items}>
+						{(item) =>
+							item.kind === "user" ? (
+								<div class="dreb-user">{item.text}</div>
+							) : item.kind === "system" ? (
+								<pre class="dreb-system">{item.text}</pre>
+							) : (
+								<>
+									<ResponseView group={item} />
+									<Show when={checkpointByResponse().get(item.id)}>
+										{(checkpoint) => <CheckpointBar checkpoint={checkpoint()} />}
+									</Show>
+								</>
+							)
+						}
+					</For>
 
-				<For each={state.uiRequests}>{(request) => <UiRequestView request={request} onRespond={respondUi} />}</For>
+					<For each={state.uiRequests}>
+						{(request) => <UiRequestView request={request} onRespond={respondUi} />}
+					</For>
 
-				<Show when={state.statusText}>
-					<div class="dreb-status-line">{state.statusText}</div>
-				</Show>
+					<Show when={state.statusText}>
+						<div class="dreb-status-line">{state.statusText}</div>
+					</Show>
+				</div>
 			</div>
 
 			<Show when={tree()}>
