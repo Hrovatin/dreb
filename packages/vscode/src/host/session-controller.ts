@@ -25,6 +25,7 @@ import {
 import type {
 	HostStatus,
 	OpenSourceRef,
+	QueuedMessageDto,
 	ReviewFileDto,
 	ReviewStateDto,
 	SessionTreeDto,
@@ -96,6 +97,17 @@ export interface RpcClientLike {
 	start(): Promise<void>;
 	stop(): Promise<void>;
 	prompt(message: string, images?: unknown[]): Promise<void>;
+	/** Queue a message while the agent is streaming, injecting it into the
+	 * running turn (after the current tool calls). The plain `prompt()` throws
+	 * mid-stream, so a submit made while working must route here. */
+	steer(message: string, images?: unknown[]): Promise<void>;
+	/** Queue a message while the agent is streaming, delivered after the current
+	 * turn fully finishes. */
+	followUp(message: string, images?: unknown[]): Promise<void>;
+	/** Read the queued steer/follow-up messages without clearing them. */
+	getPendingMessages(): Promise<{ steering: string[]; followUp: string[] }>;
+	/** Clear the queued steer/follow-up messages, returning the cleared text. */
+	clearPendingMessages(): Promise<{ steering: string[]; followUp: string[] }>;
 	abort(): Promise<void>;
 	compact(customInstructions?: string): Promise<unknown>;
 	/** Toggle read-only Ask mode; resolves with the resulting state. */
@@ -192,6 +204,9 @@ export type ControllerUpdate =
 	| { kind: "tree"; tree: SessionTreeDto }
 	/** Pre-fill the composer (a user-message fork's re-ask text) (Phase 6). */
 	| { kind: "composer-prefill"; text: string }
+	/** The pending steer/follow-up queue changed — the bridge forwards it to the
+	 * webview as composer chips (empty clears them). */
+	| { kind: "pending"; messages: QueuedMessageDto[] }
 	/** Transcript was replaced host-side (e.g. `/new`, `/import`); the bridge
 	 * re-sends a fresh snapshot. */
 	| { kind: "resync" };
@@ -277,6 +292,11 @@ export class SessionController {
 	 * current transcript's response groups. Held so the bridge can include them
 	 * in the ready/resync snapshot. */
 	private checkpoints: Checkpoint[] = [];
+	/** Last-known pending steer/follow-up queue (held so the bridge can include
+	 * it in the ready snapshot — queued chips survive webview recreation).
+	 * Refreshed authoritatively from the RPC child on run transitions and after
+	 * a queued submit. */
+	private pendingMessages: QueuedMessageDto[] = [];
 	private readonly logger: (line: string) => void;
 	private readonly options: SessionControllerOptions;
 	private client: RpcClientLike | undefined;
@@ -362,6 +382,13 @@ export class SessionController {
 	 * in the ready/resync snapshot so they survive webview recreation. */
 	getCheckpoints(): Checkpoint[] {
 		return this.checkpoints;
+	}
+
+	/** The current pending steer/follow-up queue (Phase: queued composer
+	 * messages); included by the bridge in the ready snapshot so queued chips
+	 * survive webview recreation. */
+	getPending(): QueuedMessageDto[] {
+		return this.pendingMessages;
 	}
 
 	getCommandList(): SlashCommandDto[] {
@@ -509,12 +536,12 @@ export class SessionController {
 				case "empty":
 					// Reached only with attachments present (see guard above): send the
 					// folded context so a chips-only submit isn't silently dropped.
-					await this.client.prompt(buildPromptWithContext(text, attachments));
+					await this.deliver(buildPromptWithContext(text, attachments));
 					return;
 				case "prompt":
 					// Fold any tagged editor selections into the prompt as located
 					// context (attachments only apply to prompts, not slash builtins).
-					await this.client.prompt(buildPromptWithContext(decision.message, attachments));
+					await this.deliver(buildPromptWithContext(decision.message, attachments));
 					return;
 				case "builtin":
 					await this.runBuiltin(decision.command, decision.arg);
@@ -528,12 +555,41 @@ export class SessionController {
 		}
 	}
 
+	/** Send composer text to the model. While the agent is working, `prompt()`
+	 * throws ("Agent is already processing…"), which would silently swallow the
+	 * message; route it through `steer()` instead so it's queued into the running
+	 * turn, and refresh the pending chips so the queued message is visible. When
+	 * idle, dispatch it as a normal prompt. */
+	private async deliver(message: string): Promise<void> {
+		const client = this.client;
+		if (!client) return;
+		if (this.state.streaming) {
+			await client.steer(message);
+			await this.refreshPending();
+			return;
+		}
+		await client.prompt(message);
+	}
+
+	/** Abort the current turn. Any messages the user queued while the agent was
+	 * working are stranded by an abort (the agent loop exits without draining the
+	 * steer/follow-up queue), so drain and clear the RPC child's queue and restore
+	 * the queued text into the composer — the user decides whether to resend it
+	 * rather than losing it. */
 	async abort(): Promise<void> {
 		if (!this.client || !this.status.connected) return;
 		try {
 			await this.client.abort();
 		} catch (err) {
 			this.logger(`abort failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
+		try {
+			const { steering, followUp } = await this.client.clearPendingMessages();
+			const restored = [...steering, ...followUp].filter((text) => text.trim().length > 0);
+			this.setPending([]);
+			if (restored.length > 0) this.emit({ kind: "composer-prefill", text: restored.join("\n\n") });
+		} catch (err) {
+			this.logger(`clearing pending on abort failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
 
@@ -781,6 +837,30 @@ export class SessionController {
 		}
 	}
 
+	/** Refresh the pending steer/follow-up queue from the RPC child (authoritative
+	 * — an empty result clears the chips). Best-effort: a read failure leaves the
+	 * last-known queue in place rather than surfacing a notice. Called on run
+	 * transitions, after a queued submit, and after an abort clears the queue. */
+	private async refreshPending(): Promise<void> {
+		const client = this.client;
+		if (!client || !this.status.connected) return;
+		try {
+			const { steering, followUp } = await client.getPendingMessages();
+			this.setPending([
+				...steering.map((text): QueuedMessageDto => ({ kind: "steer", text })),
+				...followUp.map((text): QueuedMessageDto => ({ kind: "follow-up", text })),
+			]);
+		} catch (err) {
+			this.logger(`refreshPending failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	/** Replace the held pending queue and publish it to the webview. */
+	private setPending(messages: QueuedMessageDto[]): void {
+		this.pendingMessages = messages;
+		this.emit({ kind: "pending", messages });
+	}
+
 	/** Clear the transcript in place (properties, not the reference) so `/new`
 	 * and `/import` present a fresh conversation after a `resync`. */
 	private resetTranscriptState(): void {
@@ -795,6 +875,9 @@ export class SessionController {
 		// first response group reuses id 1 and would otherwise match a stale
 		// `{responseId: 1}`). The subsequent `resync` re-posts this empty array.
 		this.checkpoints = [];
+		// A fresh/imported session starts with no queued messages (the RPC child
+		// clears its own queue on new_session); clear the chips to match.
+		this.setPending([]);
 	}
 
 	/** Append a persistent host-side line to the transcript (e.g. `/session`). */
@@ -1152,6 +1235,13 @@ export class SessionController {
 		// Snapshot a baseline before the first turn of a review cycle (changes
 		// then compound against it until accepted/reverted).
 		if (type === "turn_start") this.maybeCaptureBaseline();
+		// Keep the queued-message chips in sync with the RPC child's queue:
+		// a run starting/ending changes what's still pending, and a steered
+		// user message delivered mid-run drops out of the queue.
+		if (type === "agent_start" || type === "agent_end") void this.refreshPending();
+		else if (type === "message_start" && (event as { message?: { role?: string } }).message?.role === "user") {
+			void this.refreshPending();
+		}
 		// After each completed turn, refresh runtime status (cost/context/model)
 		// the way the dashboard does on the streaming→idle transition, and
 		// recompute the change-review set from the baseline.

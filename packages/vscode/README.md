@@ -80,6 +80,12 @@ Commands owned by later phases (`/settings`, `/scoped-models`, `/fork`, `/tree`,
 
 The webview renders a compact header mirroring the TUI: **model · thinking level · cost · context usage**. Cost shows the session total (`$0.123`, `+ (sub)` on a subscription) and, when known, the larger daily total (`, today $1.23`); context usage shows `ctx 42%`. All formatting lives in the pure `shared/format.ts` so the header renders costs consistently.
 
+## Queued messages (send while working)
+
+You don't have to wait for the agent to finish before typing your next instruction. Sending a message while a turn is in flight **steers** it — the message is injected into the running turn (rather than being rejected as a mid-stream `prompt`, which would silently drop it). Queued messages show as **chips above the composer** ("2 queued messages") until they're delivered, so nothing you send is invisible.
+
+Pressing **Stop** aborts the current turn. Because an abort leaves any still-queued messages undelivered, the extension **clears the queue and restores that text back into the composer** — you decide whether to resend it, rather than losing it. The pending queue is host-authoritative (refreshed from the RPC child on run transitions and after each queued submit) so the chips survive a webview reload.
+
 ## Change review
 
 Because the agent runs out-of-process and writes edits straight to disk, the extension can't hold changes in an unsaved overlay. Instead it **snapshots a git baseline before each turn** and reviews the working tree against it (the non-interactive analogue of `git restore -p`):

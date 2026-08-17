@@ -182,6 +182,15 @@ export interface SessionTreeDto {
 	leafId: string | null;
 }
 
+/** One message the user queued while the agent was working — waiting to be
+ * delivered to the model. `steer` messages inject into the running turn;
+ * `follow-up` messages are delivered after it finishes. Shown as a composer
+ * chip until delivered (see the `pending` host→webview message). */
+export interface QueuedMessageDto {
+	kind: "steer" | "follow-up";
+	text: string;
+}
+
 /** Messages sent from the host to the webview. */
 export type HostToWebview =
 	| { type: "snapshot"; state: TranscriptState; commands: SlashCommandDto[]; status: HostStatus }
@@ -203,6 +212,9 @@ export type HostToWebview =
 	 * request's `requestId` so the webview can drop stale (out-of-order)
 	 * responses. Mixes folders, files, and code symbols (in that order). */
 	| { type: "mention-results"; requestId: number; results: TaggedContextDto[] }
+	/** The queue of pending steer/follow-up messages changed — render them as
+	 * chips above the composer (empty clears the chips). */
+	| { type: "pending"; messages: QueuedMessageDto[] }
 	/** Pre-fill the composer (e.g. a user-message fork's re-ask text) (Phase 6). */
 	| { type: "composer-prefill"; text: string };
 

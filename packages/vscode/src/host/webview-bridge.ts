@@ -93,6 +93,7 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				});
 				post({ type: "review", review: controller.getReviewState() });
 				post({ type: "checkpoints", checkpoints: controller.getCheckpoints() });
+				post({ type: "pending", messages: controller.getPending() });
 				break;
 			case "checkpoints":
 				post({ type: "checkpoints", checkpoints: update.checkpoints });
@@ -102,6 +103,9 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				break;
 			case "composer-prefill":
 				post({ type: "composer-prefill", text: update.text });
+				break;
+			case "pending":
+				post({ type: "pending", messages: update.messages });
 				break;
 		}
 	});
@@ -121,6 +125,7 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				live = true;
 				post({ type: "review", review: controller.getReviewState() });
 				post({ type: "checkpoints", checkpoints: controller.getCheckpoints() });
+				post({ type: "pending", messages: controller.getPending() });
 				// Deliver any context tags added before the webview was live.
 				for (const pending of pendingTags.splice(0))
 					post({ type: "tag-context", context: pending.context, origin: pending.origin });

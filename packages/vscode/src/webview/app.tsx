@@ -15,6 +15,7 @@ import {
 import type {
 	HostStatus,
 	OpenSourceRef,
+	QueuedMessageDto,
 	ReviewStateDto,
 	SessionTreeDto,
 	SessionTreeNodeDto,
@@ -43,6 +44,9 @@ export function App() {
 	// Inline restore/fork controls (Phase 6), aligned to response groups by id.
 	const [checkpoints, setCheckpoints] = createSignal<Checkpoint[]>([]);
 	const checkpointByResponse = createMemo(() => new Map(checkpoints().map((c) => [c.responseId, c])));
+	// Messages the user queued while the agent was working (steer/follow-up),
+	// shown as chips above the composer until they're delivered to the model.
+	const [pending, setPending] = createSignal<QueuedMessageDto[]>([]);
 	// The session branch tree, shown as an overlay when the user opens it.
 	const [tree, setTree] = createSignal<SessionTreeDto | undefined>();
 	// A composer pre-fill request (a user-message fork's re-ask text). Bumped
@@ -104,6 +108,9 @@ export function App() {
 					break;
 				case "checkpoints":
 					setCheckpoints(msg.checkpoints);
+					break;
+				case "pending":
+					setPending(msg.messages);
 					break;
 				case "tree":
 					setTree(msg.tree);
@@ -279,6 +286,22 @@ export function App() {
 						onClose={() => setTree(undefined)}
 					/>
 				)}
+			</Show>
+
+			<Show when={pending().length > 0}>
+				<div class="dreb-pending-bar" title="Queued while dreb is working — delivered to the model in order">
+					<span class="dreb-pending-title">
+						{pending().length} queued message{pending().length === 1 ? "" : "s"}
+					</span>
+					<For each={pending()}>
+						{(message) => (
+							<span class={`dreb-pending-chip ${message.kind}`} title={message.text}>
+								<span class="dreb-pending-kind">{message.kind}</span>
+								{message.text}
+							</span>
+						)}
+					</For>
+				</div>
 			</Show>
 
 			<Composer
