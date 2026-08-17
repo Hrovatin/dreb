@@ -134,6 +134,12 @@ export interface SymbolContextDto {
  * folded into the next prompt. */
 export type TaggedContextDto = SelectionContextDto | FileContextDto | SymbolContextDto;
 
+/** Where a tagged context came from, which decides how the composer surfaces it.
+ * `"picker"` (the native `@@` file/folder picker) inserts an inline `@name`
+ * reference at the caret in addition to the chip; `"selection"` (an editor
+ * selection tagged via a command) stays a chip only. */
+export type TagContextOrigin = "selection" | "picker";
+
 /** A clickable code reference the user activated in an answer (Phase 5b). Either
  * a concrete file `path` (optionally with a 1-based `line`/`column`), a `symbol`
  * name to resolve at click time, or both. When a `symbol` is present the host
@@ -184,8 +190,11 @@ export type HostToWebview =
 	| { type: "status"; status: HostStatus }
 	/** Change-review set changed (per-turn detection, accept/revert). */
 	| { type: "review"; review: ReviewStateDto }
-	/** An editor selection was tagged into the chat — add it as a composer chip. */
-	| { type: "tag-context"; context: TaggedContextDto }
+	/** A context tag was added to the chat — add it as a composer chip. When
+	 * `origin` is `"picker"` (the native `@@` file/folder picker) the composer
+	 * also inserts an inline `@name` reference; `"selection"` (an editor
+	 * selection) stays a chip only. */
+	| { type: "tag-context"; context: TaggedContextDto; origin: TagContextOrigin }
 	/** Inline restore/fork controls, aligned to response groups (Phase 6). */
 	| { type: "checkpoints"; checkpoints: Checkpoint[] }
 	/** The session branch tree, in response to a `show-tree` request (Phase 6). */

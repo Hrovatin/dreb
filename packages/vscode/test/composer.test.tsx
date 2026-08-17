@@ -7,11 +7,13 @@
  * the real `Composer` in jsdom and drives the textarea to verify the *glue* the
  * helpers hang off: `@@` escalates to the native picker (and never searches),
  * `@`-typing schedules a debounced workspace search, selecting a dropdown result
- * strips the `@query` token and tags the chosen folder/file/symbol, and Escape
- * dismisses the dropdown. A dataset-key rename, a dropped debounce, or a wrong
- * token span would fail here while the isolated helper tests stayed green.
+ * inserts an inline `@name` reference and tags the chosen folder/file/symbol, a
+ * native-picker (`@@`) tag inserts a reference at the caret, and Escape dismisses
+ * the dropdown. A dataset-key rename, a dropped debounce, or a wrong token span
+ * would fail here while the isolated helper tests stayed green.
  */
 
+import { createSignal } from "solid-js";
 import { render } from "solid-js/web/dist/web.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FileContextDto, SymbolContextDto, TaggedContextDto } from "../src/shared/protocol.js";
@@ -53,6 +55,7 @@ function mount(mentionResults: TaggedContextDto[] = []): {
 	host: HTMLElement;
 	textarea: HTMLTextAreaElement;
 	spies: Spies;
+	setMentionInsert: (value: { label: string; nonce: number }) => void;
 } {
 	const spies: Spies = {
 		onPickFile: vi.fn(),
@@ -60,6 +63,7 @@ function mount(mentionResults: TaggedContextDto[] = []): {
 		onTagContext: vi.fn(),
 		onSubmit: vi.fn(),
 	};
+	const [mentionInsert, setMentionInsert] = createSignal<{ label: string; nonce: number }>();
 	const host = document.createElement("div");
 	document.body.appendChild(host);
 	dispose = render(
@@ -69,6 +73,7 @@ function mount(mentionResults: TaggedContextDto[] = []): {
 				commands={[]}
 				attachments={[]}
 				mentionResults={mentionResults}
+				mentionInsert={mentionInsert()}
 				onRemoveAttachment={() => {}}
 				onSubmit={spies.onSubmit}
 				onAbort={() => {}}
@@ -80,7 +85,7 @@ function mount(mentionResults: TaggedContextDto[] = []): {
 		host,
 	);
 	const textarea = host.querySelector("textarea.dreb-input") as HTMLTextAreaElement;
-	return { host, textarea, spies };
+	return { host, textarea, spies, setMentionInsert };
 }
 
 /** Simulate typing by setting the textarea value + caret and dispatching a
@@ -168,7 +173,7 @@ describe("Composer mention dropdown", () => {
 		expect(host.querySelector(".dreb-menu-item")).toBeNull();
 	});
 
-	it("tags the chosen result, strips the `@query` token, and closes the dropdown", () => {
+	it("inserts an inline `@name` reference in place of the `@query`, tags it, and closes the dropdown", () => {
 		const results: TaggedContextDto[] = [file("src/app.ts")];
 		const { host, textarea, spies } = mount(results);
 		type(textarea, "see @app", 8);
@@ -179,10 +184,22 @@ describe("Composer mention dropdown", () => {
 
 		expect(spies.onTagContext).toHaveBeenCalledTimes(1);
 		expect(spies.onTagContext).toHaveBeenCalledWith({ kind: "file", path: "src/app.ts" });
-		// The `@app` token is stripped, leaving the surrounding prose.
-		expect(textarea.value).toBe("see ");
+		// The `@app` token becomes the inline `@app.ts ` reference (chip label, not
+		// the full path), leaving the surrounding prose intact.
+		expect(textarea.value).toBe("see @app.ts ");
 		// With no active token the dropdown closes.
 		expect(host.querySelector(".dreb-menu-item")).toBeNull();
+	});
+
+	it("inserts the folder label with its trailing slash when a folder is chosen", () => {
+		const results: TaggedContextDto[] = [folder("src/app")];
+		const { host, textarea } = mount(results);
+		type(textarea, "@app", 4);
+
+		const item = host.querySelector(".dreb-menu-item") as HTMLButtonElement;
+		item.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+		expect(textarea.value).toBe("@app/ ");
 	});
 
 	it("dismisses the dropdown on Escape without submitting or losing text", () => {
@@ -325,5 +342,37 @@ describe("Composer resize handle", () => {
 		pointerMove(300); // dragged up 200px from the measured 52px
 		pointerUp();
 		expect(textarea.style.height).toBe("252px"); // 52 + 200, not 200
+	});
+});
+
+describe("Composer native `@@` picker insertion", () => {
+	it("inserts an inline `@name` reference at the caret when a picker tag arrives", () => {
+		const { textarea, setMentionInsert } = mount();
+		// Simulate the post-`@@`-strip state: prose typed, caret at the end.
+		type(textarea, "review ", 7);
+
+		// The host resolves the native picker and drives a picker-origin tag.
+		setMentionInsert({ label: "app.ts", nonce: 1 });
+
+		expect(textarea.value).toBe("review @app.ts ");
+	});
+
+	it("inserts each pick in sequence, advancing the caret", () => {
+		const { textarea, setMentionInsert } = mount();
+		type(textarea, "", 0);
+
+		setMentionInsert({ label: "a.ts", nonce: 1 });
+		setMentionInsert({ label: "b.ts", nonce: 2 });
+
+		expect(textarea.value).toBe("@a.ts @b.ts ");
+	});
+
+	it("inserts a folder label with its trailing slash", () => {
+		const { textarea, setMentionInsert } = mount();
+		type(textarea, "", 0);
+
+		setMentionInsert({ label: "host/", nonce: 1 });
+
+		expect(textarea.value).toBe("@host/ ");
 	});
 });

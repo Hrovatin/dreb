@@ -1,74 +1,61 @@
 import { describe, expect, it } from "vitest";
-import { deriveFolderPaths, type RawSymbolHit, selectSymbols } from "../src/host/workspace-search.js";
+import {
+	folderNameMatches,
+	type RawSymbolHit,
+	selectMatchingFolders,
+	selectSymbols,
+} from "../src/host/workspace-search.js";
 
-describe("deriveFolderPaths", () => {
-	const ROOT = "/home/me/proj";
-
-	it("surfaces an in-project ancestor folder whose segment matches the query", () => {
-		const hits = ["/home/me/proj/src/app/utils.ts"];
-		expect(deriveFolderPaths(hits, "app", [ROOT], 50)).toEqual(["/home/me/proj/src/app"]);
+describe("folderNameMatches", () => {
+	it("matches a case-insensitive substring of the directory name", () => {
+		expect(folderNameMatches("MyApp", "app")).toBe(true);
+		expect(folderNameMatches("components", "compo")).toBe(true);
 	});
 
-	it("excludes ancestors ABOVE the workspace root even when their name matches", () => {
-		// Project lives under ~/code; typing "code" must NOT surface /home/me/code
-		// (the parent), only the in-project `codegen` folder.
-		const root = "/home/me/code/proj";
-		const hits = ["/home/me/code/proj/src/codegen/parser.ts"];
-		expect(deriveFolderPaths(hits, "code", [root], 50)).toEqual(["/home/me/code/proj/src/codegen"]);
+	it("does not match when the query is absent from the name", () => {
+		expect(folderNameMatches("src", "app")).toBe(false);
 	});
 
-	it("returns nothing when the only matches are outside the project", () => {
-		const hits = ["/home/me/code/proj/src/app.ts"];
-		// "me" matches the /home/me ancestor, which is above the root → dropped.
-		expect(deriveFolderPaths(hits, "me", ["/home/me/code/proj"], 50)).toEqual([]);
+	it("never matches an empty (or whitespace-only) query, keeping the folder source query-gated", () => {
+		expect(folderNameMatches("anything", "")).toBe(false);
+		expect(folderNameMatches("anything", "   ")).toBe(false);
+	});
+});
+
+describe("selectMatchingFolders", () => {
+	it("keeps folders whose basename matches, regardless of whether they contain files", () => {
+		// An empty folder is just a discovered directory path with no file
+		// children — the walk lists it via readDirectory, and it surfaces here.
+		const dirs = ["/home/me/proj/src/empty-widgets", "/home/me/proj/src/utils"];
+		expect(selectMatchingFolders(dirs, "widget", 50)).toEqual(["/home/me/proj/src/empty-widgets"]);
 	});
 
-	it("matches case-insensitively on a substring of the segment", () => {
-		const hits = ["/home/me/proj/src/MyApp/index.ts"];
-		expect(deriveFolderPaths(hits, "myapp", [ROOT], 50)).toEqual(["/home/me/proj/src/MyApp"]);
+	it("matches on the basename only, not an ancestor segment", () => {
+		const dirs = ["/home/me/app/src/models"];
+		// "app" appears only in an ancestor, not the leaf → not a folder match.
+		expect(selectMatchingFolders(dirs, "app", 50)).toEqual([]);
 	});
 
-	it("skips the final (file) segment so a matching filename is not treated as a folder", () => {
-		const hits = ["/home/me/proj/src/app.ts"];
-		// "app" appears only in the file name; there is no matching directory.
-		expect(deriveFolderPaths(hits, "app", [ROOT], 50)).toEqual([]);
+	it("matches case-insensitively", () => {
+		expect(selectMatchingFolders(["/home/me/proj/src/MyApp"], "myapp", 50)).toEqual(["/home/me/proj/src/MyApp"]);
 	});
 
-	it("surfaces every matching ancestor along one path (nested folders)", () => {
-		const hits = ["/home/me/proj/app/appmodule/x.ts"];
-		expect(deriveFolderPaths(hits, "app", [ROOT], 50)).toEqual(["/home/me/proj/app", "/home/me/proj/app/appmodule"]);
+	it("dedupes repeated paths, preserving first-seen order", () => {
+		const dirs = ["/p/app", "/p/lib/app", "/p/app"];
+		expect(selectMatchingFolders(dirs, "app", 50)).toEqual(["/p/app", "/p/lib/app"]);
 	});
 
-	it("dedupes a folder reached via multiple file hits, preserving first-seen order", () => {
-		const hits = ["/home/me/proj/src/app/a.ts", "/home/me/proj/src/app/b.ts", "/home/me/proj/lib/app/c.ts"];
-		expect(deriveFolderPaths(hits, "app", [ROOT], 50)).toEqual(["/home/me/proj/src/app", "/home/me/proj/lib/app"]);
+	it("caps the number of results", () => {
+		const dirs = Array.from({ length: 10 }, (_, i) => `/p/app${i}`);
+		expect(selectMatchingFolders(dirs, "app", 3)).toHaveLength(3);
 	});
 
-	it("caps the number of derived folders", () => {
-		const hits = Array.from({ length: 10 }, (_, i) => `/home/me/proj/app${i}/f.ts`);
-		expect(deriveFolderPaths(hits, "app", [ROOT], 3)).toHaveLength(3);
+	it("returns nothing for an empty query", () => {
+		expect(selectMatchingFolders(["/p/app"], "", 50)).toEqual([]);
 	});
 
-	it("includes the workspace root itself when its name matches", () => {
-		const hits = ["/home/me/proj/src/x.ts"];
-		expect(deriveFolderPaths(hits, "proj", [ROOT], 50)).toEqual(["/home/me/proj"]);
-	});
-
-	it("tolerates a trailing slash on the workspace root", () => {
-		const hits = ["/home/me/proj/src/app/utils.ts"];
-		expect(deriveFolderPaths(hits, "app", ["/home/me/proj/"], 50)).toEqual(["/home/me/proj/src/app"]);
-	});
-
-	it("honors multiple workspace roots (multi-root workspace)", () => {
-		const roots = ["/home/me/api", "/home/me/web"];
-		const hits = ["/home/me/api/app/x.ts", "/home/me/web/app/y.ts", "/home/me/other/app/z.ts"];
-		// The /home/me/other hit is outside every root → excluded.
-		expect(deriveFolderPaths(hits, "app", roots, 50)).toEqual(["/home/me/api/app", "/home/me/web/app"]);
-	});
-
-	it("returns nothing when there are no workspace roots", () => {
-		const hits = ["/home/me/proj/src/app/x.ts"];
-		expect(deriveFolderPaths(hits, "app", [], 50)).toEqual([]);
+	it("tolerates back-slashed (Windows) paths when taking the basename", () => {
+		expect(selectMatchingFolders(["C:\\proj\\src\\widgets"], "widget", 50)).toEqual(["C:\\proj\\src\\widgets"]);
 	});
 });
 

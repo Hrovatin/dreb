@@ -598,9 +598,12 @@ describe("SessionController", () => {
 		controller.tagContext(context);
 
 		const tag = updates.find((u) => u.kind === "tag-context") as
-			| { kind: "tag-context"; context: unknown }
+			| { kind: "tag-context"; context: unknown; origin?: unknown }
 			| undefined;
 		expect(tag?.context).toEqual(context);
+		// A plain tag (editor selection) defaults to the "selection" origin so the
+		// webview leaves it chip-only and does NOT insert inline reference text.
+		expect(tag?.origin).toBe("selection");
 	});
 
 	it("tagFileFromPicker tags each picked file/folder as a path-reference chip", async () => {
@@ -613,15 +616,20 @@ describe("SessionController", () => {
 		const controller = makeController(fake, { ui });
 		await controller.start();
 
-		const updates: Array<{ kind: string; context?: unknown }> = [];
+		const updates: Array<{ kind: string; context?: unknown; origin?: unknown }> = [];
 		controller.onUpdate((u) => updates.push(u));
 		await controller.tagFileFromPicker();
 
-		const tags = updates.filter((u) => u.kind === "tag-context").map((u) => u.context);
-		expect(tags).toEqual([
+		const tagUpdates = updates.filter((u) => u.kind === "tag-context");
+		expect(tagUpdates.map((u) => u.context)).toEqual([
 			{ kind: "file", path: "src/app.ts" },
 			{ kind: "file", path: "src/host", isDirectory: true },
 		]);
+		// Every picker-originated tag must carry origin "picker" — that flag is the
+		// entire D3 mechanism (it tells the webview to insert an inline `@name`
+		// reference). If it silently reverted to the "selection" default, `@@`
+		// picks would land as chips only.
+		expect(tagUpdates.map((u) => u.origin)).toEqual(["picker", "picker"]);
 	});
 
 	it("tagFileFromPicker no-ops when the picker is dismissed", async () => {
