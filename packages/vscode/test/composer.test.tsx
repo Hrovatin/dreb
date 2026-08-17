@@ -296,4 +296,34 @@ describe("Composer resize handle", () => {
 		keyDown(handleOf(host), "Home");
 		expect(textarea.style.height).toBe("");
 	});
+
+	it("keeps aria-value* in sync as the input is resized (finding 6)", () => {
+		const { host } = mount();
+		const handle = handleOf(host);
+		// Static bounds: floor is MIN_COMPOSER_HEIGHT; ceiling is round(768 * 0.8).
+		expect(handle.getAttribute("aria-valuemin")).toBe("44");
+		expect(handle.getAttribute("aria-valuemax")).toBe("614");
+		// A drag updates the reactive binding — a static/untracked read would fail here.
+		pointerDown(handle, 500);
+		pointerMove(300); // → 200px
+		pointerUp();
+		expect(handle.getAttribute("aria-valuenow")).toBe("200");
+		// End grows to the ceiling; valuenow must reach valuemax.
+		keyDown(handle, "End");
+		expect(handle.getAttribute("aria-valuenow")).toBe("614");
+		expect(handle.getAttribute("aria-valuenow")).toBe(handle.getAttribute("aria-valuemax"));
+	});
+
+	it("starts a drag from the input's measured height, not jsdom's 0 (finding 8)", () => {
+		const { host, textarea } = mount();
+		// In a real browser the 2-row textarea has a natural height (~52px); jsdom
+		// reports offsetHeight 0, which would silently mask the `inputEl.offsetHeight`
+		// branch of `currentComposerHeight` and let a "drag always starts from 0"
+		// regression pass. Stub a realistic height so the drag is measured from it.
+		Object.defineProperty(textarea, "offsetHeight", { configurable: true, value: 52 });
+		pointerDown(handleOf(host), 500);
+		pointerMove(300); // dragged up 200px from the measured 52px
+		pointerUp();
+		expect(textarea.style.height).toBe("252px"); // 52 + 200, not 200
+	});
 });
