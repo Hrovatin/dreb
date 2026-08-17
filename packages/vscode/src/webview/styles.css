@@ -343,6 +343,44 @@ body {
 	padding: 8px 12px;
 }
 
+/* Top-edge drag handle: the composer is docked at the bottom of the panel, so a
+   grip on its top edge lets the user pull the input up over the chat area (and
+   double-click to reset). Spans the full width and overlays the border-top. */
+.dreb-resize-handle {
+	position: absolute;
+	top: -3px;
+	left: 0;
+	right: 0;
+	height: 9px;
+	margin: 0;
+	border: none;
+	background: transparent;
+	cursor: ns-resize;
+	touch-action: none;
+	z-index: 1;
+}
+.dreb-resize-handle:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder, #007fd4);
+	outline-offset: -1px;
+}
+.dreb-resize-handle::before {
+	content: "";
+	position: absolute;
+	top: 3px;
+	left: 50%;
+	transform: translateX(-50%);
+	width: 32px;
+	height: 3px;
+	border-radius: 3px;
+	background: var(--vscode-panel-border, rgba(128, 128, 128, 0.5));
+	opacity: 0;
+	transition: opacity 0.1s ease-in-out;
+}
+.dreb-resize-handle:hover::before {
+	opacity: 1;
+	background: var(--vscode-focusBorder, rgba(128, 128, 128, 0.8));
+}
+
 .dreb-composer-row {
 	display: flex;
 	gap: 8px;
@@ -392,7 +430,11 @@ body {
 
 .dreb-input {
 	flex: 1;
-	resize: vertical;
+	/* Height is driven by the top drag handle (see `.dreb-resize-handle` and
+	   `clampComposerHeight`), so the native corner grip is disabled to avoid two
+	   competing affordances. `min-height` is the compact ~2-row floor. */
+	resize: none;
+	min-height: 44px;
 	font-family: inherit;
 	font-size: inherit;
 	color: var(--vscode-input-foreground);

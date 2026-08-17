@@ -24,6 +24,7 @@ import type {
 } from "../shared/protocol.js";
 import { taggedContextLabel, taggedContextTitle } from "../shared/tagged-context.js";
 import { buildGroundedRefs, linkifyAnswer } from "./code-links.js";
+import { clampComposerHeight } from "./composer-resize.js";
 import { renderMarkdown } from "./markdown.js";
 import { onHostMessage, postToHost } from "./vscode-api.js";
 
@@ -638,6 +639,66 @@ export function Composer(props: {
 	let inputEl: HTMLTextAreaElement | undefined;
 	let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
+	// User-chosen composer height (px) from the top resize handle. `null` means
+	// "use the natural `rows={2}` height". The composer is docked at the bottom of
+	// the panel, so a top-edge handle lets the user pull the input up over the
+	// chat area for long drafts and shrink it back (drag, double-click to reset,
+	// or keyboard arrows). See `clampComposerHeight` for the drag geometry.
+	const [composerHeight, setComposerHeight] = createSignal<number | null>(null);
+	// Compact floor (~2 rows) the input can never shrink below.
+	const MIN_COMPOSER_HEIGHT = 44;
+	// Fraction of the panel height the input may grow to occupy, leaving room for
+	// the send button and some chat context above.
+	const MAX_COMPOSER_FRACTION = 0.8;
+	// Per-keystroke resize step for keyboard operation of the handle.
+	const RESIZE_KEY_STEP = 24;
+	let resizeDrag: { startY: number; startHeight: number } | null = null;
+
+	// Current ceiling in px, recomputed from the live panel height.
+	const composerMaxHeight = () =>
+		Math.max(MIN_COMPOSER_HEIGHT, Math.round(window.innerHeight * MAX_COMPOSER_FRACTION));
+	// Effective height right now (explicit override, else the measured natural
+	// height, else the floor) — used as the drag/keyboard starting point and to
+	// report `aria-valuenow`.
+	const currentComposerHeight = () => composerHeight() ?? inputEl?.offsetHeight ?? MIN_COMPOSER_HEIGHT;
+	const resizeBy = (startHeight: number, deltaY: number) =>
+		setComposerHeight(
+			clampComposerHeight({ startHeight, deltaY, min: MIN_COMPOSER_HEIGHT, max: composerMaxHeight() }),
+		);
+
+	const onResizeMove = (event: PointerEvent | MouseEvent) => {
+		if (!resizeDrag) return;
+		// Drag *up* (smaller clientY) grows the input, so delta is start − current.
+		resizeBy(resizeDrag.startHeight, resizeDrag.startY - event.clientY);
+	};
+
+	const onResizeEnd = () => {
+		resizeDrag = null;
+		window.removeEventListener("pointermove", onResizeMove);
+		window.removeEventListener("pointerup", onResizeEnd);
+	};
+
+	const onResizeStart = (event: PointerEvent | MouseEvent) => {
+		event.preventDefault();
+		resizeDrag = { startY: event.clientY, startHeight: currentComposerHeight() };
+		window.addEventListener("pointermove", onResizeMove);
+		window.addEventListener("pointerup", onResizeEnd);
+	};
+
+	// Double-clicking the handle returns the input to its compact default.
+	const onResizeReset = () => setComposerHeight(null);
+
+	// Keyboard operation for the focusable handle: arrows nudge, Home resets to
+	// the compact default, End grows to the ceiling.
+	const onResizeKeyDown = (event: KeyboardEvent) => {
+		if (event.key === "ArrowUp") resizeBy(currentComposerHeight(), RESIZE_KEY_STEP);
+		else if (event.key === "ArrowDown") resizeBy(currentComposerHeight(), -RESIZE_KEY_STEP);
+		else if (event.key === "Home") setComposerHeight(null);
+		else if (event.key === "End") setComposerHeight(composerMaxHeight());
+		else return;
+		event.preventDefault();
+	};
+
 	// Apply a host-driven pre-fill (a user-message fork's re-ask text). The
 	// `nonce` makes the effect retrigger even when the same text is sent twice.
 	createEffect(() => {
@@ -663,6 +724,8 @@ export function Composer(props: {
 	};
 	onCleanup(() => {
 		if (searchTimer) clearTimeout(searchTimer);
+		window.removeEventListener("pointermove", onResizeMove);
+		window.removeEventListener("pointerup", onResizeEnd);
 	});
 
 	// Composer input: handle `@@` escalation to the native picker, drive the
@@ -741,6 +804,19 @@ export function Composer(props: {
 
 	return (
 		<div class="dreb-composer">
+			<hr
+				class="dreb-resize-handle"
+				tabIndex={0}
+				aria-orientation="horizontal"
+				aria-label="Resize message input (drag or arrow keys to enlarge, double-click or Home to reset)"
+				aria-valuemin={MIN_COMPOSER_HEIGHT}
+				aria-valuemax={composerMaxHeight()}
+				aria-valuenow={Math.round(currentComposerHeight())}
+				title="Drag to resize · double-click to reset"
+				onPointerDown={onResizeStart}
+				onDblClick={onResizeReset}
+				onKeyDown={onResizeKeyDown}
+			/>
 			<Show when={menu().length > 0}>
 				<div class="dreb-menu">
 					<For each={menu()}>
@@ -800,6 +876,7 @@ export function Composer(props: {
 					ref={inputEl}
 					class="dreb-input"
 					rows={2}
+					style={composerHeight() != null ? { height: `${composerHeight()}px` } : undefined}
 					placeholder="Message dreb…  (/ for commands, @ for files, @@ for picker)"
 					value={text()}
 					onInput={(e) => onInput(e.currentTarget)}
