@@ -198,3 +198,102 @@ describe("Composer mention dropdown", () => {
 		expect(textarea.value).toBe("@app");
 	});
 });
+
+describe("Composer resize handle", () => {
+	// Drive the top drag handle with real pointer events. jsdom has no layout, so
+	// the input's `offsetHeight` is 0 and `window.innerHeight` is its 768 default;
+	// the assertions therefore key off the drag delta, exercising the wiring
+	// (handle → `clampComposerHeight` → inline `style.height`) rather than layout.
+	function handleOf(host: HTMLElement): HTMLElement {
+		return host.querySelector(".dreb-resize-handle") as HTMLElement;
+	}
+	function pointerDown(el: HTMLElement, clientY: number): void {
+		el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, clientY }));
+	}
+	function pointerMove(clientY: number): void {
+		window.dispatchEvent(new MouseEvent("pointermove", { clientY }));
+	}
+	function pointerUp(): void {
+		window.dispatchEvent(new MouseEvent("pointerup", {}));
+	}
+
+	it("renders a discoverable, accessible top drag handle", () => {
+		const { host } = mount();
+		const handle = handleOf(host);
+		expect(handle).toBeTruthy();
+		// An <hr> carries the implicit ARIA "separator" role (satisfies a11y lint).
+		expect(handle.tagName).toBe("HR");
+		expect(handle.getAttribute("aria-orientation")).toBe("horizontal");
+		expect(handle.tabIndex).toBe(0);
+	});
+
+	it("grows the input when the handle is dragged up", () => {
+		const { host, textarea } = mount();
+		expect(textarea.style.height).toBe("");
+		pointerDown(handleOf(host), 500);
+		pointerMove(300); // dragged up 200px
+		pointerUp();
+		expect(textarea.style.height).toBe("200px");
+	});
+
+	it("shrinks toward the compact minimum when dragged down past it", () => {
+		const { host, textarea } = mount();
+		pointerDown(handleOf(host), 500);
+		pointerMove(900); // dragged down 400px → below the 44px floor
+		pointerUp();
+		expect(textarea.style.height).toBe("44px");
+	});
+
+	it("clamps growth to ~80% of the window height", () => {
+		const { host, textarea } = mount();
+		// window.innerHeight defaults to 768 in jsdom → ceiling round(768 * 0.8) = 614.
+		pointerDown(handleOf(host), 500);
+		pointerMove(-600); // an extreme upward drag
+		pointerUp();
+		expect(textarea.style.height).toBe("614px");
+	});
+
+	it("does not resize after the drag ends (listeners are torn down)", () => {
+		const { host, textarea } = mount();
+		pointerDown(handleOf(host), 500);
+		pointerMove(300);
+		pointerUp();
+		expect(textarea.style.height).toBe("200px");
+		pointerMove(100); // stray move after release must be ignored
+		expect(textarea.style.height).toBe("200px");
+	});
+
+	it("resets to the natural height on double-click", () => {
+		const { host, textarea } = mount();
+		pointerDown(handleOf(host), 500);
+		pointerMove(300);
+		pointerUp();
+		expect(textarea.style.height).toBe("200px");
+		handleOf(host).dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+		expect(textarea.style.height).toBe("");
+	});
+
+	function keyDown(el: HTMLElement, key: string): void {
+		el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+	}
+
+	it("grows and shrinks by a step with the arrow keys", () => {
+		const { host, textarea } = mount();
+		// Establish a known height first (jsdom reports offsetHeight 0), then nudge.
+		pointerDown(handleOf(host), 500);
+		pointerMove(300); // → 200px
+		pointerUp();
+		keyDown(handleOf(host), "ArrowUp");
+		expect(textarea.style.height).toBe("224px");
+		keyDown(handleOf(host), "ArrowDown");
+		expect(textarea.style.height).toBe("200px");
+	});
+
+	it("maximizes with End and resets with Home", () => {
+		const { host, textarea } = mount();
+		keyDown(handleOf(host), "End");
+		expect(textarea.style.height).toBe("614px"); // round(768 * 0.8)
+		keyDown(handleOf(host), "Home");
+		expect(textarea.style.height).toBe("");
+	});
+});
