@@ -563,12 +563,20 @@ describe("connectWebview", () => {
 		});
 		(controller as any).emit({ kind: "tree", tree: { roots: [], leafId: "a2" } });
 		(controller as any).emit({ kind: "composer-prefill", text: "re-ask" });
+		(controller as any).emit({ kind: "composer-prefill", text: "restored", mode: "prepend" });
 
 		expect((posted.filter((m) => m.type === "checkpoints").at(-1) as any)?.checkpoints).toEqual([
 			{ responseId: 2, entryId: "a2", canRestore: true, canFork: true },
 		]);
 		expect((posted.find((m) => m.type === "tree") as any)?.tree.leafId).toBe("a2");
+		// A replace-style prefill (fork re-ask) carries no mode; the bridge passes that through.
 		expect((posted.find((m) => m.type === "composer-prefill") as any)?.text).toBe("re-ask");
+		expect((posted.find((m) => m.type === "composer-prefill") as any)?.mode).toBeUndefined();
+		// The abort restore tags the prefill "prepend"; the bridge must forward the mode
+		// verbatim or the webview silently falls back to replace and clobbers the draft.
+		const prepend = posted.filter((m) => m.type === "composer-prefill").at(-1) as any;
+		expect(prepend?.text).toBe("restored");
+		expect(prepend?.mode).toBe("prepend");
 	});
 
 	it("re-posts checkpoints on a resync update", async () => {

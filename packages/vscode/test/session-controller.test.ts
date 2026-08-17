@@ -1613,18 +1613,22 @@ describe("SessionController session tree (Phase 6)", () => {
 		fake.forkResult = { text: "re-ask this", cancelled: false };
 		const controller = makeController(fake);
 		await controller.start();
-		const prefills: string[] = [];
+		const prefills: Array<{ text: string; mode?: string }> = [];
 		controller.onUpdate((u) => {
-			if ((u as { kind: string }).kind === "composer-prefill") prefills.push((u as { text: string }).text);
+			if ((u as { kind: string }).kind === "composer-prefill") prefills.push(u as { text: string; mode?: string });
 		});
 
 		await controller.fork("u2");
-		expect(prefills).toEqual(["re-ask this"]);
+		expect(prefills.map((p) => p.text)).toEqual(["re-ask this"]);
+		// Fork re-ask must REPLACE the composer: it omits `mode`, so the webview
+		// defaults to "replace". A "prepend" here would jam re-ask text in front of
+		// whatever the user had typed — the opposite of what a fork intends.
+		expect(prefills.at(-1)?.mode).toBeUndefined();
 
 		// Assistant fork returns "" → no composer clobber.
 		fake.forkResult = { text: "", cancelled: false };
 		await controller.fork("a1");
-		expect(prefills).toEqual(["re-ask this"]);
+		expect(prefills.map((p) => p.text)).toEqual(["re-ask this"]);
 	});
 
 	it("surfaces a notice and does not rebuild when a fork is cancelled", async () => {
