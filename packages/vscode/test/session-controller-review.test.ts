@@ -21,6 +21,14 @@ class MiniClient implements RpcClientLike {
 	async stop(): Promise<void> {}
 	async prompt(): Promise<void> {}
 	async abort(): Promise<void> {}
+	async steer(): Promise<void> {}
+	async followUp(): Promise<void> {}
+	async getPendingMessages(): Promise<{ steering: string[]; followUp: string[] }> {
+		return { steering: [], followUp: [] };
+	}
+	async clearPendingMessages(): Promise<{ steering: string[]; followUp: string[] }> {
+		return { steering: [], followUp: [] };
+	}
 	async compact(): Promise<unknown> {
 		return {};
 	}

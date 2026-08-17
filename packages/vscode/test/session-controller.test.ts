@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { HostUi, HostUiPickItem, WorkspaceSearchResult } from "../src/host/host-ui.js";
-import { type RpcClientLike, SessionController } from "../src/host/session-controller.js";
+import { type ControllerUpdate, type RpcClientLike, SessionController } from "../src/host/session-controller.js";
 import type { SourceLinkUi } from "../src/host/source-link-ui.js";
 import type { OpenSourceRef, SessionTreeNodeDto } from "../src/shared/protocol.js";
 
@@ -108,6 +108,34 @@ class FakeClient implements RpcClientLike {
 	async abort(): Promise<void> {
 		if (this.callError) throw this.callError;
 		this.aborted += 1;
+	}
+	// Queued messages (steer/follow-up). `steer`/`followUp` mirror the backend by
+	// both recording the call and appending to the pending queue that
+	// `getPendingMessages` reports and `clearPendingMessages` drains.
+	steers: string[] = [];
+	followUps: string[] = [];
+	pendingSteering: string[] = [];
+	pendingFollowUp: string[] = [];
+	clearPendingCalls = 0;
+	async steer(message: string): Promise<void> {
+		if (this.callError) throw this.callError;
+		this.steers.push(message);
+		this.pendingSteering.push(message);
+	}
+	async followUp(message: string): Promise<void> {
+		if (this.callError) throw this.callError;
+		this.followUps.push(message);
+		this.pendingFollowUp.push(message);
+	}
+	async getPendingMessages(): Promise<{ steering: string[]; followUp: string[] }> {
+		return { steering: [...this.pendingSteering], followUp: [...this.pendingFollowUp] };
+	}
+	async clearPendingMessages(): Promise<{ steering: string[]; followUp: string[] }> {
+		this.clearPendingCalls += 1;
+		const cleared = { steering: [...this.pendingSteering], followUp: [...this.pendingFollowUp] };
+		this.pendingSteering = [];
+		this.pendingFollowUp = [];
+		return cleared;
 	}
 	async compact(customInstructions?: string): Promise<unknown> {
 		if (this.callError) throw this.callError;
@@ -1114,6 +1142,107 @@ describe("SessionController", () => {
 		expect(fake.stopped).toBe(1);
 	});
 
+	describe("queued composer messages (steer + pending display + restore on abort)", () => {
+		it("queues a submit made while streaming via steer (not prompt) and shows a pending chip", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+			const updates: ControllerUpdate[] = [];
+			controller.onUpdate((u) => updates.push(u));
+
+			fake.emit({ type: "agent_start" }); // now streaming
+			await controller.submit("keep going, also check the tests");
+
+			// Routed to steer, never to the (mid-stream-rejecting) prompt path.
+			expect(fake.steers).toEqual(["keep going, also check the tests"]);
+			expect(fake.prompts).toEqual([]);
+			// The queued message is published for display.
+			const pending = updates.filter(
+				(u): u is Extract<ControllerUpdate, { kind: "pending" }> => u.kind === "pending",
+			);
+			expect(pending.at(-1)?.messages).toEqual([{ kind: "steer", text: "keep going, also check the tests" }]);
+			expect(controller.getPending()).toEqual([{ kind: "steer", text: "keep going, also check the tests" }]);
+		});
+
+		it("sends a submit as a normal prompt when the agent is idle", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+
+			await controller.submit("hello");
+
+			expect(fake.prompts).toEqual(["hello"]);
+			expect(fake.steers).toEqual([]);
+			expect(controller.getPending()).toEqual([]);
+		});
+
+		it("clears the pending chip once the steered message is delivered mid-run", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+			fake.emit({ type: "agent_start" });
+			await controller.submit("keep going");
+			expect(controller.getPending()).toHaveLength(1);
+
+			const updates: ControllerUpdate[] = [];
+			controller.onUpdate((u) => updates.push(u));
+			// The backend delivers the steered message (drops it from its queue) and
+			// streams it back as a user turn.
+			fake.pendingSteering = [];
+			fake.emit({ type: "message_start", message: { role: "user", content: "keep going" } });
+			await Promise.resolve(); // let the void refreshPending() settle
+
+			const pending = updates.filter(
+				(u): u is Extract<ControllerUpdate, { kind: "pending" }> => u.kind === "pending",
+			);
+			expect(pending.at(-1)?.messages).toEqual([]);
+			expect(controller.getPending()).toEqual([]);
+		});
+
+		it("restores queued messages to the composer and clears the backend queue on abort", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+			fake.emit({ type: "agent_start" });
+			await controller.submit("first follow-up");
+			await controller.submit("second follow-up");
+			expect(controller.getPending()).toHaveLength(2);
+
+			const updates: ControllerUpdate[] = [];
+			controller.onUpdate((u) => updates.push(u));
+			await controller.abort();
+
+			expect(fake.aborted).toBe(1);
+			expect(fake.clearPendingCalls).toBe(1);
+			expect(fake.pendingSteering).toEqual([]);
+			// The queued text is restored to the composer (joined, in order) rather
+			// than silently lost. `mode: "prepend"` tells the composer to insert
+			// before any in-progress draft rather than overwrite it.
+			const prefill = updates.filter(
+				(u): u is Extract<ControllerUpdate, { kind: "composer-prefill" }> => u.kind === "composer-prefill",
+			);
+			expect(prefill.at(-1)?.text).toBe("first follow-up\n\nsecond follow-up");
+			expect(prefill.at(-1)?.mode).toBe("prepend");
+			// And the chips are cleared.
+			expect(controller.getPending()).toEqual([]);
+		});
+
+		it("does not prefill the composer on abort when nothing is queued", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+			fake.emit({ type: "agent_start" });
+
+			const updates: ControllerUpdate[] = [];
+			controller.onUpdate((u) => updates.push(u));
+			await controller.abort();
+
+			expect(fake.aborted).toBe(1);
+			expect(fake.clearPendingCalls).toBe(1);
+			expect(updates.some((u) => u.kind === "composer-prefill")).toBe(false);
+		});
+	});
+
 	describe("hasFailed() (Phase 9 — reopen restarts a crashed session)", () => {
 		it("is false for a brand-new session that is merely still starting", () => {
 			const fake = new FakeClient();
@@ -1484,18 +1613,22 @@ describe("SessionController session tree (Phase 6)", () => {
 		fake.forkResult = { text: "re-ask this", cancelled: false };
 		const controller = makeController(fake);
 		await controller.start();
-		const prefills: string[] = [];
+		const prefills: Array<{ text: string; mode?: string }> = [];
 		controller.onUpdate((u) => {
-			if ((u as { kind: string }).kind === "composer-prefill") prefills.push((u as { text: string }).text);
+			if ((u as { kind: string }).kind === "composer-prefill") prefills.push(u as { text: string; mode?: string });
 		});
 
 		await controller.fork("u2");
-		expect(prefills).toEqual(["re-ask this"]);
+		expect(prefills.map((p) => p.text)).toEqual(["re-ask this"]);
+		// Fork re-ask must REPLACE the composer: it omits `mode`, so the webview
+		// defaults to "replace". A "prepend" here would jam re-ask text in front of
+		// whatever the user had typed — the opposite of what a fork intends.
+		expect(prefills.at(-1)?.mode).toBeUndefined();
 
 		// Assistant fork returns "" → no composer clobber.
 		fake.forkResult = { text: "", cancelled: false };
 		await controller.fork("a1");
-		expect(prefills).toEqual(["re-ask this"]);
+		expect(prefills.map((p) => p.text)).toEqual(["re-ask this"]);
 	});
 
 	it("surfaces a notice and does not rebuild when a fork is cancelled", async () => {
