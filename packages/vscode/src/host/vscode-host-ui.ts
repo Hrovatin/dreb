@@ -116,15 +116,23 @@ async function searchFiles(query: string): Promise<WorkspaceSearchResult[]> {
  * walk of the workspace via `vscode.workspace.fs.readDirectory`. Unlike the old
  * `findFiles`-derived approach (files only), directory listing surfaces **empty**
  * subfolders too. The walk stays inside the workspace roots, skips heavy/noise
- * directories ({@link DEFAULT_FOLDER_WALK_IGNORES}), and is bounded by both a
- * directory-visit budget and the result cap so it never runs away on a large
- * tree. Shallower folders are visited first (BFS), which the webview then
- * re-ranks by relevance to the query. */
+ * directories ({@link DEFAULT_FOLDER_WALK_IGNORES}), does not follow symlinked
+ * directories, and tracks visited paths — so a circular/outbound symlink or an
+ * overlapping workspace root can't make it spin in place and drain its budget
+ * (matching the old ripgrep-based search, which didn't follow symlinks either).
+ * It is bounded by both a directory-visit budget and the result cap so it never
+ * runs away on a large tree. Shallower folders are visited first (BFS), which the
+ * webview then re-ranks by relevance to the query. */
 async function searchFolders(query: string): Promise<WorkspaceSearchResult[]> {
 	const roots = vscode.workspace.workspaceFolders ?? [];
 	if (roots.length === 0) return [];
 	const matches: string[] = [];
 	const queue: vscode.Uri[] = roots.map((folder) => folder.uri);
+	// Guard against revisiting the same real directory. Without it, a circular
+	// symlink (`a → …/a`), a symlink pointing outside the workspace, or two
+	// overlapping workspace roots could spend the entire visit budget walking the
+	// same subtree instead of surfacing the workspace's actual folders.
+	const visited = new Set<string>(queue.map((uri) => uri.fsPath));
 	let budget = FOLDER_WALK_DIR_BUDGET;
 	while (queue.length > 0 && budget > 0 && matches.length < FOLDER_RESULT_CAP) {
 		const dir = queue.shift();
@@ -140,8 +148,15 @@ async function searchFolders(query: string): Promise<WorkspaceSearchResult[]> {
 		}
 		for (const [name, type] of entries) {
 			if ((type & vscode.FileType.Directory) === 0) continue;
+			// Don't descend into symlinked directories: a cycle or an outbound link
+			// would burn the visit budget on paths that aren't really part of the
+			// workspace tree (a `SymbolicLink` dir has type `SymbolicLink|Directory`,
+			// so it passes the `Directory` mask above and must be excluded here).
+			if ((type & vscode.FileType.SymbolicLink) !== 0) continue;
 			if (DEFAULT_FOLDER_WALK_IGNORES.has(name)) continue;
 			const child = vscode.Uri.joinPath(dir, name);
+			if (visited.has(child.fsPath)) continue;
+			visited.add(child.fsPath);
 			queue.push(child);
 			if (folderNameMatches(name, query)) matches.push(child.fsPath);
 		}
