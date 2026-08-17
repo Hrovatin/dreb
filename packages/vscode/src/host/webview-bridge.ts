@@ -13,7 +13,7 @@
  */
 
 import * as vscode from "vscode";
-import type { HostToWebview, TaggedContextDto, WebviewToHost } from "../shared/protocol.js";
+import type { HostToWebview, TagContextOrigin, TaggedContextDto, WebviewToHost } from "../shared/protocol.js";
 import type { SessionController } from "./session-controller.js";
 
 /** Build the webview HTML shell referencing the vite-built assets. */
@@ -51,7 +51,7 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 	// Selections tagged before the webview announced `ready` (e.g. tagging into a
 	// freshly opened chat) — buffered here and flushed once live so they aren't
 	// dropped by the pre-ready gate.
-	const pendingTags: TaggedContextDto[] = [];
+	const pendingTags: { context: TaggedContextDto; origin: TagContextOrigin }[] = [];
 	const post = (message: HostToWebview): void => {
 		void webview.postMessage(message);
 	};
@@ -64,8 +64,8 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 		// which the snapshot already captures), so handle them ahead of the
 		// pre-ready gate below.
 		if (update.kind === "tag-context") {
-			if (live) post({ type: "tag-context", context: update.context });
-			else pendingTags.push(update.context);
+			if (live) post({ type: "tag-context", context: update.context, origin: update.origin });
+			else pendingTags.push({ context: update.context, origin: update.origin });
 			return;
 		}
 		if (!live) return;
@@ -121,8 +121,9 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				live = true;
 				post({ type: "review", review: controller.getReviewState() });
 				post({ type: "checkpoints", checkpoints: controller.getCheckpoints() });
-				// Deliver any selections tagged before the webview was live.
-				for (const context of pendingTags.splice(0)) post({ type: "tag-context", context });
+				// Deliver any context tags added before the webview was live.
+				for (const pending of pendingTags.splice(0))
+					post({ type: "tag-context", context: pending.context, origin: pending.origin });
 				pushCommands();
 				return;
 			}

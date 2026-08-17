@@ -1,57 +1,78 @@
 /**
  * Pure, vscode-free helpers backing the inline `@`-mention workspace search.
  *
- * The `vscode.workspace.findFiles` / `executeWorkspaceSymbolProvider` calls live
- * in `vscode-host-ui.ts`; the derivation logic (which ancestor directories to
- * surface, which symbols to keep) lives here so it is unit-testable without the
- * VSCode module — the same split that `escapeGlob` uses.
+ * The `vscode.workspace.fs.readDirectory` / `findFiles` /
+ * `executeWorkspaceSymbolProvider` calls live in `vscode-host-ui.ts`; the
+ * derivation logic (which discovered directories to surface, which symbols to
+ * keep) lives here so it is unit-testable without the VSCode module — the same
+ * split that `escapeGlob` uses. Folders are discovered by directory listing (not
+ * derived from file hits) so **empty** subfolders surface too.
  */
 
 import type { WorkspaceSearchResult } from "./host-ui.js";
 
-/** Strip a single trailing slash so root comparisons are consistent. */
-function stripTrailingSlash(path: string): string {
-	return path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
-}
-
-/** Whether `folderPath` is one of the workspace roots or a descendant of one.
- * Ancestors above every root (e.g. the user's home directory) are excluded so
- * the dropdown only ever offers folders inside the open project. */
-function isWithinRoots(folderPath: string, roots: readonly string[]): boolean {
-	return roots.some((root) => folderPath === root || folderPath.startsWith(`${root}/`));
+/** Last path segment of a `/`- or `\`-separated path (no `node:path`, so this
+ * stays vscode/node-free and runs in the webview bundle + plain-node tests). */
+function basename(path: string): string {
+	const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
+	return parts.at(-1) ?? path;
 }
 
 /**
- * Derive the in-project folders whose name matches `query`, from the POSIX
- * `uri.path`s of the matching files. `findFiles` returns files only, so each
- * hit's ancestor directories are walked and the unique ones whose segment
- * matches the (case-insensitive) query are kept — but only those inside a
- * workspace root, so ancestors above the project (whose absolute path segments
- * can also match) are never surfaced. Returns POSIX folder paths, capped.
+ * Directory names skipped while walking the workspace for the `@`-mention folder
+ * source. These are heavy or noise directories whose contents should never
+ * appear in the picker (and would otherwise dominate the traversal budget). The
+ * host walk consults this set; kept here so it is part of the unit-tested,
+ * vscode-free surface.
  */
-export function deriveFolderPaths(
-	filePaths: readonly string[],
-	query: string,
-	workspaceRoots: readonly string[],
-	cap: number,
-): string[] {
-	const q = query.toLowerCase();
-	const roots = workspaceRoots.map(stripTrailingSlash);
+export const DEFAULT_FOLDER_WALK_IGNORES: ReadonlySet<string> = new Set([
+	"node_modules",
+	".git",
+	".hg",
+	".svn",
+	"dist",
+	"out",
+	"build",
+	".next",
+	".cache",
+	".turbo",
+	".venv",
+	"venv",
+	"__pycache__",
+	".idea",
+	".vscode-test",
+	"coverage",
+]);
+
+/**
+ * Whether a directory's `name` matches the (case-insensitive) `query`. An empty
+ * query never matches, so the folder source stays query-gated (an empty `@`
+ * lists files only). Pure predicate shared by the host walk and its tests.
+ */
+export function folderNameMatches(name: string, query: string): boolean {
+	const q = query.trim().toLowerCase();
+	if (q.length === 0) return false;
+	return name.toLowerCase().includes(q);
+}
+
+/**
+ * From directory paths discovered by walking the workspace (via
+ * `vscode.workspace.fs.readDirectory` — which lists **all** subdirectories,
+ * including empty ones the old file-ancestor derivation missed), keep those
+ * whose basename matches `query`, deduped in first-seen order and capped. The
+ * host only descends inside workspace roots, so every input path is already
+ * in-project; this function just applies the query/dedupe/cap. Pure (no
+ * `vscode`) so the "which folders surface" logic is unit-testable.
+ */
+export function selectMatchingFolders(dirPaths: readonly string[], query: string, cap: number): string[] {
 	const seen = new Set<string>();
 	const out: string[] = [];
-	for (const filePath of filePaths) {
-		const parts = filePath.split("/");
-		// Skip the final segment (the file itself); test each ancestor directory.
-		for (let i = 1; i < parts.length - 1; i++) {
-			const seg = parts[i];
-			if (!seg || !seg.toLowerCase().includes(q)) continue;
-			const folderPath = parts.slice(0, i + 1).join("/");
-			if (!isWithinRoots(folderPath, roots)) continue;
-			if (seen.has(folderPath)) continue;
-			seen.add(folderPath);
-			out.push(folderPath);
-			if (out.length >= cap) return out;
-		}
+	for (const dirPath of dirPaths) {
+		if (seen.has(dirPath)) continue;
+		if (!folderNameMatches(basename(dirPath), query)) continue;
+		seen.add(dirPath);
+		out.push(dirPath);
+		if (out.length >= cap) break;
 	}
 	return out;
 }

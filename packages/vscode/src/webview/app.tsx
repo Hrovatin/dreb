@@ -1,7 +1,7 @@
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { formatContextUsage, formatCost, formatModel, formatThinking } from "../shared/format.js";
-import { activeMention, isFullPickerTrigger, replaceMention } from "../shared/mention.js";
+import { activeMention, isFullPickerTrigger, mentionReference, replaceMention } from "../shared/mention.js";
 import {
 	activitySummary,
 	applyEvent,
@@ -48,6 +48,10 @@ export function App() {
 	// A composer pre-fill request (a user-message fork's re-ask text). Bumped
 	// `nonce` retriggers the effect even when the text repeats.
 	const [prefill, setPrefill] = createSignal<{ text: string; nonce: number }>();
+	// A composer inline-reference insertion request from the native `@@` picker
+	// (Phase 4c): the `@name` label to insert at the caret. `nonce` retriggers the
+	// effect for each pick even when the same label repeats.
+	const [mentionInsert, setMentionInsert] = createSignal<{ label: string; nonce: number }>();
 	// Inline `@`-mention workspace search (Phase 4c): results for the composer's
 	// typeahead dropdown (folders, files, then code symbols), plus a monotonic
 	// request id so out-of-order host responses are dropped (only the latest
@@ -90,6 +94,13 @@ export function App() {
 					break;
 				case "tag-context":
 					setAttachments((current) => [...current, msg.context]);
+					// Native `@@` picker tags also drop an inline `@name` reference into
+					// the composer at the caret; editor-selection tags stay chip-only.
+					if (msg.origin === "picker")
+						setMentionInsert((prev) => ({
+							label: taggedContextLabel(msg.context),
+							nonce: (prev?.nonce ?? 0) + 1,
+						}));
 					break;
 				case "checkpoints":
 					setCheckpoints(msg.checkpoints);
@@ -275,6 +286,7 @@ export function App() {
 				commands={commands()}
 				attachments={attachments()}
 				prefill={prefill()}
+				mentionInsert={mentionInsert()}
 				mentionResults={mentionResults()}
 				onRemoveAttachment={(index) => setAttachments((current) => current.filter((_, i) => i !== index))}
 				onSubmit={(text) => {
@@ -642,6 +654,7 @@ export function Composer(props: {
 	commands: SlashCommandDto[];
 	attachments: TaggedContextDto[];
 	prefill?: { text: string; nonce: number };
+	mentionInsert?: { label: string; nonce: number };
 	mentionResults: TaggedContextDto[];
 	onRemoveAttachment: (index: number) => void;
 	onSubmit: (text: string) => void;
@@ -785,18 +798,37 @@ export function Composer(props: {
 		});
 	};
 
-	// Select a result from the inline dropdown: strip the `@query` token and tag
-	// the folder/file/symbol as a composer chip (the host already built the
-	// workspace-relative DTO).
+	// Select a result from the inline dropdown: replace the typed `@query` token
+	// with an inline `@name` reference at the same position AND tag the
+	// folder/file/symbol as a composer chip (the host already built the
+	// workspace-relative DTO). Keeping both means the reference stays visible
+	// where the user was typing while the chip still carries the structured path.
 	const selectResult = (context: TaggedContextDto) => {
 		const token = mention();
 		if (!token) return;
-		const stripped = replaceMention(text(), token, "");
+		const stripped = replaceMention(text(), token, mentionReference(taggedContextLabel(context)));
 		setText(stripped.text);
 		setCaret(stripped.caret);
 		props.onTagContext(context);
 		restoreCaret(stripped.caret);
 	};
+
+	// Insert an inline `@name` reference at the current caret for a native `@@`
+	// picker tag (D3). `untrack` keeps the effect keyed to the host request nonce
+	// only — reading `text()`/`caret()` here must not re-subscribe it, or a later
+	// keystroke would re-insert the reference.
+	createEffect(() => {
+		const request = props.mentionInsert;
+		if (!request) return;
+		untrack(() => {
+			const insertion = mentionReference(request.label);
+			const pos = caret();
+			const value = text();
+			setText(value.slice(0, pos) + insertion + value.slice(pos));
+			setCaret(pos + insertion.length);
+			restoreCaret(pos + insertion.length);
+		});
+	});
 
 	const submit = () => {
 		const value = text();

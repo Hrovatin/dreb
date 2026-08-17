@@ -153,5 +153,16 @@ export function escapeGlob(query: string): string {
 	return out;
 }
 
+/**
+ * The composer text inserted when a mention result is chosen: the chip `label`
+ * prefixed with `@` and followed by a single trailing space so the user can keep
+ * typing after the reference. Shared by the inline dropdown selection (which
+ * replaces the typed `@query`) and the `@@` native picker (which inserts at the
+ * caret) so both leave an identical inline reference.
+ */
+export function mentionReference(label: string): string {
+	return `@${label} `;
+}
+
 /** Maximum number of inline mention suggestions shown in the dropdown. */
 export const MENTION_RESULT_CAP = 10;
