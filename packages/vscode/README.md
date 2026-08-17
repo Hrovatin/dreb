@@ -48,6 +48,7 @@ src/
                         change-review bar, and the inline restore/fork checkpoint
                         controls + branch-tree overlay (Phase 6)
     code-links.ts       grounded file/symbol linkification of answers (pure, tested)
+    composer-resize.ts  clamp helper for the drag-resizable composer height (pure, tested)
     sidebar/app.tsx     the sessions side panel — grouped list, live status, resume,
                         inline rename, pin / archive / delete
 ```
@@ -145,6 +146,15 @@ Every conversation is a **branch tree**: you can rewind to an earlier point or f
 - **Reuses the existing RPC surface.** Fork/restore/tree are wired over dreb's `fork` / `get_fork_messages` / `get_tree` / `navigate_tree` commands — no backend changes. The webview never holds session entry ids; the host derives them from the session tree and aligns them to the rendered turns.
 
 After a restore or fork moves the leaf, the host rebuilds the transcript from the target branch (`SessionController.rebuildTranscript`) and re-snapshots the webview via the same `resync` path as `/new` and `/import`. Rebuilt turns use the branch's per-entry **previews**; full answer text and tool activity are not reconstructed on a rebuild (an MVP limitation). The pure pieces — `foldBranchIntoState` (rebuild) and `alignCheckpoints` (map response groups → entry ids, anchored to the most recent turn so an interrupted run can't misalign the rest) — live in `shared/projection.ts` and are unit-tested; the inline controls and branch-tree overlay (`CheckpointBar` / `TreePanel` in `webview/app.tsx`) post to the host under the strict CSP via event delegation, and all host logic stays vscode-free (RPC-faked in tests).
+
+
+## Resizable composer
+
+The message composer can be **dragged taller** so long prompts get more room, up to ~80% of the panel height, then collapsed back to its compact two-row default.
+
+- **Top drag handle.** A thin grip along the composer's top edge (a focusable `<hr>` with the implicit ARIA **separator/splitter** role) is dragged with the pointer to set the height; **double-click** it to snap back to the natural height. Because the composer is bottom-docked, the handle sits on top rather than using a native bottom-right resize corner.
+- **Keyboard resizable.** With the handle focused, **↑/↓** grow/shrink by a step, **Home** resets to the compact default, and **End** maximizes; `aria-valuemin`/`valuemax`/`valuenow` are kept in sync for screen readers.
+- **Pure, tested clamp.** The height math is isolated in `webview/composer-resize.ts` (`clampComposerHeight`) — DOM-independent and unit-tested (including the degenerate `max < min` case) — while `app.tsx` owns the pointer/keyboard wiring and window-level listener lifecycle.
 
 
 ## Requirements
