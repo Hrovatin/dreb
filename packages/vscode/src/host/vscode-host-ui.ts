@@ -9,7 +9,12 @@
 import * as vscode from "vscode";
 import { escapeGlob } from "../shared/mention.js";
 import type { HostUi, HostUiPickItem, PickedFile, WorkspaceSearchResult } from "./host-ui.js";
-import { deriveFolderPaths, selectSymbols } from "./workspace-search.js";
+import {
+	DEFAULT_FOLDER_WALK_IGNORES,
+	folderNameMatches,
+	selectMatchingFolders,
+	selectSymbols,
+} from "./workspace-search.js";
 
 /** A quick-pick item carrying our opaque `value` alongside vscode's fields. */
 interface ValuedQuickPickItem extends vscode.QuickPickItem {
@@ -92,6 +97,9 @@ export function createVscodeHostUi(): HostUi {
 const SEARCH_FETCH_CAP = 200;
 /** Upper bound on unique folders derived per inline search. */
 const FOLDER_RESULT_CAP = 50;
+/** Upper bound on directories visited per folder walk, so the breadth-first
+ * `readDirectory` traversal stays bounded on very large workspaces. */
+const FOLDER_WALK_DIR_BUDGET = 4000;
 /** Upper bound on workspace symbols fetched per inline search. */
 const SYMBOL_RESULT_CAP = 50;
 
@@ -104,25 +112,58 @@ async function searchFiles(query: string): Promise<WorkspaceSearchResult[]> {
 	return uris.map((uri) => ({ kind: "file", fsPath: uri.fsPath }));
 }
 
-/** Folders whose name matches the query, derived from the files nested under a
- * matching directory segment (a recursive `**` + `*query*` directory + `**`
- * include). `findFiles` returns files only, so `deriveFolderPaths` walks each
- * hit's ancestors and keeps the unique in-project directories whose basename
- * matches the query (ancestors above the workspace root are excluded). */
+/** Folders whose name matches the query, discovered by a bounded breadth-first
+ * walk of the workspace via `vscode.workspace.fs.readDirectory`. Unlike the old
+ * `findFiles`-derived approach (files only), directory listing surfaces **empty**
+ * subfolders too. The walk stays inside the workspace roots, skips heavy/noise
+ * directories ({@link DEFAULT_FOLDER_WALK_IGNORES}), does not follow symlinked
+ * directories, and tracks visited paths — so a circular/outbound symlink or an
+ * overlapping workspace root can't make it spin in place and drain its budget
+ * (matching the old ripgrep-based search, which didn't follow symlinks either).
+ * It is bounded by both a directory-visit budget and the result cap so it never
+ * runs away on a large tree. Shallower folders are visited first (BFS), which the
+ * webview then re-ranks by relevance to the query. */
 async function searchFolders(query: string): Promise<WorkspaceSearchResult[]> {
-	const uris = await vscode.workspace.findFiles(`**/*${escapeGlob(query)}*/**`, undefined, SEARCH_FETCH_CAP);
-	if (uris.length === 0) return [];
-	const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.path);
-	const folderPaths = deriveFolderPaths(
-		uris.map((u) => u.path),
-		query,
-		roots,
-		FOLDER_RESULT_CAP,
-	);
-	// Every derived path is an ancestor of a hit, so any hit is a valid template
-	// for the shared scheme/authority when reconstructing the OS `fsPath`.
-	const template = uris[0];
-	return folderPaths.map((path) => ({ kind: "folder", fsPath: template.with({ path }).fsPath }));
+	const roots = vscode.workspace.workspaceFolders ?? [];
+	if (roots.length === 0) return [];
+	const matches: string[] = [];
+	const queue: vscode.Uri[] = roots.map((folder) => folder.uri);
+	// Guard against revisiting the same real directory. Without it, a circular
+	// symlink (`a → …/a`), a symlink pointing outside the workspace, or two
+	// overlapping workspace roots could spend the entire visit budget walking the
+	// same subtree instead of surfacing the workspace's actual folders.
+	const visited = new Set<string>(queue.map((uri) => uri.fsPath));
+	let budget = FOLDER_WALK_DIR_BUDGET;
+	while (queue.length > 0 && budget > 0 && matches.length < FOLDER_RESULT_CAP) {
+		const dir = queue.shift();
+		if (!dir) break;
+		budget--;
+		let entries: [string, vscode.FileType][];
+		try {
+			entries = await vscode.workspace.fs.readDirectory(dir);
+		} catch {
+			// An unreadable directory (permissions, races) is skipped, not fatal —
+			// the dropdown degrades to the folders it could enumerate.
+			continue;
+		}
+		for (const [name, type] of entries) {
+			if ((type & vscode.FileType.Directory) === 0) continue;
+			// Don't descend into symlinked directories: a cycle or an outbound link
+			// would burn the visit budget on paths that aren't really part of the
+			// workspace tree (a `SymbolicLink` dir has type `SymbolicLink|Directory`,
+			// so it passes the `Directory` mask above and must be excluded here).
+			if ((type & vscode.FileType.SymbolicLink) !== 0) continue;
+			if (DEFAULT_FOLDER_WALK_IGNORES.has(name)) continue;
+			const child = vscode.Uri.joinPath(dir, name);
+			if (visited.has(child.fsPath)) continue;
+			visited.add(child.fsPath);
+			queue.push(child);
+			if (folderNameMatches(name, query)) matches.push(child.fsPath);
+		}
+	}
+	// `selectMatchingFolders` is the authoritative dedupe/cap over the collected
+	// matches (the walk short-circuits on the same predicate for performance).
+	return selectMatchingFolders(matches, query, FOLDER_RESULT_CAP).map((fsPath) => ({ kind: "folder", fsPath }));
 }
 
 /** Code symbols (classes/functions/methods/…) matching the query, via the
