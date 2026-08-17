@@ -230,6 +230,28 @@ describe("connectWebview", () => {
 		>;
 		expect(tags).toHaveLength(1);
 		expect(tags[0].context).toEqual(context);
+		// The default (editor-selection) origin threads through to the webview.
+		expect(tags[0].origin).toBe("selection");
+	});
+
+	it("forwards the picker origin so @@ picks insert inline references", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const { webview, posted, send } = makeWebview();
+		connectWebview(webview as any, controller);
+		send({ type: "ready" });
+
+		const context = { kind: "file" as const, path: "src/app.ts" };
+		controller.tagContext(context, "picker");
+
+		const tags = posted.filter((m) => m.type === "tag-context") as Array<
+			Extract<HostToWebview, { type: "tag-context" }>
+		>;
+		expect(tags).toHaveLength(1);
+		expect(tags[0].context).toEqual(context);
+		// If the bridge dropped/defaulted origin, the webview would treat the pick
+		// as a plain selection and skip the inline `@name` insertion (D3).
+		expect(tags[0].origin).toBe("picker");
 	});
 
 	it("buffers a tag-context tagged before ready and flushes it once live", async () => {
@@ -239,15 +261,9 @@ describe("connectWebview", () => {
 		connectWebview(webview as any, controller);
 
 		// Tag BEFORE the webview announces ready (e.g. tagging into a fresh chat).
-		const context = {
-			kind: "selection" as const,
-			path: "src/a.ts",
-			startLine: 1,
-			endLine: 1,
-			language: "ts",
-			text: "x",
-		};
-		controller.tagContext(context);
+		// Use a picker origin so this also proves origin survives the pending buffer.
+		const context = { kind: "file" as const, path: "src/a.ts" };
+		controller.tagContext(context, "picker");
 		expect(posted.filter((m) => m.type === "tag-context")).toHaveLength(0);
 
 		send({ type: "ready" });
@@ -256,6 +272,7 @@ describe("connectWebview", () => {
 		>;
 		expect(tags).toHaveLength(1);
 		expect(tags[0].context).toEqual(context);
+		expect(tags[0].origin).toBe("picker");
 	});
 
 	it("routes pick-model / pick-thinking messages to the controller", async () => {

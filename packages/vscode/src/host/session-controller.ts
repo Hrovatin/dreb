@@ -30,6 +30,7 @@ import type {
 	SessionTreeDto,
 	SessionTreeNodeDto,
 	SlashCommandDto,
+	TagContextOrigin,
 	TaggedContextDto,
 	UiResponse,
 } from "../shared/protocol.js";
@@ -180,8 +181,11 @@ export type ControllerUpdate =
 	| { kind: "commands"; commands: SlashCommandDto[] }
 	/** The change-review set changed (per-turn detection, accept/revert). */
 	| { kind: "review"; review: ReviewStateDto }
-	/** An editor selection was tagged into the chat (Phase 4). */
-	| { kind: "tag-context"; context: TaggedContextDto }
+	/** A context tag was added to the chat: an editor selection (Phase 4), or a
+	 * file/folder from the native `@@` picker. `origin` lets the webview insert an
+	 * inline `@name` reference for picker tags while leaving selection tags as a
+	 * chip only. */
+	| { kind: "tag-context"; context: TaggedContextDto; origin: TagContextOrigin }
 	/** Inline restore/fork controls were recomputed (Phase 6). */
 	| { kind: "checkpoints"; checkpoints: Checkpoint[] }
 	/** The session branch tree, in response to a `show-tree` request (Phase 6). */
@@ -812,11 +816,13 @@ export class SessionController {
 		this.client?.sendExtensionUIResponse({ type: "extension_ui_response", ...response });
 	}
 
-	/** Tag an editor selection into the chat (Phase 4). Emits an update the
-	 * bridge forwards to the webview as a removable composer chip (queued until
-	 * the webview is live, so tagging into a freshly opened chat still lands). */
-	tagContext(context: TaggedContextDto): void {
-		this.emit({ kind: "tag-context", context });
+	/** Tag a context reference into the chat. Emits an update the bridge forwards
+	 * to the webview as a removable composer chip (queued until the webview is
+	 * live, so tagging into a freshly opened chat still lands). `origin` defaults
+	 * to `"selection"` (an editor selection, chip only); the native `@@` picker
+	 * passes `"picker"` so the webview also inserts an inline `@name` reference. */
+	tagContext(context: TaggedContextDto, origin: TagContextOrigin = "selection"): void {
+		this.emit({ kind: "tag-context", context, origin });
 	}
 
 	/** Open the native file/folder picker and tag each chosen path into the chat
@@ -827,7 +833,10 @@ export class SessionController {
 		const picks = await this.ui.pickWorkspaceFiles();
 		if (!picks) return;
 		for (const pick of picks) {
-			this.tagContext(buildFileContext({ fsPath: pick.fsPath, cwd: this.cwd, isDirectory: pick.isDirectory }));
+			this.tagContext(
+				buildFileContext({ fsPath: pick.fsPath, cwd: this.cwd, isDirectory: pick.isDirectory }),
+				"picker",
+			);
 		}
 	}
 

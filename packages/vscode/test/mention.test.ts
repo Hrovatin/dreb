@@ -4,6 +4,7 @@ import {
 	escapeGlob,
 	isFullPickerTrigger,
 	MENTION_RESULT_CAP,
+	mentionReference,
 	rankMentionResults,
 	replaceMention,
 } from "../src/shared/mention.js";
@@ -87,6 +88,23 @@ describe("replaceMention", () => {
 	it("returns the caret after a non-empty replacement", () => {
 		const result = replaceMention("see @app here", { start: 4, end: 8 }, "@app.ts");
 		expect(result).toEqual({ text: "see @app.ts here", caret: 11 });
+	});
+});
+
+describe("mentionReference", () => {
+	it("prefixes the label with `@` and adds a trailing space", () => {
+		expect(mentionReference("app.ts")).toBe("@app.ts ");
+	});
+
+	it("keeps a folder label's trailing slash", () => {
+		expect(mentionReference("host/")).toBe("@host/ ");
+	});
+
+	it("composes with replaceMention to insert a reference at the token position", () => {
+		// Selecting `src/app.ts` while `see @app` is typed swaps the `@app` token
+		// for the inline `@app.ts ` reference, caret after the trailing space.
+		const result = replaceMention("see @app", { start: 4, end: 8 }, mentionReference("app.ts"));
+		expect(result).toEqual({ text: "see @app.ts ", caret: 12 });
 	});
 });
 
