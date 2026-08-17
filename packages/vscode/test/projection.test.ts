@@ -3,9 +3,8 @@ import {
 	activitySummary,
 	alignCheckpoints,
 	applyEvent,
-	type BranchTurn,
 	createTranscriptState,
-	foldBranchIntoState,
+	foldMessagesIntoState,
 	type ResponseGroup,
 	type TranscriptState,
 } from "../src/shared/projection.js";
@@ -237,30 +236,101 @@ describe("projection", () => {
 	});
 });
 
-describe("foldBranchIntoState (Phase 6 rebuild)", () => {
-	const branch: BranchTurn[] = [
-		{ entryId: "u1", role: "user", text: "hi" },
-		{ entryId: "a1", role: "assistant", text: "hello" },
-		{ entryId: "u2", role: "user", text: "again" },
-		{ entryId: "a2", role: "assistant", text: "world" },
-	];
-
-	it("rebuilds the transcript in place from branch turns (stable reference)", () => {
+describe("foldMessagesIntoState (Phase 6 full-content rebuild)", () => {
+	it("rebuilds plain user/assistant turns in place with full answers (stable reference)", () => {
 		const state = createTranscriptState();
 		state.items.push({ kind: "user", text: "stale" });
 		const ref = state; // same object must survive
 
-		foldBranchIntoState(state, branch);
+		foldMessagesIntoState(state, [
+			{ role: "user", content: "hi" },
+			{ role: "assistant", content: [{ type: "text", text: "hello there" }], stopReason: "stop" },
+			{ role: "user", content: "again" },
+			{ role: "assistant", content: [{ type: "text", text: "world" }], stopReason: "stop" },
+		]);
 
 		expect(state).toBe(ref);
 		expect(
 			state.items.map((i) => (i.kind === "user" ? `u:${i.text}` : i.kind === "response" ? `a:${i.answer}` : i.text)),
-		).toEqual(["u:hi", "a:hello", "u:again", "a:world"]);
-		// Response groups get fresh, monotonic ids and are not streaming.
+		).toEqual(["u:hi", "a:hello there", "u:again", "a:world"]);
 		const groups = state.items.filter((i): i is ResponseGroup => i.kind === "response");
 		expect(groups.map((g) => g.id)).toEqual([1, 2]);
 		expect(groups.every((g) => !g.streaming && g.collapsed)).toBe(true);
 		expect(state.nextResponseId).toBe(3);
+	});
+
+	it("folds a tool-using run into ONE group with a thinking/tool activity box + full answer", () => {
+		const state = createTranscriptState();
+		foldMessagesIntoState(state, [
+			{ role: "user", content: "do it" },
+			// Intermediate tool-call assistant turn (no final text) — must NOT become
+			// a separate "(no content)" block.
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "let me check" },
+					{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a.txt" } },
+				],
+				stopReason: "toolUse",
+			},
+			{ role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "file body" }] },
+			// Final answer assistant turn in the SAME run.
+			{ role: "assistant", content: [{ type: "text", text: "here is the answer" }], stopReason: "stop" },
+		]);
+
+		const groups = state.items.filter((i): i is ResponseGroup => i.kind === "response");
+		expect(groups).toHaveLength(1);
+		const g = groups[0];
+		expect(g.answer).toBe("here is the answer");
+		expect(activitySummary(g)).toBe("1 thought · 1 tool call");
+		const tool = g.activity.find((a) => a.kind === "tool");
+		expect(tool).toMatchObject({ toolCallId: "t1", toolName: "read", status: "done", resultText: "file body" });
+	});
+
+	it("marks a tool as error when its result is an error, and leaves an unmatched tool running", () => {
+		const state = createTranscriptState();
+		foldMessagesIntoState(state, [
+			{ role: "user", content: "go" },
+			{
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "ok", name: "read", arguments: {} },
+					{ type: "toolCall", id: "pending", name: "grep", arguments: {} },
+				],
+				stopReason: "toolUse",
+			},
+			{
+				role: "toolResult",
+				toolCallId: "ok",
+				toolName: "read",
+				isError: true,
+				content: [{ type: "text", text: "boom" }],
+			},
+			{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" },
+		]);
+		const g = state.items.find((i): i is ResponseGroup => i.kind === "response");
+		const ok = g?.activity.find((a) => a.kind === "tool" && a.toolCallId === "ok");
+		const pending = g?.activity.find((a) => a.kind === "tool" && a.toolCallId === "pending");
+		expect(ok).toMatchObject({ status: "error", resultText: "boom" });
+		expect(pending).toMatchObject({ status: "running", resultText: "" });
+	});
+
+	it("stamps the group error for a provider-error turn and leaves aborted turns without fake content", () => {
+		const state = createTranscriptState();
+		foldMessagesIntoState(state, [
+			{ role: "user", content: "one" },
+			{ role: "assistant", content: [], stopReason: "error", errorMessage: "rate limited" },
+			{ role: "user", content: "two" },
+			{ role: "assistant", content: [], stopReason: "aborted" },
+		]);
+		const groups = state.items.filter((i): i is ResponseGroup => i.kind === "response");
+		expect(groups).toHaveLength(2);
+		expect(groups[0].error).toBe("rate limited");
+		expect(groups[0].answer).toBe("");
+		// Aborted/empty turn: an empty group, not a "(aborted)" placeholder.
+		expect(groups[1].error).toBeUndefined();
+		expect(groups[1].answer).toBe("");
+		expect(groups[1].activity).toEqual([]);
 	});
 
 	it("resets transient state (streaming, uiRequests, errors)", () => {
@@ -268,10 +338,11 @@ describe("foldBranchIntoState (Phase 6 rebuild)", () => {
 		state.streaming = true;
 		state.hostError = "dead";
 		state.uiRequests.push({ id: "x", method: "confirm", title: "?" });
-		foldBranchIntoState(state, []);
+		foldMessagesIntoState(state, []);
 		expect(state.streaming).toBe(false);
 		expect(state.hostError).toBeUndefined();
 		expect(state.uiRequests).toEqual([]);
+		expect(state.items).toEqual([]);
 	});
 });
 

@@ -77,14 +77,6 @@ export interface Checkpoint {
 	canFork: boolean;
 }
 
-/** One turn on a session branch, used to rebuild the transcript after a tree
- * navigation or fork (see {@link foldBranchIntoState}). */
-export interface BranchTurn {
-	entryId: string;
-	role: "user" | "assistant";
-	text: string;
-}
-
 /** A pending, blocking extension-UI request the user must answer. */
 export interface UiRequest {
 	id: string;
@@ -410,52 +402,143 @@ export function activitySummary(group: ResponseGroup): string {
 }
 
 /**
- * Replace `state`'s transcript in place with turns rebuilt from a session branch
- * (Phase 6 — after a restore/fork moved the leaf). Mutates the state's
- * properties, not the reference, so a holder of the state object (the host's
- * snapshot source) stays valid. Turn text is the branch entry's preview: full
- * answer text and tool activity are not reconstructed on rebuild (MVP).
+ * Minimal structural view of a persisted provider message (from the `get_messages`
+ * RPC). Typed structurally on purpose — this module must not import
+ * `@dreb/coding-agent`, so message/content shapes are duck-typed by field.
  */
-export function foldBranchIntoState(state: TranscriptState, turns: BranchTurn[]): void {
-	state.items = [];
-	state.streaming = false;
-	state.uiRequests = [];
-	state.statusText = undefined;
-	state.hostError = undefined;
-	state.nextResponseId = 1;
-	for (const turn of turns) {
-		if (turn.role === "user") {
-			state.items.push({ kind: "user", text: turn.text });
-		} else {
-			state.items.push({
-				kind: "response",
-				id: state.nextResponseId++,
-				activity: [],
-				answer: turn.text,
-				streaming: false,
-				collapsed: true,
+interface RebuildMessage {
+	role?: string;
+	content?: unknown;
+	stopReason?: string;
+	errorMessage?: string;
+	toolCallId?: string;
+	toolName?: string;
+	isError?: boolean;
+}
+
+/** Fold one assistant message's content parts into a response group: text parts
+ * accumulate into the clean answer; `thinking` parts and `toolCall` parts become
+ * activity items (tools start "running" until their `toolResult` message resolves
+ * them). Mirrors the live event projection so a rebuilt run renders identically. */
+function foldAssistantContent(group: ResponseGroup, content: unknown): void {
+	if (typeof content === "string") {
+		group.answer += content;
+		return;
+	}
+	if (!Array.isArray(content)) return;
+	for (const raw of content) {
+		const part = raw as {
+			type?: string;
+			text?: unknown;
+			thinking?: unknown;
+			id?: unknown;
+			name?: unknown;
+			arguments?: unknown;
+		};
+		if (part?.type === "text" && typeof part.text === "string") {
+			group.answer += part.text;
+		} else if (part?.type === "thinking" && typeof part.thinking === "string") {
+			group.activity.push({ kind: "thinking", text: part.thinking });
+		} else if (part?.type === "toolCall") {
+			group.activity.push({
+				kind: "tool",
+				toolCallId: String(part.id ?? ""),
+				toolName: String(part.name ?? "tool"),
+				args: part.arguments,
+				status: "running",
+				resultText: "",
 			});
 		}
 	}
 }
 
 /**
- * Align assistant session entry ids (the current branch, chronological order) to
- * the transcript's completed response groups, keyed by the stable
- * {@link ResponseGroup.id}. Aligns from the most recent turn backward so the leaf
- * stays anchored on a length mismatch (unmatched older groups simply get no
- * control rather than a wrong one). The latest aligned checkpoint gets
- * `canRestore: false` (restoring to where you already are is a no-op); every
- * earlier one gets `canRestore: true`.
+ * Replace `state`'s transcript in place with the full conversation rebuilt from a
+ * branch's provider messages (Phase 6 — after a restore/fork moved the leaf, or a
+ * resume that never replayed live events). Mutates the state's properties, not the
+ * reference, so a holder of the state object (the host's snapshot source) stays
+ * valid.
  *
- * Only actively-streaming groups are excluded: the in-flight turn has not been
- * persisted as a session entry yet, so it has no id in `assistantEntryIds`.
- * Errored groups are deliberately KEPT — a provider-error turn is still persisted
- * to the session (and therefore present in the tree / `assistantEntryIds`), so
- * dropping it here would desync the two sequences and shift every older
- * checkpoint onto the wrong entry id (backward alignment would pair a successful
- * group with the errored turn's id). Keeping errored groups preserves the 1:1
- * positional correspondence the {@link foldBranchIntoState} rebuild path relies on.
+ * Unlike the retired preview-based rebuild, this reconstructs the same
+ * {@link ResponseGroup} model the live event stream produces: one group per agent
+ * *run* (a run is delimited by user messages; consecutive assistant + toolResult
+ * messages fold into the open group), with full answer markdown plus a collapsible
+ * activity box of thinking and tool calls. Tool results are paired back to their
+ * `toolCall` by id. A provider-error turn stamps the group's `error`; aborted/empty
+ * turns simply produce an empty group rather than a fake placeholder. The result is
+ * a restored/forked/resumed chat that renders identically to a fresh live chat.
+ */
+export function foldMessagesIntoState(state: TranscriptState, messages: readonly unknown[]): void {
+	state.items = [];
+	state.streaming = false;
+	state.uiRequests = [];
+	state.statusText = undefined;
+	state.hostError = undefined;
+	state.nextResponseId = 1;
+
+	// The open response group for the current run, or undefined between runs (i.e.
+	// right after a user turn, before the next assistant message reopens one).
+	let group: ResponseGroup | undefined;
+	const openGroup = (): ResponseGroup => {
+		if (group) return group;
+		const created: ResponseGroup = {
+			kind: "response",
+			id: state.nextResponseId++,
+			activity: [],
+			answer: "",
+			streaming: false,
+			collapsed: true,
+		};
+		state.items.push(created);
+		group = created;
+		return created;
+	};
+
+	for (const raw of messages) {
+		const message = raw as RebuildMessage;
+		const role = message?.role;
+		if (role === "user") {
+			state.items.push({ kind: "user", text: contentToText(message.content) });
+			group = undefined; // a user turn closes the current run
+		} else if (role === "assistant") {
+			const active = openGroup();
+			foldAssistantContent(active, message.content);
+			if (message.stopReason === "error") {
+				const text =
+					typeof message.errorMessage === "string" && message.errorMessage.trim().length > 0
+						? message.errorMessage
+						: "Unknown error";
+				active.error = active.error ?? text;
+			}
+		} else if (role === "toolResult") {
+			// Attach the result to its pending tool item in the open run's activity.
+			const tool = group ? findTool(group, String(message.toolCallId)) : undefined;
+			if (tool) {
+				tool.status = message.isError ? "error" : "done";
+				tool.resultText = contentToText(message.content);
+			}
+		}
+		// Other/unknown roles (defensive): ignored — they never render a turn.
+	}
+}
+
+/**
+ * Align session entry ids to the transcript's completed response groups, keyed by
+ * the stable {@link ResponseGroup.id}. There is exactly one id per completed group:
+ * the **run-terminal** assistant entry (the last assistant message of that run —
+ * see `currentBranch` in the session controller), so a tool-using turn that
+ * persists several assistant entries still maps to a single control on its one
+ * response group. Aligns from the most recent turn backward so the leaf stays
+ * anchored on a length mismatch (unmatched older groups simply get no control
+ * rather than a wrong one). The latest aligned checkpoint gets `canRestore: false`
+ * (restoring to where you already are is a no-op); every earlier one gets
+ * `canRestore: true`.
+ *
+ * Only actively-streaming groups are excluded: the in-flight turn's run-terminal
+ * entry has not been persisted yet, so it has no id in `entryIds`. Errored/aborted
+ * groups are deliberately KEPT — such a turn is still persisted to the session
+ * (and therefore present as a run-terminal entry), so dropping it here would desync
+ * the two sequences and shift every older checkpoint onto the wrong entry id.
  *
  * `forkableEntryIds` is the set of entry ids the backend will actually fork from
  * (from the `get_fork_messages` RPC); a checkpoint whose entry id is absent gets
@@ -464,15 +547,15 @@ export function foldBranchIntoState(state: TranscriptState, turns: BranchTurn[])
  */
 export function alignCheckpoints(
 	state: TranscriptState,
-	assistantEntryIds: string[],
+	entryIds: string[],
 	forkableEntryIds: ReadonlySet<string>,
 ): Checkpoint[] {
 	const groups = state.items.filter((item): item is ResponseGroup => item.kind === "response" && !item.streaming);
-	const pairs = Math.min(groups.length, assistantEntryIds.length);
+	const pairs = Math.min(groups.length, entryIds.length);
 	const checkpoints: Checkpoint[] = [];
 	for (let k = 0; k < pairs; k++) {
 		const group = groups[groups.length - 1 - k];
-		const entryId = assistantEntryIds[assistantEntryIds.length - 1 - k];
+		const entryId = entryIds[entryIds.length - 1 - k];
 		// k === 0 is the most recent turn → no restore.
 		checkpoints.push({ responseId: group.id, entryId, canRestore: k !== 0, canFork: forkableEntryIds.has(entryId) });
 	}
