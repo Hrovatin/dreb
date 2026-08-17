@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
+import { type ComposerPrefillMode, mergeComposerPrefill } from "../shared/composer-prefill.js";
 import { formatContextUsage, formatCost, formatModel, formatThinking } from "../shared/format.js";
 import { activeMention, isFullPickerTrigger, mentionReference, replaceMention } from "../shared/mention.js";
 import {
@@ -15,6 +16,7 @@ import {
 import type {
 	HostStatus,
 	OpenSourceRef,
+	QueuedMessageDto,
 	ReviewStateDto,
 	SessionTreeDto,
 	SessionTreeNodeDto,
@@ -43,11 +45,15 @@ export function App() {
 	// Inline restore/fork controls (Phase 6), aligned to response groups by id.
 	const [checkpoints, setCheckpoints] = createSignal<Checkpoint[]>([]);
 	const checkpointByResponse = createMemo(() => new Map(checkpoints().map((c) => [c.responseId, c])));
+	// Messages the user queued while the agent was working (steer/follow-up),
+	// shown as chips above the composer until they're delivered to the model.
+	const [pending, setPending] = createSignal<QueuedMessageDto[]>([]);
 	// The session branch tree, shown as an overlay when the user opens it.
 	const [tree, setTree] = createSignal<SessionTreeDto | undefined>();
 	// A composer pre-fill request (a user-message fork's re-ask text). Bumped
-	// `nonce` retriggers the effect even when the text repeats.
-	const [prefill, setPrefill] = createSignal<{ text: string; nonce: number }>();
+	// `nonce` retriggers the effect even when the text repeats. `mode` controls
+	// how the pre-fill combines with any in-progress draft (replace vs prepend).
+	const [prefill, setPrefill] = createSignal<{ text: string; nonce: number; mode: ComposerPrefillMode }>();
 	// A composer inline-reference insertion request from the native `@@` picker
 	// (Phase 4c): the `@name` label to insert at the caret. `nonce` retriggers the
 	// effect for each pick even when the same label repeats.
@@ -105,11 +111,18 @@ export function App() {
 				case "checkpoints":
 					setCheckpoints(msg.checkpoints);
 					break;
+				case "pending":
+					setPending(msg.messages);
+					break;
 				case "tree":
 					setTree(msg.tree);
 					break;
 				case "composer-prefill":
-					setPrefill((prev) => ({ text: msg.text, nonce: (prev?.nonce ?? 0) + 1 }));
+					setPrefill((prev) => ({
+						text: msg.text,
+						nonce: (prev?.nonce ?? 0) + 1,
+						mode: msg.mode ?? "replace",
+					}));
 					break;
 				case "mention-results":
 					// Drop stale (out-of-order) responses: only the latest query's
@@ -279,6 +292,22 @@ export function App() {
 						onClose={() => setTree(undefined)}
 					/>
 				)}
+			</Show>
+
+			<Show when={pending().length > 0}>
+				<div class="dreb-pending-bar" title="Queued while dreb is working — delivered to the model in order">
+					<span class="dreb-pending-title">
+						{pending().length} queued message{pending().length === 1 ? "" : "s"}
+					</span>
+					<For each={pending()}>
+						{(message) => (
+							<span class={`dreb-pending-chip ${message.kind}`} title={message.text}>
+								<span class="dreb-pending-kind">{message.kind}</span>
+								{message.text}
+							</span>
+						)}
+					</For>
+				</div>
 			</Show>
 
 			<Composer
@@ -653,7 +682,7 @@ export function Composer(props: {
 	streaming: boolean;
 	commands: SlashCommandDto[];
 	attachments: TaggedContextDto[];
-	prefill?: { text: string; nonce: number };
+	prefill?: { text: string; nonce: number; mode: ComposerPrefillMode };
 	mentionInsert?: { label: string; nonce: number };
 	mentionResults: TaggedContextDto[];
 	onRemoveAttachment: (index: number) => void;
@@ -733,11 +762,16 @@ export function Composer(props: {
 		event.preventDefault();
 	};
 
-	// Apply a host-driven pre-fill (a user-message fork's re-ask text). The
-	// `nonce` makes the effect retrigger even when the same text is sent twice.
+	// Apply a host-driven pre-fill. `"replace"` (a user-message fork's re-ask
+	// text) overwrites the composer; `"prepend"` (queued messages restored on
+	// abort) inserts before any in-progress draft so typed text is never lost.
+	// The functional `setText` updater reads the current draft without making
+	// this effect depend on `text()` (which would loop). The `nonce` makes the
+	// effect retrigger even when the same text arrives twice.
 	createEffect(() => {
 		const request = props.prefill;
-		if (request) setText(request.text);
+		if (!request) return;
+		setText((current) => mergeComposerPrefill(request.mode, request.text, current));
 	});
 
 	const menu = createMemo(() => {
