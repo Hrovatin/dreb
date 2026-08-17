@@ -84,6 +84,9 @@ body {
 	flex: 1;
 	overflow-y: auto;
 	padding: 12px;
+}
+
+.dreb-transcript-inner {
 	display: flex;
 	flex-direction: column;
 	gap: 12px;
