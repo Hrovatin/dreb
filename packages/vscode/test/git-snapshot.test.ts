@@ -455,4 +455,25 @@ describe("git-snapshot — raw-bytes baseline (EOL normalization, issue 57)", ()
 		// CRLF endings survive the reverse-patch (no normalization crept in).
 		expect(readFileSync(join(repo, "file.txt"), "utf-8")).toContain("\r\n");
 	});
+
+	it("leaves a tracked symlink uncorrupted while re-hashing a CRLF file", () => {
+		// The raw re-hash re-hashes only regular files (100644/100755). A tracked
+		// symlink (mode 120000) must be skipped: `hash-object --no-filters` on the
+		// link path would FOLLOW the link and store the target file's bytes as the
+		// symlink blob, silently corrupting the tree.
+		writeFileSync(join(repo, ".gitattributes"), "* text=auto\n");
+		const before = crlf(["line1", "line2", "line3"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		symlinkSync("file.txt", join(repo, "link.txt")); // tracked symlink → file.txt
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		expect(base).not.toBeNull();
+		// The regular file is re-hashed to its raw CRLF bytes…
+		expect(baselineContent(repo, base, "file.txt")).toBe(before);
+		// …while the symlink's baseline blob is still its target PATH string
+		// ("file.txt"), not the CRLF contents of the file it points at — proving
+		// the mode guard left it out of the raw re-hash.
+		expect(baselineContent(repo, base, "link.txt")).toBe("file.txt");
+	});
 });

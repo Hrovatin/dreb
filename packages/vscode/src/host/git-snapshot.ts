@@ -24,7 +24,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseFileDiff, sliceHunkPatch } from "./diff-hunks.js";
@@ -328,14 +328,17 @@ function lstatSafe(p: string): ReturnType<typeof lstatSync> | undefined {
  * mistaken for "absent from baseline" and trigger a destructive delete/truncate.
  *
  * The working-tree entry is inspected with `lstat` (never following symlinks).
- * We remove it before recreating the file only when leaving it in place would
- * be unsafe: a symlink (whose `'w'` write would follow the link and clobber its
- * target — possibly a file outside the repository) or a hard link (`nlink > 1`,
- * whose in-place `'w'` truncate would corrupt every other name sharing that
- * inode, again possibly outside the repository). An ordinary, singly-linked
- * regular file is overwritten in place so its mode bits (e.g. the exec bit) are
- * preserved. In the "absent" branch we remove any lingering entry (including a
- * broken symlink, which `existsSync` would have mis-reported as already gone).
+ * When leaving the entry in place would be unsafe — a symlink (whose `'w'` write
+ * would follow the link and clobber its target, possibly outside the repository)
+ * or a hard link (`nlink > 1`, whose in-place `'w'` truncate would corrupt every
+ * other name sharing that inode) — we write the baseline bytes to a sibling temp
+ * file and atomically `rename` it over the path. The rename replaces the entry
+ * without following it, and (unlike unlink-then-write) never leaves the path
+ * deleted if the write fails: the original survives until the rename succeeds.
+ * An ordinary, singly-linked regular file is overwritten in place so its mode
+ * bits (e.g. the exec bit) are preserved. In the "absent" branch we remove any
+ * lingering entry (including a broken symlink, which `existsSync` would have
+ * mis-reported as already gone).
  */
 export function revertFile(cwd: string, baselineTree: string, path: string): boolean {
 	const root = findGitRoot(cwd);
@@ -349,11 +352,29 @@ export function revertFile(cwd: string, baselineTree: string, path: string): boo
 			if (entry) unlinkSync(abs);
 			return true;
 		}
-		// Drop the entry first only when writing in place would be unsafe: a
-		// symlink (would follow the link) or a hard link (would truncate a shared
-		// inode). An ordinary single-link regular file is overwritten in place so
-		// its mode bits are preserved.
-		if (entry && (!entry.isFile() || entry.nlink > 1)) unlinkSync(abs);
+		// When an in-place write would be unsafe (symlink → followed; hard link →
+		// shared-inode truncate), stage the baseline bytes in a sibling temp file
+		// and atomically rename over the entry. The rename swaps the entry without
+		// following it and, unlike unlink-then-write, never leaves the path deleted
+		// on a mid-write failure (ENOSPC, EPERM, read-only remount): the original
+		// entry persists until the rename lands.
+		if (entry && (!entry.isFile() || entry.nlink > 1)) {
+			const tmp = `${abs}.dreb-revert-${process.pid}-${Date.now()}`;
+			try {
+				writeFileSync(tmp, read.buf);
+				renameSync(tmp, abs);
+			} catch (err) {
+				try {
+					if (lstatSafe(tmp)) unlinkSync(tmp);
+				} catch {
+					// best-effort temp cleanup
+				}
+				throw err;
+			}
+			return true;
+		}
+		// An ordinary single-link regular file is overwritten in place so its mode
+		// bits are preserved.
 		writeFileSync(abs, read.buf);
 		return true;
 	} catch {
