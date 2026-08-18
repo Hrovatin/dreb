@@ -21,7 +21,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	baselineContent,
 	captureTree,
@@ -341,5 +341,171 @@ describe("git-snapshot", () => {
 		expect(revertFile(repo, base, "link.txt")).toBe(true);
 		// The dangling link is gone from disk (lstat throws ENOENT).
 		expect(() => lstatSync(join(repo, "link.txt"))).toThrow();
+	});
+});
+
+/**
+ * Issue 57 regression: the baseline snapshot must mirror the on-disk file
+ * byte-for-byte, bypassing git's clean/EOL/attribute normalization. Otherwise a
+ * CRLF working file under `text=auto`/`core.autocrlf`/`eol=…` is stored as LF,
+ * so the served baseline mismatches the working file on EVERY line and a
+ * one-line edit renders as a whole-file rewrite.
+ */
+describe("git-snapshot — raw-bytes baseline (EOL normalization, issue 57)", () => {
+	let repo: string;
+
+	beforeEach(() => {
+		repo = mkdtempSync(join(tmpdir(), "dreb-eol-"));
+		initRepo(repo);
+	});
+
+	afterEach(() => {
+		rmSync(repo, { recursive: true, force: true });
+	});
+
+	/** Join lines with CRLF terminators (including a trailing CRLF). */
+	const crlf = (ls: string[]): string => ls.map((l) => `${l}\r\n`).join("");
+
+	function commitAll(dir: string, msg: string): void {
+		git(["add", "-A"], dir);
+		git(["commit", "-m", msg], dir);
+	}
+
+	it("serves a CRLF baseline byte-for-byte under `* text=auto` (not normalized to LF)", () => {
+		writeFileSync(join(repo, ".gitattributes"), "* text=auto\n");
+		const before = crlf(["line1", "line2", "line3", "line4"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		commitAll(repo, "init crlf");
+
+		const base = captureTree(repo) as string;
+		expect(base).not.toBeNull();
+		// The served baseline is the exact on-disk bytes — CRLF preserved — so the
+		// diff editor's left side matches the working file instead of differing on
+		// every line (the whole-file "recreated" symptom).
+		expect(baselineContent(repo, base, "file.txt")).toBe(before);
+		expect(baselineContent(repo, base, "file.txt")).toContain("\r\n");
+	});
+
+	it("shows a single-line CRLF edit as one modified hunk, not a whole-file rewrite", () => {
+		writeFileSync(join(repo, ".gitattributes"), "* text=auto\n");
+		const before = crlf(["line1", "line2", "line3", "line4"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		// Agent edits ONE line, preserving the file's CRLF endings.
+		writeFileSync(join(repo, "file.txt"), crlf(["line1", "AGENT", "line3", "line4"]));
+
+		// Classified as a modified single-hunk change (NOT added/recreated).
+		expect(changedFiles(repo, base)).toEqual([{ path: "file.txt", status: "modified", hunkCount: 1 }]);
+		// The baseline still matches the PRE-edit file byte-for-byte, so unchanged
+		// lines (line1/line3/line4) read as unchanged in the editor.
+		expect(baselineContent(repo, base, "file.txt")).toBe(before);
+	});
+
+	it("preserves CRLF under core.autocrlf=true", () => {
+		git(["config", "--local", "core.autocrlf", "true"], repo);
+		const before = crlf(["a", "b", "c"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		expect(baselineContent(repo, base, "file.txt")).toBe(before);
+	});
+
+	it("preserves CRLF under an explicit `eol=crlf` attribute", () => {
+		writeFileSync(join(repo, ".gitattributes"), "*.txt text eol=crlf\n");
+		const before = crlf(["a", "b", "c"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		expect(baselineContent(repo, base, "file.txt")).toBe(before);
+	});
+
+	it("revertFile restores exact CRLF bytes after a normalizing edit", () => {
+		writeFileSync(join(repo, ".gitattributes"), "* text=auto\n");
+		const before = crlf(["line1", "line2", "line3"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		writeFileSync(join(repo, "file.txt"), crlf(["line1", "AGENT", "line3"]));
+		expect(revertFile(repo, base, "file.txt")).toBe(true);
+		// The whole file, including its CRLF endings, is restored byte-for-byte.
+		expect(readFileSync(join(repo, "file.txt"), "utf-8")).toBe(before);
+	});
+
+	it("revertHunk reverses one CRLF hunk while leaving another intact", () => {
+		writeFileSync(join(repo, ".gitattributes"), "* text=auto\n");
+		const original = Array.from({ length: 20 }, (_, i) => `line${i + 1}`);
+		writeFileSync(join(repo, "file.txt"), crlf(original));
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		const body = [...original];
+		body[2] = "AGENT3"; // hunk near line 3
+		body[15] = "AGENT16"; // well-separated second hunk
+		writeFileSync(join(repo, "file.txt"), crlf(body));
+
+		expect(revertHunk(repo, base, "file.txt", 0)).toBe(true);
+		const after = readFileSync(join(repo, "file.txt"), "utf-8").split("\r\n");
+		expect(after[2]).toBe("line3"); // first hunk reverted against a CRLF baseline
+		expect(after[15]).toBe("AGENT16"); // second preserved
+		// CRLF endings survive the reverse-patch (no normalization crept in).
+		expect(readFileSync(join(repo, "file.txt"), "utf-8")).toContain("\r\n");
+	});
+
+	it("leaves a tracked symlink uncorrupted while re-hashing a CRLF file", () => {
+		// The raw re-hash re-hashes only regular files (100644/100755). A tracked
+		// symlink (mode 120000) must be skipped: `hash-object --no-filters` on the
+		// link path would FOLLOW the link and store the target file's bytes as the
+		// symlink blob, silently corrupting the tree.
+		writeFileSync(join(repo, ".gitattributes"), "* text=auto\n");
+		const before = crlf(["line1", "line2", "line3"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		symlinkSync("file.txt", join(repo, "link.txt")); // tracked symlink → file.txt
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		expect(base).not.toBeNull();
+		// The regular file is re-hashed to its raw CRLF bytes…
+		expect(baselineContent(repo, base, "file.txt")).toBe(before);
+		// …while the symlink's baseline blob is still its target PATH string
+		// ("file.txt"), not the CRLF contents of the file it points at — proving
+		// the mode guard left it out of the raw re-hash.
+		expect(baselineContent(repo, base, "link.txt")).toBe("file.txt");
+	});
+
+	it("keeps the original entry intact and returns false when the replacement write fails", () => {
+		// Reproduces the exact round-1 failure scenario for an unsafe entry: the
+		// replacement write fails AFTER the working tree is otherwise untouched. The
+		// fix stages the baseline bytes in a sibling temp file and only swaps it in
+		// with an atomic rename, so a failed write must leave the original entry in
+		// place (the pre-fix unlink-then-write would have deleted it first).
+		writeFileSync(join(repo, "real.txt"), "REAL\n");
+		symlinkSync("real.txt", join(repo, "link.txt")); // unsafe entry (symlink)
+		commitAll(repo, "init");
+		const base = captureTree(repo) as string;
+
+		// Force the temp write to fail deterministically while the directory stays
+		// writable: pin Date.now() so the temp path is predictable, then occupy that
+		// exact path with a directory so writeFileSync throws EISDIR. Because the
+		// directory is writable, a regression to unlink-then-write WOULD succeed in
+		// deleting the symlink first — this asserts the atomic path does not.
+		const fixed = 1234567890;
+		const nowSpy = vi.spyOn(Date, "now").mockReturnValue(fixed);
+		const tmp = join(repo, `link.txt.dreb-revert-${process.pid}-${fixed}`);
+		mkdirSync(tmp);
+		try {
+			expect(revertFile(repo, base, "link.txt")).toBe(false);
+		} finally {
+			nowSpy.mockRestore();
+			rmSync(tmp, { recursive: true, force: true });
+		}
+		// The symlink survived the failed revert: still a symlink, still resolving
+		// to real.txt — not deleted, not replaced with a partial/empty file.
+		expect(lstatSync(join(repo, "link.txt")).isSymbolicLink()).toBe(true);
+		expect(readFileSync(join(repo, "link.txt"), "utf-8")).toBe("REAL\n");
 	});
 });
