@@ -173,7 +173,7 @@ describe("RpcClient spawn failure handling", () => {
 		child.exitCode = 7;
 		child.emit("exit", 7, "SIGTERM");
 
-		expect(seen).toEqual([{ code: 7, signal: "SIGTERM" }]);
+		expect(seen).toEqual([{ code: 7, signal: "SIGTERM", stderr: "" }]);
 	});
 
 	test("onExit notifies subscribers when the child emits an 'error'", async () => {
@@ -188,6 +188,25 @@ describe("RpcClient spawn failure handling", () => {
 		const error = new Error("spawn boom");
 		child.emit("error", error);
 
-		expect(seen).toEqual([{ error }]);
+		expect(seen).toEqual([{ error, stderr: "" }]);
+	});
+
+	test("onExit includes captured stderr from the child", async () => {
+		const child = makeFakeChild();
+		vi.mocked(spawn).mockReturnValue(child);
+
+		const client = new RpcClient({ cliPath: "dist/cli.js" });
+		const seen: unknown[] = [];
+		client.onExit((info) => seen.push(info));
+		await client.start();
+
+		// Simulate the child writing diagnostic output to stderr before dying.
+		child.stderr.push("Fatal: something broke\n");
+		child.exitCode = 1;
+		child.emit("exit", 1, null);
+
+		expect(seen).toHaveLength(1);
+		expect((seen[0] as any).stderr).toBe("Fatal: something broke\n");
+		expect((seen[0] as any).code).toBe(1);
 	});
 });
