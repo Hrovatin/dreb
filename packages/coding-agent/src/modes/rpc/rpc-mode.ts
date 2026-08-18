@@ -42,7 +42,7 @@ import type {
 import { getGitBranch } from "../../core/git-branch.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import { parseModelPattern, resolveModelScopePatterns } from "../../core/model-resolver.js";
-import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
+import { flushRawStdout, takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
 import type { SessionInfo, SessionTreeNode } from "../../core/session-manager.js";
 import { SessionManager } from "../../core/session-manager.js";
 import type { SettingsManager, TransportSetting } from "../../core/settings-manager.js";
@@ -60,6 +60,7 @@ import {
 } from "../../core/tools/subagent.js";
 import { type Theme, theme } from "../interactive/theme/theme.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
+import { installRpcCrashGuards } from "./rpc-crash-guard.js";
 import { projectDashboardRpcEvent } from "./rpc-event-projection.js";
 import type {
 	RpcAgentTypeInfo,
@@ -1727,6 +1728,28 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 	const error = (id: string | undefined, command: string, message: string): RpcResponse => {
 		return { id, type: "response", command, success: false, error: message };
 	};
+
+	// Install process-level crash guards so an unhandled rejection no longer
+	// silently kills the child (issue 53). Recoverable rejections keep the
+	// process alive; a fatal uncaught exception logs + emits a diagnostic and
+	// exits (code 1) for the parent's supervised restart, after best-effort
+	// flushing the diagnostic frame down the stdout pipe.
+	installRpcCrashGuards({
+		emit: (frame) => output(frame),
+		log: (line) => console.error(line),
+		exit: (code) => {
+			let exited = false;
+			const done = (): void => {
+				if (exited) return;
+				exited = true;
+				process.exit(code);
+			};
+			// Bound the flush so a dead/blocked consumer can't wedge the exit.
+			const timer = setTimeout(done, 1_000);
+			timer.unref();
+			flushRawStdout().then(done, done);
+		},
+	});
 
 	if (session.sessionFile && session.messages.length > 0) {
 		const rehydratedCount = rehydrateBackgroundAgentsFromDisk(session.sessionFile);
