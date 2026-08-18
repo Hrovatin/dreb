@@ -252,8 +252,13 @@ describe("createVscodeReviewUi — baseline content", () => {
 		ui.setPending([file("a.ts")]);
 
 		const quickDiff = hoisted.sourceControls[0].quickDiffProvider as MockQuickDiff;
-		// Working-tree file under the repo root with a baseline → a dreb-baseline URI.
-		expect(quickDiff.provideOriginalResource({ scheme: "file", fsPath: "/proj/a.ts" })).toBeDefined();
+		// Working-tree file under the repo root with a baseline → the dreb-baseline URI
+		// (not the working file itself and not null): VS Code dispatches content
+		// resolution by scheme, and the query carries the path the content provider keys on.
+		expect(quickDiff.provideOriginalResource({ scheme: "file", fsPath: "/proj/a.ts" })).toMatchObject({
+			scheme: "dreb-baseline",
+			query: "a.ts",
+		});
 		// File without a baseline → undefined (no phantom gutter).
 		expect(quickDiff.provideOriginalResource({ scheme: "file", fsPath: "/proj/b.ts" })).toBeUndefined();
 	});
