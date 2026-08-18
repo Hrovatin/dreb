@@ -96,8 +96,8 @@ export interface ModelInfo {
 export type RpcEventListener = (event: RpcEvent) => void;
 
 export type RpcExitInfo =
-	| { code: number | null; signal: NodeJS.Signals | null; error?: undefined }
-	| { code?: undefined; signal?: undefined; error: Error };
+	| { code: number | null; signal: NodeJS.Signals | null; error?: undefined; stderr?: string }
+	| { code?: undefined; signal?: undefined; error: Error; stderr?: string };
 
 export type RpcExitListener = (info: RpcExitInfo) => void;
 
@@ -201,7 +201,9 @@ export class RpcClient {
 			// Guard: skip if this handler belongs to an old, already-stopped process
 			if (this.process !== procRef) return;
 			this.failPendingRequests(`RPC process exited with code ${code}, signal ${signal}`);
-			this.notifyExitListeners({ code, signal });
+			// Forward the collected stderr so a late (non-startup) crash surfaces its
+			// dying words to the parent for diagnosis, instead of discarding them.
+			this.notifyExitListeners({ code, signal, stderr: this.stderr });
 		});
 
 		// Spawn failures surface asynchronously as an 'error' event rather than a
@@ -215,7 +217,7 @@ export class RpcClient {
 			if (this.process !== procRef) return;
 			this.spawnError = err;
 			this.failPendingRequests(`RPC process failed to spawn: ${err.message}`);
-			this.notifyExitListeners({ error: err });
+			this.notifyExitListeners({ error: err, stderr: this.stderr });
 		});
 
 		// Set up strict JSONL reader for stdout.

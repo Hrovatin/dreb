@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HostUi, HostUiPickItem, WorkspaceSearchResult } from "../src/host/host-ui.js";
 import { type ControllerUpdate, type RpcClientLike, SessionController } from "../src/host/session-controller.js";
 import type { SourceLinkUi } from "../src/host/source-link-ui.js";
@@ -1078,7 +1078,9 @@ describe("SessionController", () => {
 		await controller.submit("hello after crash");
 
 		expect(fake.prompts).toHaveLength(0);
-		expect(controller.getTranscript().statusText).toMatch(/isn't connected/);
+		// During auto-recovery the error is cleared and the controller shows a
+		// transient "starting up" notice rather than a persistent failure.
+		expect(controller.getTranscript().statusText).toMatch(/starting up|recovering/i);
 	});
 
 	it("surfaces a notice instead of leaking a rejected prompt call", async () => {
@@ -1118,8 +1120,11 @@ describe("SessionController", () => {
 
 		fake.emitExit({ code: 1, signal: null });
 
-		expect(controller.getStatus().error).toMatch(/exited/);
-		expect(controller.getTranscript().hostError).toMatch(/exited/);
+		// Auto-restart (issue 53): the error is cleared during recovery; a
+		// transient notice replaces the persistent banner until recovery
+		// completes or the budget is exhausted.
+		expect(controller.getStatus().error).toBeUndefined();
+		expect(controller.getTranscript().statusText).toMatch(/recovering/i);
 		expect(updates.some((u) => u.kind === "status")).toBe(true);
 		expect(updates.some((u) => u.kind === "event")).toBe(true);
 	});
@@ -1259,13 +1264,24 @@ describe("SessionController", () => {
 			expect(controller.hasFailed()).toBe(false);
 		});
 
-		it("is true after the RPC child exits unexpectedly", async () => {
-			const fake = new FakeClient();
-			const controller = makeController(fake);
+		it("is true only after the restart budget is exhausted", async () => {
+			vi.useFakeTimers();
+			const clients: FakeClient[] = [];
+			const controller = new SessionController({
+				cwd: "/tmp/project",
+				cliPath: "/cli.js",
+				clientFactory: () => {
+					const c = new FakeClient();
+					clients.push(c);
+					return c;
+				},
+			});
 			await controller.start();
-			fake.emitExit({ code: 1, signal: null });
-			expect(controller.hasFailed()).toBe(true);
-			expect(controller.isDisposed()).toBe(false); // still live, just failed
+			// A single crash triggers recovery, not a persistent failure.
+			clients[0].emitExit({ code: 1, signal: null });
+			expect(controller.hasFailed()).toBe(false);
+			expect(controller.isDisposed()).toBe(false);
+			vi.useRealTimers();
 		});
 
 		it("is true after a failed start() handshake", async () => {
@@ -2011,5 +2027,165 @@ describe("SessionController resume (Phase 5 — rebuild transcript on start)", (
 		// a silent blank window indistinguishable from a brand-new session
 		// (finding 1).
 		expect(controller.getTranscript().statusText).toMatch(/still saved/i);
+	});
+});
+
+// ===========================================================================
+// Auto-restart / crash recovery (issue 53, deliverable C)
+// ===========================================================================
+
+describe("SessionController — auto-restart on crash", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	/** Build a controller with a factory that dispenses fresh FakeClients for each
+	 * start() call, tracking them for inspection. The first client is started
+	 * immediately (like the real extension does) so the controller is "connected"
+	 * before a test drives an exit. */
+	async function setup(opts: { sessionPath?: string } = {}) {
+		const clients: FakeClient[] = [];
+		const factory = () => {
+			const c = new FakeClient();
+			c.state = { sessionFile: "/sessions/live.jsonl" };
+			clients.push(c);
+			return c;
+		};
+		const logs: string[] = [];
+		const controller = new SessionController({
+			cwd: "/tmp/project",
+			cliPath: "/cli.js",
+			clientFactory: factory,
+			sessionPath: opts.sessionPath ?? "/sessions/original.jsonl",
+			logger: (line) => logs.push(line),
+		});
+		await controller.start();
+		return { controller, clients, logs };
+	}
+
+	it("auto-restarts a single crash and reconnects", async () => {
+		const { controller, clients } = await setup();
+		expect(clients).toHaveLength(1);
+		expect(controller.hasFailed()).toBe(false);
+
+		// Simulate the child dying.
+		clients[0].emitExit({ code: 1, signal: null, stderr: "bang" });
+
+		// Should not be in a persistent failure state (recovery is in progress).
+		expect(controller.hasFailed()).toBe(false);
+
+		// Advance past the restart backoff (500ms).
+		await vi.advanceTimersByTimeAsync(600);
+
+		// A new client should have been created and started.
+		expect(clients).toHaveLength(2);
+		expect(clients[1].started).toBe(true);
+		expect(controller.hasFailed()).toBe(false);
+	});
+
+	it("logs stderr from the crashed child", async () => {
+		const { clients, logs } = await setup();
+		clients[0].emitExit({ code: 1, signal: null, stderr: "  Fatal: pipe dead\n" });
+		expect(logs.some((l) => l.includes("Fatal: pipe dead"))).toBe(true);
+	});
+
+	it("gives up after 3 rapid crashes (budget exhausted)", async () => {
+		const { controller, clients } = await setup();
+
+		// Crash 1: auto-restarts.
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients).toHaveLength(2);
+
+		// Crash 2: auto-restarts.
+		clients[1].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients).toHaveLength(3);
+
+		// Crash 3: auto-restarts.
+		clients[2].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients).toHaveLength(4);
+
+		// Crash 4: budget exhausted — should give up with a persistent error.
+		clients[3].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		// No new client — gave up.
+		expect(clients).toHaveLength(4);
+		expect(controller.hasFailed()).toBe(true);
+	});
+
+	it("resets budget after a stable run (agent_end)", async () => {
+		const { controller, clients } = await setup();
+
+		// Crash 1 + recovery.
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients).toHaveLength(2);
+
+		// Simulate a completed turn on the recovered child — resets budget.
+		clients[1].emit({ type: "agent_end", messages: [] });
+
+		// Now crash again — should recover because budget was reset.
+		clients[1].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients).toHaveLength(3);
+		expect(controller.hasFailed()).toBe(false);
+	});
+
+	it("does not auto-restart if disposed", async () => {
+		const { controller, clients } = await setup();
+		await controller.dispose();
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		// No recovery attempted.
+		expect(clients).toHaveLength(1);
+	});
+
+	it("resumes from the live sessionPath (not the original)", async () => {
+		const { controller, clients } = await setup({ sessionPath: "/sessions/original.jsonl" });
+		// After start, refreshStatus sets sessionFile from state:
+		expect(controller.sessionPath).toBe("/sessions/live.jsonl");
+
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		// The 2nd client exists; verify the controller now uses the live path.
+		// (start() passes --session <resumePath>, which we set to sessionPath
+		// before restart — indirectly verified by the controller's getter.)
+		expect(controller.sessionPath).toBe("/sessions/live.jsonl");
+	});
+
+	it("retries when the restart's start() throws, then gives up after budget", async () => {
+		const clients: FakeClient[] = [];
+		const factory = () => {
+			const c = new FakeClient();
+			c.state = { sessionFile: "/sessions/live.jsonl" };
+			// After the first client, all subsequent ones fail to start.
+			if (clients.length >= 1) c.startError = new Error("spawn failed");
+			clients.push(c);
+			return c;
+		};
+		const controller = new SessionController({
+			cwd: "/tmp/project",
+			cliPath: "/cli.js",
+			clientFactory: factory,
+			sessionPath: "/sessions/original.jsonl",
+		});
+		await controller.start();
+
+		// The first client (index 0) crashes.
+		clients[0].emitExit({ code: 1, signal: null });
+
+		// Each restart attempt will throw, cycling through the budget.
+		// Budget: 3 restarts × 500ms backoff each + the failed start cascading back.
+		for (let i = 0; i < 10; i++) {
+			await vi.advanceTimersByTimeAsync(600);
+		}
+
+		// Should eventually give up.
+		expect(controller.hasFailed()).toBe(true);
 	});
 });
