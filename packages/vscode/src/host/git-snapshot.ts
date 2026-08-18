@@ -128,9 +128,65 @@ function readBaselineBlob(root: string, tree: string, path: string): BlobRead {
 }
 
 /**
+ * Replace every regular-file blob staged in `indexFile` with a hash of its
+ * **raw working-tree bytes**, bypassing git's clean/EOL/attribute filters.
+ *
+ * `git add` applies `.gitattributes` (`text`/`text=auto`/`eol=…`) and
+ * `core.autocrlf` normalization when staging, so the stored blob can differ from
+ * the on-disk file (classically CRLF→LF). The change-review surface serves this
+ * blob as the diff's left side and quick-diff reference while the right side is
+ * the untouched working file, so a normalized baseline mismatches the working
+ * file on *every* line — rendering a one-line edit as a whole-file rewrite
+ * (issue 57). Snapshotting raw bytes keeps the baseline byte-identical to disk,
+ * so unchanged lines read as unchanged and the tree-to-tree diff/hunk/revert
+ * paths stay consistent with what the editor shows.
+ *
+ * Only regular files (mode 100644/100755) are re-hashed; symlinks (120000) and
+ * gitlinks (160000) have no filterable on-disk text and are left as staged.
+ * Best-effort: any git failure or output desync leaves the (normalized) index
+ * untouched rather than aborting the snapshot — a normalized baseline is still
+ * functional, just subject to the original mismatch.
+ */
+function rehashRawBytes(root: string, indexFile: string): void {
+	const listed = runGit(root, ["ls-files", "-s", "-z"], { indexFile });
+	if (listed.status !== 0 || listed.stdout.length === 0) return;
+	// `-s -z` entry: "<mode> <sha> <stage>\t<path>" (NUL-terminated). The path may
+	// contain any byte except NUL — including tabs/spaces — so split on the FIRST
+	// tab only (mode/sha/stage never contain a tab).
+	const files: { mode: string; path: string }[] = [];
+	for (const entry of listed.stdout.split("\0")) {
+		if (entry.length === 0) continue;
+		const tab = entry.indexOf("\t");
+		if (tab < 0) continue;
+		const mode = entry.slice(0, tab).split(" ")[0];
+		if (mode === "100644" || mode === "100755") files.push({ mode, path: entry.slice(tab + 1) });
+	}
+	if (files.length === 0) return;
+	// Hash raw bytes in path-argument chunks (robust to any path characters; kept
+	// well under ARG_MAX). One sha per path is emitted in order.
+	const CHUNK = 256;
+	const info: string[] = [];
+	for (let i = 0; i < files.length; i += CHUNK) {
+		const chunk = files.slice(i, i + CHUNK);
+		const hashed = runGit(root, ["hash-object", "-w", "--no-filters", "--", ...chunk.map((f) => f.path)]);
+		if (hashed.status !== 0) return;
+		const shas = hashed.stdout.split("\n").filter((s) => s.length > 0);
+		if (shas.length !== chunk.length) return;
+		for (let j = 0; j < chunk.length; j++) info.push(`${chunk[j].mode} ${shas[j]}\t${chunk[j].path}`);
+	}
+	// `-z --index-info`: NUL-terminated "<mode> <sha>\t<path>" records overwrite
+	// the normalized blobs with the raw ones in a single pass.
+	runGit(root, ["update-index", "-z", "--index-info"], { indexFile, input: info.map((l) => `${l}\0`).join("") });
+}
+
+/**
  * Snapshot the current working tree into a git tree object via a throwaway index
  * (so the user's real index/working tree are untouched). Returns the tree SHA,
  * or null if the snapshot could not be taken (e.g. not a git repo).
+ *
+ * The staged blobs are re-hashed from raw working-tree bytes (see
+ * {@link rehashRawBytes}) so the tree mirrors on-disk content exactly, rather
+ * than git's clean/EOL-normalized form.
  *
  * All git operations run from the repository root (resolved via `findGitRoot`),
  * so the resulting tree — and every path derived from diffing it — is
@@ -145,6 +201,7 @@ export function captureTree(cwd: string): string | null {
 	try {
 		const add = runGit(root, ["add", "-A"], { indexFile });
 		if (add.status !== 0) return null;
+		rehashRawBytes(root, indexFile);
 		const write = runGit(root, ["write-tree"], { indexFile });
 		if (write.status !== 0) return null;
 		const tree = write.stdout.trim();

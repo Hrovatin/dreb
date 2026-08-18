@@ -343,3 +343,116 @@ describe("git-snapshot", () => {
 		expect(() => lstatSync(join(repo, "link.txt"))).toThrow();
 	});
 });
+
+/**
+ * Issue 57 regression: the baseline snapshot must mirror the on-disk file
+ * byte-for-byte, bypassing git's clean/EOL/attribute normalization. Otherwise a
+ * CRLF working file under `text=auto`/`core.autocrlf`/`eol=…` is stored as LF,
+ * so the served baseline mismatches the working file on EVERY line and a
+ * one-line edit renders as a whole-file rewrite.
+ */
+describe("git-snapshot — raw-bytes baseline (EOL normalization, issue 57)", () => {
+	let repo: string;
+
+	beforeEach(() => {
+		repo = mkdtempSync(join(tmpdir(), "dreb-eol-"));
+		initRepo(repo);
+	});
+
+	afterEach(() => {
+		rmSync(repo, { recursive: true, force: true });
+	});
+
+	/** Join lines with CRLF terminators (including a trailing CRLF). */
+	const crlf = (ls: string[]): string => ls.map((l) => `${l}\r\n`).join("");
+
+	function commitAll(dir: string, msg: string): void {
+		git(["add", "-A"], dir);
+		git(["commit", "-m", msg], dir);
+	}
+
+	it("serves a CRLF baseline byte-for-byte under `* text=auto` (not normalized to LF)", () => {
+		writeFileSync(join(repo, ".gitattributes"), "* text=auto\n");
+		const before = crlf(["line1", "line2", "line3", "line4"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		commitAll(repo, "init crlf");
+
+		const base = captureTree(repo) as string;
+		expect(base).not.toBeNull();
+		// The served baseline is the exact on-disk bytes — CRLF preserved — so the
+		// diff editor's left side matches the working file instead of differing on
+		// every line (the whole-file "recreated" symptom).
+		expect(baselineContent(repo, base, "file.txt")).toBe(before);
+		expect(baselineContent(repo, base, "file.txt")).toContain("\r\n");
+	});
+
+	it("shows a single-line CRLF edit as one modified hunk, not a whole-file rewrite", () => {
+		writeFileSync(join(repo, ".gitattributes"), "* text=auto\n");
+		const before = crlf(["line1", "line2", "line3", "line4"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		// Agent edits ONE line, preserving the file's CRLF endings.
+		writeFileSync(join(repo, "file.txt"), crlf(["line1", "AGENT", "line3", "line4"]));
+
+		// Classified as a modified single-hunk change (NOT added/recreated).
+		expect(changedFiles(repo, base)).toEqual([{ path: "file.txt", status: "modified", hunkCount: 1 }]);
+		// The baseline still matches the PRE-edit file byte-for-byte, so unchanged
+		// lines (line1/line3/line4) read as unchanged in the editor.
+		expect(baselineContent(repo, base, "file.txt")).toBe(before);
+	});
+
+	it("preserves CRLF under core.autocrlf=true", () => {
+		git(["config", "--local", "core.autocrlf", "true"], repo);
+		const before = crlf(["a", "b", "c"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		expect(baselineContent(repo, base, "file.txt")).toBe(before);
+	});
+
+	it("preserves CRLF under an explicit `eol=crlf` attribute", () => {
+		writeFileSync(join(repo, ".gitattributes"), "*.txt text eol=crlf\n");
+		const before = crlf(["a", "b", "c"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		expect(baselineContent(repo, base, "file.txt")).toBe(before);
+	});
+
+	it("revertFile restores exact CRLF bytes after a normalizing edit", () => {
+		writeFileSync(join(repo, ".gitattributes"), "* text=auto\n");
+		const before = crlf(["line1", "line2", "line3"]);
+		writeFileSync(join(repo, "file.txt"), before);
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		writeFileSync(join(repo, "file.txt"), crlf(["line1", "AGENT", "line3"]));
+		expect(revertFile(repo, base, "file.txt")).toBe(true);
+		// The whole file, including its CRLF endings, is restored byte-for-byte.
+		expect(readFileSync(join(repo, "file.txt"), "utf-8")).toBe(before);
+	});
+
+	it("revertHunk reverses one CRLF hunk while leaving another intact", () => {
+		writeFileSync(join(repo, ".gitattributes"), "* text=auto\n");
+		const original = Array.from({ length: 20 }, (_, i) => `line${i + 1}`);
+		writeFileSync(join(repo, "file.txt"), crlf(original));
+		commitAll(repo, "init");
+
+		const base = captureTree(repo) as string;
+		const body = [...original];
+		body[2] = "AGENT3"; // hunk near line 3
+		body[15] = "AGENT16"; // well-separated second hunk
+		writeFileSync(join(repo, "file.txt"), crlf(body));
+
+		expect(revertHunk(repo, base, "file.txt", 0)).toBe(true);
+		const after = readFileSync(join(repo, "file.txt"), "utf-8").split("\r\n");
+		expect(after[2]).toBe("line3"); // first hunk reverted against a CRLF baseline
+		expect(after[15]).toBe("AGENT16"); // second preserved
+		// CRLF endings survive the reverse-patch (no normalization crept in).
+		expect(readFileSync(join(repo, "file.txt"), "utf-8")).toContain("\r\n");
+	});
+});
