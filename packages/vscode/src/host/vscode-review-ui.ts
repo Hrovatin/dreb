@@ -9,7 +9,10 @@
  *    the quick-diff gutter reference);
  *  - a `QuickDiffProvider` on an SCM `SourceControl` ("dreb — pending review")
  *    whose resource group lists the pending files, so VS Code draws inline
- *    change gutters against our baseline for free;
+ *    change gutters against our baseline for free. The SourceControl is created
+ *    lazily (only while files are pending) and disposed the moment the set
+ *    empties, so an accepted/empty cycle never leaves a stale entry in the
+ *    Source Control view and idle sessions don't accumulate empty providers;
  *  - `openDiff`, which opens the built-in diff editor (baseline ↔ working file).
  *
  * The per-hunk *revert* itself is NOT done here — the controller performs it via
@@ -54,9 +57,30 @@ export function createVscodeReviewUi(cwd: string): ReviewUi & vscode.Disposable 
 		},
 	};
 
-	const scm = vscode.scm.createSourceControl("drebReview", "dreb — pending review", vscode.Uri.file(root));
-	scm.quickDiffProvider = quickDiff;
-	const group = scm.createResourceGroup("pending", "Pending review");
+	// The SCM SourceControl (the "dreb — pending review" entry in the Source
+	// Control view) is created lazily and disposed as soon as nothing is pending,
+	// so an accepted/empty cycle never leaves a stale entry behind and idle
+	// sessions don't accumulate empty providers. The quick-diff + baseline content
+	// provider stay registered for the session (they never appear in the SCM view
+	// and only matter while a diff/gutter is actually shown).
+	let scm: vscode.SourceControl | undefined;
+	let group: vscode.SourceControlResourceGroup | undefined;
+
+	function ensureSourceControl(): { scm: vscode.SourceControl; group: vscode.SourceControlResourceGroup } {
+		if (scm === undefined || group === undefined) {
+			scm = vscode.scm.createSourceControl("drebReview", "dreb — pending review", vscode.Uri.file(root));
+			scm.quickDiffProvider = quickDiff;
+			group = scm.createResourceGroup("pending", "Pending review");
+		}
+		return { scm, group };
+	}
+
+	function disposeSourceControl(): void {
+		group?.dispose();
+		scm?.dispose();
+		group = undefined;
+		scm = undefined;
+	}
 
 	const providerReg = vscode.workspace.registerTextDocumentContentProvider(BASELINE_SCHEME, contentProvider);
 
@@ -66,7 +90,14 @@ export function createVscodeReviewUi(cwd: string): ReviewUi & vscode.Disposable 
 			changeEmitter.fire(baselineUri(path));
 		},
 		setPending(files: ReviewFileDto[]) {
-			group.resourceStates = files.map((f) => {
+			// Nothing pending → tear the SCM entry down entirely rather than leaving
+			// an empty "dreb — pending review" provider lingering in the view.
+			if (files.length === 0) {
+				disposeSourceControl();
+				return;
+			}
+			const { scm: sourceControl, group: pending } = ensureSourceControl();
+			pending.resourceStates = files.map((f) => {
 				const resourceUri = vscode.Uri.file(join(root, f.path));
 				return {
 					resourceUri,
@@ -81,7 +112,7 @@ export function createVscodeReviewUi(cwd: string): ReviewUi & vscode.Disposable 
 					},
 				} satisfies vscode.SourceControlResourceState;
 			});
-			scm.count = files.length;
+			sourceControl.count = files.length;
 		},
 		async openDiff(path) {
 			const left = baselineUri(path);
@@ -90,13 +121,11 @@ export function createVscodeReviewUi(cwd: string): ReviewUi & vscode.Disposable 
 		},
 		clear() {
 			baselines.clear();
-			group.resourceStates = [];
-			scm.count = 0;
+			disposeSourceControl();
 		},
 		dispose() {
 			changeEmitter.dispose();
-			group.dispose();
-			scm.dispose();
+			disposeSourceControl();
 			providerReg.dispose();
 		},
 	};
