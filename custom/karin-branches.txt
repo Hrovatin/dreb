@@ -14,3 +14,4 @@ vscode                                             # the full vscode branch: VS 
 feature/issue-1-architecture-section-push-comments
 feature/issue-6-mach6mini-skills
 feature/focused-system-prompt                      # PR #19 — more focused default system prompt
+feature/review-findings-user-impact                # PR #60 — AGENTS.md: require user-impact explanation in review findings
