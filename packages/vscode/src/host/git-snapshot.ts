@@ -158,7 +158,7 @@ function rehashRawBytes(root: string, indexFile: string): void {
 		if (entry.length === 0) continue;
 		const tab = entry.indexOf("\t");
 		if (tab < 0) continue;
-		const mode = entry.slice(0, tab).split(" ")[0];
+		const mode = entry.split(" ")[0];
 		if (mode === "100644" || mode === "100755") files.push({ mode, path: entry.slice(tab + 1) });
 	}
 	if (files.length === 0) return;

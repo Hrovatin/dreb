@@ -21,7 +21,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	baselineContent,
 	captureTree,
@@ -475,5 +475,37 @@ describe("git-snapshot — raw-bytes baseline (EOL normalization, issue 57)", ()
 		// ("file.txt"), not the CRLF contents of the file it points at — proving
 		// the mode guard left it out of the raw re-hash.
 		expect(baselineContent(repo, base, "link.txt")).toBe("file.txt");
+	});
+
+	it("keeps the original entry intact and returns false when the replacement write fails", () => {
+		// Reproduces the exact round-1 failure scenario for an unsafe entry: the
+		// replacement write fails AFTER the working tree is otherwise untouched. The
+		// fix stages the baseline bytes in a sibling temp file and only swaps it in
+		// with an atomic rename, so a failed write must leave the original entry in
+		// place (the pre-fix unlink-then-write would have deleted it first).
+		writeFileSync(join(repo, "real.txt"), "REAL\n");
+		symlinkSync("real.txt", join(repo, "link.txt")); // unsafe entry (symlink)
+		commitAll(repo, "init");
+		const base = captureTree(repo) as string;
+
+		// Force the temp write to fail deterministically while the directory stays
+		// writable: pin Date.now() so the temp path is predictable, then occupy that
+		// exact path with a directory so writeFileSync throws EISDIR. Because the
+		// directory is writable, a regression to unlink-then-write WOULD succeed in
+		// deleting the symlink first — this asserts the atomic path does not.
+		const fixed = 1234567890;
+		const nowSpy = vi.spyOn(Date, "now").mockReturnValue(fixed);
+		const tmp = join(repo, `link.txt.dreb-revert-${process.pid}-${fixed}`);
+		mkdirSync(tmp);
+		try {
+			expect(revertFile(repo, base, "link.txt")).toBe(false);
+		} finally {
+			nowSpy.mockRestore();
+			rmSync(tmp, { recursive: true, force: true });
+		}
+		// The symlink survived the failed revert: still a symlink, still resolving
+		// to real.txt — not deleted, not replaced with a partial/empty file.
+		expect(lstatSync(join(repo, "link.txt")).isSymbolicLink()).toBe(true);
+		expect(readFileSync(join(repo, "link.txt"), "utf-8")).toBe("REAL\n");
 	});
 });
