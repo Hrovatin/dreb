@@ -404,6 +404,8 @@ describe("buildSystemPrompt", () => {
 
 			expect(prompt).toContain("native VSCode extension");
 			expect(prompt).toContain(getVscodeReadmePath());
+			// The pointer notes the path may be absent (e.g. standalone install / not built).
+			expect(prompt).toContain("may not exist in all installations");
 		});
 
 		test("pointer lives inside the Dreb documentation section", () => {
