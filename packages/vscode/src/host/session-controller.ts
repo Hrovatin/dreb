@@ -25,6 +25,7 @@ import {
 } from "../shared/projection.js";
 import type {
 	HostStatus,
+	ImageAttachmentDto,
 	OpenSourceRef,
 	QueuedMessageDto,
 	ReviewFileDto,
@@ -277,6 +278,23 @@ function currentBranch(roots: SessionTreeNodeDto[], leafId: string | null): { ru
 	}
 	if (lastAssistantInRun) runTerminalEntryIds.push(lastAssistantInRun);
 	return { runTerminalEntryIds };
+}
+
+/** An `@dreb/ai` `ImageContent` part: the wire shape the agent expects for an
+ * inline image. Declared locally so this module stays free of a static
+ * `@dreb/ai` import (the RpcClient is loaded dynamically). */
+interface ImageContentPart {
+	type: "image";
+	data: string;
+	mimeType: string;
+}
+
+/** Map composer image attachments to the agent's `ImageContent` parts, or
+ * `undefined` when there are none (so `prompt`/`steer` receive no `images` arg
+ * for a text-only turn, exactly as before). */
+function toImageContent(images?: readonly ImageAttachmentDto[]): ImageContentPart[] | undefined {
+	if (!images || images.length === 0) return undefined;
+	return images.map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType }));
 }
 
 export class SessionController {
@@ -536,7 +554,7 @@ export class SessionController {
 	 * child crash) surfaces a notice instead of dispatching into a client that
 	 * isn't ready, and every awaited RPC call is wrapped so a rejection becomes
 	 * a visible notice rather than an unhandled promise rejection. */
-	async submit(text: string, attachments?: TaggedContextDto[]): Promise<void> {
+	async submit(text: string, attachments?: TaggedContextDto[], images?: ImageAttachmentDto[]): Promise<void> {
 		// Any composer submit is genuine user engagement — reset the inactivity
 		// cap before anything else (even a submit that races the spawn window or
 		// lands after a crash and is short-circuited below).
@@ -550,21 +568,24 @@ export class SessionController {
 			return;
 		}
 		const decision = routeInput(text, this.commands);
-		// An attachment-only submit (chips attached, no typed text) is deliberately
-		// allowed by the composer; with no attachments there is genuinely nothing
-		// to send, so short-circuit only then.
-		if (decision.kind === "empty" && (!attachments || attachments.length === 0)) return;
+		// An attachment-only or image-only submit (chips/images attached, no typed
+		// text) is deliberately allowed by the composer; with neither is there
+		// genuinely nothing to send, so short-circuit only then.
+		const hasAttachments = (attachments && attachments.length > 0) || (images && images.length > 0);
+		if (decision.kind === "empty" && !hasAttachments) return;
 		try {
 			switch (decision.kind) {
 				case "empty":
-					// Reached only with attachments present (see guard above): send the
-					// folded context so a chips-only submit isn't silently dropped.
-					await this.deliver(buildPromptWithContext(text, attachments));
+					// Reached only with attachments/images present (see guard above):
+					// send the folded context + images so a chips/images-only submit
+					// isn't silently dropped.
+					await this.deliver(buildPromptWithContext(text, attachments), images);
 					return;
 				case "prompt":
 					// Fold any tagged editor selections into the prompt as located
-					// context (attachments only apply to prompts, not slash builtins).
-					await this.deliver(buildPromptWithContext(decision.message, attachments));
+					// context (attachments only apply to prompts, not slash builtins);
+					// pasted images ride along as separate image content parts.
+					await this.deliver(buildPromptWithContext(decision.message, attachments), images);
 					return;
 				case "builtin":
 					await this.runBuiltin(decision.command, decision.arg);
@@ -578,20 +599,22 @@ export class SessionController {
 		}
 	}
 
-	/** Send composer text to the model. While the agent is working, `prompt()`
-	 * throws ("Agent is already processing…"), which would silently swallow the
-	 * message; route it through `steer()` instead so it's queued into the running
-	 * turn, and refresh the pending chips so the queued message is visible. When
-	 * idle, dispatch it as a normal prompt. */
-	private async deliver(message: string): Promise<void> {
+	/** Send composer text (and any pasted images) to the model. While the agent is
+	 * working, `prompt()` throws ("Agent is already processing…"), which would
+	 * silently swallow the message; route it through `steer()` instead so it's
+	 * queued into the running turn, and refresh the pending chips so the queued
+	 * message is visible. When idle, dispatch it as a normal prompt. Images are
+	 * mapped to the agent's `ImageContent` shape (a `type: "image"` part). */
+	private async deliver(message: string, images?: ImageAttachmentDto[]): Promise<void> {
 		const client = this.client;
 		if (!client) return;
+		const content = toImageContent(images);
 		if (this.state.streaming) {
-			await client.steer(message);
+			await client.steer(message, content);
 			await this.refreshPending();
 			return;
 		}
-		await client.prompt(message);
+		await client.prompt(message, content);
 	}
 
 	/** Abort the current turn. Any messages the user queued while the agent was

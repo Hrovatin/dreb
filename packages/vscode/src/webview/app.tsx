@@ -16,6 +16,7 @@ import {
 } from "../shared/projection.js";
 import type {
 	HostStatus,
+	ImageAttachmentDto,
 	OpenSourceRef,
 	QueuedMessageDto,
 	ReviewStateDto,
@@ -28,6 +29,7 @@ import type {
 import { taggedContextLabel, taggedContextTitle } from "../shared/tagged-context.js";
 import { buildGroundedRefs, linkifyAnswer } from "./code-links.js";
 import { clampComposerHeight } from "./composer-resize.js";
+import { isImageClipboardItem, parseImageDataUrl } from "./image-paste.js";
 import { renderMarkdown } from "./markdown.js";
 import { bindStickToBottom, createStickToBottom } from "./scrolling.js";
 import { onHostMessage, postToHost } from "./vscode-api.js";
@@ -319,8 +321,8 @@ export function App() {
 				mentionInsert={mentionInsert()}
 				mentionResults={mentionResults()}
 				onRemoveAttachment={(index) => setAttachments((current) => current.filter((_, i) => i !== index))}
-				onSubmit={(text) => {
-					postToHost({ type: "submit", text, attachments: attachments() });
+				onSubmit={(text, images) => {
+					postToHost({ type: "submit", text, attachments: attachments(), images });
 					setAttachments([]);
 				}}
 				onAbort={() => postToHost({ type: "abort" })}
@@ -721,13 +723,17 @@ export function Composer(props: {
 	mentionInsert?: { label: string; nonce: number };
 	mentionResults: TaggedContextDto[];
 	onRemoveAttachment: (index: number) => void;
-	onSubmit: (text: string) => void;
+	onSubmit: (text: string, images: ImageAttachmentDto[]) => void;
 	onAbort: () => void;
 	onPickFile: () => void;
 	onSearchWorkspace: (query: string) => void;
 	onTagContext: (context: TaggedContextDto) => void;
 }) {
 	const [text, setText] = createSignal("");
+	// Images pasted into the composer, attached to the next message and shown as
+	// removable thumbnail chips. Unlike tagged-context attachments (which are
+	// folded into the prompt text), these travel as separate image content parts.
+	const [images, setImages] = createSignal<ImageAttachmentDto[]>([]);
 	// Caret position, tracked so the `@`-mention parser knows which token the user
 	// is editing (updated on input and on caret moves via keyboard/mouse).
 	const [caret, setCaret] = createSignal(0);
@@ -901,13 +907,38 @@ export function Composer(props: {
 
 	const submit = () => {
 		const value = text();
-		// Allow sending with only attachments (no typed text), but never a
-		// completely empty message.
-		if (value.trim().length === 0 && props.attachments.length === 0) return;
-		props.onSubmit(value);
+		const attached = images();
+		// Allow sending with only attachments or only pasted images (no typed
+		// text), but never a completely empty message.
+		if (value.trim().length === 0 && props.attachments.length === 0 && attached.length === 0) return;
+		props.onSubmit(value, attached);
 		setText("");
 		setCaret(0);
+		setImages([]);
 	};
+
+	/** Capture pasted images: read each image blob to base64 and attach it as a
+	 * removable chip. Only prevents the default paste when an image is actually
+	 * consumed, so pasting text/code is left completely untouched. */
+	const onPaste = (event: ClipboardEvent) => {
+		const items = event.clipboardData?.items;
+		if (!items) return;
+		const imageItems = [...items].filter((item) => isImageClipboardItem(item));
+		if (imageItems.length === 0) return;
+		event.preventDefault();
+		for (const item of imageItems) {
+			const file = item.getAsFile();
+			if (!file) continue;
+			const reader = new FileReader();
+			reader.onload = () => {
+				const parsed = typeof reader.result === "string" ? parseImageDataUrl(reader.result) : null;
+				if (parsed) setImages((current) => [...current, parsed]);
+			};
+			reader.readAsDataURL(file);
+		}
+	};
+
+	const removeImage = (index: number) => setImages((current) => current.filter((_, i) => i !== index));
 
 	const pick = (name: string) => setText(`/${name} `);
 
@@ -993,6 +1024,30 @@ export function Composer(props: {
 					</For>
 				</div>
 			</Show>
+			<Show when={images().length > 0}>
+				<div class="dreb-attachments dreb-image-attachments">
+					<For each={images()}>
+						{(image, index) => (
+							<span class="dreb-attachment dreb-image-attachment" title="Pasted image">
+								<img
+									class="dreb-image-thumb"
+									src={`data:${image.mimeType};base64,${image.data}`}
+									alt="Pasted attachment"
+								/>
+								<button
+									type="button"
+									class="dreb-attachment-remove"
+									title="Remove image"
+									aria-label="Remove image"
+									onClick={() => removeImage(index())}
+								>
+									×
+								</button>
+							</span>
+						)}
+					</For>
+				</div>
+			</Show>
 			<div class="dreb-composer-row">
 				<textarea
 					ref={inputEl}
@@ -1005,6 +1060,7 @@ export function Composer(props: {
 					onKeyDown={onKeyDown}
 					onKeyUp={(e) => syncCaret(e.currentTarget)}
 					onClick={(e) => syncCaret(e.currentTarget)}
+					onPaste={onPaste}
 				/>
 				<Show
 					when={props.streaming}
