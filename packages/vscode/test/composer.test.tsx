@@ -376,3 +376,77 @@ describe("Composer native `@@` picker insertion", () => {
 		expect(textarea.value).toBe("@host/ ");
 	});
 });
+
+/** Dispatch a `paste` event carrying the given files (as image blobs) plus any
+ * extra non-file items, mirroring a real clipboard paste. Returns the event so
+ * callers can assert whether the composer consumed it (`defaultPrevented`). */
+function pasteItems(
+	textarea: HTMLTextAreaElement,
+	files: File[],
+	extra: Array<{ kind: string; type: string }> = [],
+): Event {
+	const items = [
+		...files.map((file) => ({ kind: "file", type: file.type, getAsFile: () => file })),
+		...extra.map((item) => ({ ...item, getAsFile: () => null })),
+	];
+	const event = new Event("paste", { bubbles: true, cancelable: true });
+	Object.defineProperty(event, "clipboardData", { value: { items } });
+	textarea.dispatchEvent(event);
+	return event;
+}
+
+const pngFile = (bytes: number[]): File => new File([new Uint8Array(bytes)], "shot.png", { type: "image/png" });
+
+describe("Composer image paste", () => {
+	it("pasting an image adds a removable thumbnail chip", async () => {
+		const { host, textarea } = mount();
+
+		const consumed = pasteItems(textarea, [pngFile([1, 2, 3])]);
+		expect(consumed.defaultPrevented).toBe(true);
+
+		await vi.waitFor(() => expect(host.querySelector(".dreb-image-thumb")).toBeTruthy());
+		const thumb = host.querySelector(".dreb-image-thumb") as HTMLImageElement;
+		expect(thumb.src).toBe("data:image/png;base64,AQID");
+
+		// Remove clears the chip.
+		(host.querySelector(".dreb-image-attachment .dreb-attachment-remove") as HTMLButtonElement).click();
+		await vi.waitFor(() => expect(host.querySelector(".dreb-image-thumb")).toBeNull());
+	});
+
+	it("sends pasted images as attachments alongside the typed text", async () => {
+		const { host, textarea, spies } = mount();
+
+		type(textarea, "look at this", 12);
+		pasteItems(textarea, [pngFile([1, 2, 3])]);
+		await vi.waitFor(() => expect(host.querySelector(".dreb-image-thumb")).toBeTruthy());
+
+		(host.querySelector(".dreb-send") as HTMLButtonElement).click();
+
+		expect(spies.onSubmit).toHaveBeenCalledWith("look at this", [{ data: "AQID", mimeType: "image/png" }]);
+		// Chip and text are cleared after send.
+		expect(host.querySelector(".dreb-image-thumb")).toBeNull();
+		expect(textarea.value).toBe("");
+	});
+
+	it("allows an image-only submit (no typed text)", async () => {
+		const { host, textarea, spies } = mount();
+
+		pasteItems(textarea, [pngFile([1, 2, 3])]);
+		await vi.waitFor(() => expect(host.querySelector(".dreb-image-thumb")).toBeTruthy());
+
+		(host.querySelector(".dreb-send") as HTMLButtonElement).click();
+
+		expect(spies.onSubmit).toHaveBeenCalledWith("", [{ data: "AQID", mimeType: "image/png" }]);
+	});
+
+	it("leaves a non-image paste untouched (no chip, default not prevented)", async () => {
+		const { host, textarea } = mount();
+
+		const event = pasteItems(textarea, [], [{ kind: "string", type: "text/plain" }]);
+
+		expect(event.defaultPrevented).toBe(false);
+		// Give any stray async read a chance to (not) fire.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(host.querySelector(".dreb-image-thumb")).toBeNull();
+	});
+});

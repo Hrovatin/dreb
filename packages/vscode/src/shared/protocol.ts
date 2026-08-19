@@ -147,6 +147,20 @@ export interface SymbolContextDto {
  * folded into the next prompt. */
 export type TaggedContextDto = SelectionContextDto | FileContextDto | SymbolContextDto;
 
+/** An image pasted into the composer, attached to the next message. Carried
+ * across the host↔webview boundary as base64 (structured-clone JSON) and mapped
+ * on the host to the agent's `ImageContent` before being sent over RPC. Unlike a
+ * {@link TaggedContextDto}, an image is NOT folded into the prompt text — it
+ * travels as a separate image content part so a vision-capable model can see it.
+ * This mirrors `ImageContent` from `@dreb/ai` minus the `"image"` type tag, kept
+ * here so `protocol.ts` stays free of any `@dreb` import. */
+export interface ImageAttachmentDto {
+	/** Base64-encoded image bytes (no data-URL prefix). */
+	data: string;
+	/** MIME type, e.g. "image/png" or "image/jpeg". */
+	mimeType: string;
+}
+
 /** Where a tagged context came from, which decides how the composer surfaces it.
  * `"picker"` (the native `@@` file/folder picker) inserts an inline `@name`
  * reference at the caret in addition to the chip; `"selection"` (an editor
@@ -237,7 +251,7 @@ export type HostToWebview =
 /** Messages sent from the webview to the host. */
 export type WebviewToHost =
 	| { type: "ready" }
-	| { type: "submit"; text: string; attachments?: TaggedContextDto[] }
+	| { type: "submit"; text: string; attachments?: TaggedContextDto[]; images?: ImageAttachmentDto[] }
 	| { type: "abort" }
 	| { type: "refresh-commands" }
 	| { type: "ui-response"; response: UiResponse }
