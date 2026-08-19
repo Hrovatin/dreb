@@ -23,6 +23,7 @@ src/
     session-view-lifecycle.ts sleep-on-inactivity driver — backgrounds a closed session, sleeps it on an idle timer or a no-user-input cap; treats a crashed controller as not-reusable so reopen restarts it (pure, tested)
     session-inventory.ts on-disk session enumeration via @dreb/coding-agent's SessionManager (vscode-free)
     session-flags.ts    pin/archive persistence over globalState, keyed by session path (pure seam, tested)
+    session-order.ts    manual drag-reorder persistence over globalState, keyed by session path (pure seam, tested)
     sessions-view-model.ts sidebar list-building + action routing (pure, vscode-free, tested)
     sessions-view.ts    the `dreb.sessions` WebviewView glue (postMessage transport + HTML shell)
     tag-selection.ts    tag-selection-into-chat orchestration (pure, vscode-free, tested)
@@ -40,7 +41,7 @@ src/
     format.ts           status-header + `/session` display formatters (pure, tested)
     tagged-context.ts   selection + file/folder/symbol context DTOs, chip label, prompt fold + threshold (pure, tested)
     mention.ts          `@`/`@@` composer trigger parsing, glob escaping, and typeahead result ranking (pure, tested)
-    session-list.ts     disk+live session reconciliation, grouping, deterministic ordering, status (pure, tested)
+    session-list.ts     disk+live session reconciliation, grouping, stable creation-order + manual-order sort, status (pure, tested)
     sidebar-protocol.ts host ↔ sessions-sidebar message envelopes (no @dreb import)
   webview/       # SolidJS UI — bundled with Vite → dist/webview (chat) + dist/webview-sidebar (sessions)
     app.tsx             transcript, collapsible activity box, composer, needs-input,
@@ -50,7 +51,8 @@ src/
     code-links.ts       grounded file/symbol linkification of answers (pure, tested)
     composer-resize.ts  clamp helper for the drag-resizable composer height (pure, tested)
     sidebar/app.tsx     the sessions side panel — grouped list, live status, resume,
-                        inline rename, pin / archive / delete
+                        inline rename, pin / archive / delete, drag-to-reorder
+    sidebar/reorder.ts  pure move-math for drag-to-reorder — new key order from a drop (DOM-free, tested)
 ```
 
 - The host keeps the authoritative `TranscriptState`. On (re)load the webview announces `ready` and receives a full snapshot, so recreating the webview never loses the conversation.
@@ -86,6 +88,12 @@ You don't have to wait for the agent to finish before typing your next instructi
 
 Pressing **Stop** aborts the current turn. Because an abort leaves any still-queued messages undelivered, the extension **clears the queue and restores that text back into the composer** — you decide whether to resend it, rather than losing it. If you'd already started typing a new message when you hit Stop, the restored text is **prepended before your draft** (queued messages first, then your in-progress text) so neither is lost — never overwriting what you were typing. The pending queue is host-authoritative (refreshed from the RPC child on run transitions and after each queued submit) so the chips survive a webview reload.
 
+## Retry a failed turn
+
+When a turn ends in a **provider error** (unavailable, rate-limited, or another transient failure), its error banner shows a **↻ Retry** button so you can resend the last message **without retyping** — the original text *and* its tagged context and pasted images are replayed verbatim. Retry re-drives the retained payload through the normal submit path, so it inherits every guard (a disconnected child surfaces a notice; a still-running turn is steered) and reproduces the identical folded prompt.
+
+The control is offered only on the **most recent** turn and only while it stays errored — a stale error buried above later activity, an in-flight turn, and a **fatal host error** (dead RPC child, which surfaces its own reopen banner) never show it. The eligibility test (`retryableResponseId`) and the controller's `retry()` (which retains the last prompt across an in-place RPC restart) are pure/host-side and unit-tested.
+
 ## Change review
 
 Because the agent runs out-of-process and writes edits straight to disk, the extension can't hold changes in an unsaved overlay. Instead it **snapshots a git baseline before each turn** and reviews the working tree against it (the non-interactive analogue of `git restore -p`):
@@ -102,16 +110,16 @@ The **dreb** activity-bar container hosts a **Sessions** side panel (a SolidJS `
 
 - **Grouping & ordering** — sessions in the **current workspace** are listed first ("This workspace"); sessions from **other working directories** appear in collapsible per-project groups below; **archived** sessions collapse into their own section. Ordering is **deterministic** (per this repo's "Determinism Over Recency" rule): pinned first, then most-recently-modified — live run-state never reorders rows, so cards don't jump around while streaming.
 - **Sources** — on-disk sessions are enumerated host-side via `@dreb/coding-agent`'s `SessionManager` (`list` / `listAll`, no RPC child needed); live sessions come from the pool. A live controller and its disk row are the **same** session (reconciled by session-file path) and show as one row — `session-list.ts` owns this pure merge/group/sort.
-- **Live status** — each row shows **running** (agent streaming), **needs input** (awaiting a selection/confirmation prompt), or **idle/done**, derived from the projected transcript (`streaming` / `uiRequests`). The sidebar refreshes (debounced) as controllers stream — including for **backgrounded** sessions with no open tab.
+- **Live status** — each row shows **running** (agent streaming), **needs input** (awaiting a selection/confirmation prompt), **working in background** (the main turn has ended but background subagents are still running — a distinct, deliberately non-idle indicator so a session working on its own reads differently from one waiting on you), or **idle/done**, derived from the projected transcript (`streaming` / `uiRequests` / `backgroundAgentIds`, with precedence `running > needs-input > background > idle`). The sidebar refreshes (debounced) as controllers stream — including for **backgrounded** sessions with no open tab.
 - **Multiple concurrent sessions** — selecting a session **opens or resumes** it in a chat panel (resume passes `--session <path>` to the RPC child). Several sessions run **at once** and keep running when you switch tabs/focus: the single-slot registry is now a keyed **`SessionPool`** holding one live panel per session key.
 - **Background sessions (sleep-on-inactivity)** — closing a chat tab **never interrupts a working agent**. Only the webview view detaches (via `webview-bridge.ts`); the `SessionController` and its RPC child keep running in the background. Two configurable timers then govern when a session **sleeps** (its controller is disposed and its child released, leaving a resumable on-disk row that reopening restores from the persisted transcript):
-  - **Idle deactivation** (`dreb.session.idleSleepMinutes`, default **60**) — a **detached + idle** session (tab closed, turn finished, nothing pending) sleeps after this many minutes. Reopening the tab before it fires reattaches instantly with no loss. A **running** or **needs-input** session is never slept by this timer.
+  - **Idle deactivation** (`dreb.session.idleSleepMinutes`, default **60**) — a **detached + idle** session (tab closed, turn finished, nothing pending) sleeps after this many minutes. Reopening the tab before it fires reattaches instantly with no loss. A **running**, **needs-input**, or **working-in-background** session is never slept by this timer (sleeping a working-in-background session would release its RPC child and kill the still-running background agents).
   - **Inactivity cap** (`dreb.session.inactivitySleepHours`, default **4**) — any session with **no user input** for this many hours sleeps **regardless of state** — including a focused tab, a session awaiting input, and a running turn. This is the abandonment/runaway backstop so an unanswered prompt or a hung agent cannot hold an RPC child indefinitely; the timer resets on every submit or prompt answer.
 
   Either setting can be `0` to disable that timer; whichever fires first wins. This policy lives in the pure, tested `session-view-lifecycle.ts`; the vscode glue (detach on `onDidDispose`, reattach a fresh panel on reopen) is in `extension.ts`.
 - **Reopen always re-activates** — reopening a session from the sidebar always yields a live, connected session. A backgrounded-but-live session **reattaches** its existing controller (no restart, no interruption); a slept, `/quit`-ended, or disk-only row rebuilds fresh from disk; and a **crashed** session (its RPC child exited unexpectedly) is **restarted** from its persisted transcript rather than revealing a dead panel — the host treats a failed controller as not-reusable (`SessionController.hasFailed()`). Before you reopen it, a crashed session keeps its **needs input** indicator (the input is genuinely still needed).
-- **Status in the tab** — the chat panel's **tab title** reflects run-state (`dreb ● running`, `dreb ⚠ needs input`, or `dreb`), so a background/unfocused session's status is visible in the editor tab strip. There are **no** toast notifications — the tab title and sidebar icon are the only attention surfaces.
-- **Stop** — a **Stop** action on a running / needs-input row aborts the current turn and ends the session (releasing its RPC child). This is the only way to deliberately interrupt a working agent — closing a tab never aborts.
+- **Status in the tab** — the chat panel's **tab title** reflects run-state (`dreb ● running`, `dreb ⚠ needs input`, `dreb ◐ working` for background work, or `dreb`), so a background/unfocused session's status is visible in the editor tab strip. There are **no** toast notifications — the tab title and sidebar icon are the only attention surfaces.
+- **Stop** — a **Stop** action on a running / needs-input / working-in-background row aborts the current turn and ends the session (releasing its RPC child). This is the only way to deliberately interrupt a working agent — closing a tab never aborts.
 - **Organize** — **rename** (persisted via the `set_session_name` RPC; a closed session is renamed by briefly spawning a headless resume child), **pin**, **archive** (hidden from the main list, not deleted — retained on disk and reachable under "Archived"), and **delete** (behind a modal confirmation; routed through dreb's `SessionManager.deleteSession` — trash-first with a permanent-unlink fallback, `.jsonl` validation, and an active-session guard — clearing the persisted flags only once the delete succeeds). Pin/archive flags persist in `globalState`, keyed by session path.
 
 The list-building and action routing live in the vscode-free `sessions-view-model.ts` (unit-tested with fakes); `sessions-view.ts` is the thin `WebviewView` transport, mirroring `webview-bridge.ts`. The concurrency-safe pool core stays in the pure, tested `session-registry.ts`.

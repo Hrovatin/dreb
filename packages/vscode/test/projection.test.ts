@@ -6,6 +6,7 @@ import {
 	createTranscriptState,
 	foldMessagesIntoState,
 	type ResponseGroup,
+	retryableResponseId,
 	type TranscriptState,
 } from "../src/shared/projection.js";
 
@@ -270,6 +271,42 @@ describe("projection", () => {
 		expect(activitySummary(group)).toBe("1 thought · 2 tool calls");
 		expect(activitySummary({ ...group, activity: [] })).toBe("no activity");
 	});
+
+	describe("background agents", () => {
+		it("tracks a running background agent id on background_agent_start", () => {
+			const state = run([{ type: "background_agent_start", agentId: "abc123", agentType: "Explore" }]);
+			expect(state.backgroundAgentIds).toEqual(["abc123"]);
+		});
+
+		it("dedupes a repeated start for the same agent id", () => {
+			const state = run([
+				{ type: "background_agent_start", agentId: "abc123" },
+				{ type: "background_agent_start", agentId: "abc123" },
+			]);
+			expect(state.backgroundAgentIds).toEqual(["abc123"]);
+		});
+
+		it("removes the id on background_agent_end", () => {
+			const state = run([
+				{ type: "background_agent_start", agentId: "a" },
+				{ type: "background_agent_start", agentId: "b" },
+				{ type: "background_agent_end", agentId: "a" },
+			]);
+			expect(state.backgroundAgentIds).toEqual(["b"]);
+		});
+
+		it("ignores background_agent_end for an unknown id", () => {
+			const state = run([
+				{ type: "background_agent_start", agentId: "a" },
+				{ type: "background_agent_end", agentId: "zzz" },
+			]);
+			expect(state.backgroundAgentIds).toEqual(["a"]);
+		});
+
+		it("initializes an empty set on a fresh transcript", () => {
+			expect(createTranscriptState().backgroundAgentIds).toEqual([]);
+		});
+	});
 });
 
 describe("foldMessagesIntoState (Phase 6 full-content rebuild)", () => {
@@ -461,5 +498,211 @@ describe("alignCheckpoints (Phase 6)", () => {
 
 	it("returns nothing when there are no entries", () => {
 		expect(alignCheckpoints(withResponses(2), [], new Set())).toEqual([]);
+	});
+});
+
+describe("suggest_next → state.suggestion", () => {
+	/** A `suggest_next` tool result as it crosses RPC: the command + recap live
+	 * in `details` (plain JSON), alongside the "Suggestion registered" content. */
+	const suggestResult = (suggestion: string, summary?: string) => ({
+		content: [{ type: "text", text: `Suggestion registered: ${suggestion}` }],
+		details: { suggestion, summary },
+	});
+
+	it("sets the command from the suggest_next event", () => {
+		const state = run([{ type: "suggest_next", command: "/skill:mach6-push" }]);
+		expect(state.suggestion).toEqual({ command: "/skill:mach6-push", summary: undefined });
+	});
+
+	it("trims the command and ignores an empty one", () => {
+		expect(run([{ type: "suggest_next", command: "  /x  " }]).suggestion).toEqual({
+			command: "/x",
+			summary: undefined,
+		});
+		expect(run([{ type: "suggest_next", command: "   " }]).suggestion).toBeUndefined();
+	});
+
+	it("folds the summary in from the tool result, after the command event", () => {
+		const state = run([
+			{ type: "suggest_next", command: "/skill:mach6-push" },
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/skill:mach6-push", "Did the thing."),
+				isError: false,
+			},
+		]);
+		expect(state.suggestion).toEqual({ command: "/skill:mach6-push", summary: "Did the thing." });
+	});
+
+	it("captures both command and summary from the tool result alone (event never arrives)", () => {
+		const state = run([
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/skill:mach6-push", "Recap."),
+				isError: false,
+			},
+		]);
+		expect(state.suggestion).toEqual({ command: "/skill:mach6-push", summary: "Recap." });
+	});
+
+	it("merges regardless of event/tool ordering (tool result first)", () => {
+		const state = run([
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/from-details", "Recap."),
+				isError: false,
+			},
+			{ type: "suggest_next", command: "/from-event" },
+		]);
+		// The event is authoritative for the command; the summary is retained.
+		expect(state.suggestion).toEqual({ command: "/from-event", summary: "Recap." });
+	});
+
+	it("does not capture the summary when the suggest_next tool errored", () => {
+		const state = run([
+			{ type: "suggest_next", command: "/x" },
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/x", "Recap."),
+				isError: true,
+			},
+		]);
+		expect(state.suggestion).toEqual({ command: "/x", summary: undefined });
+	});
+
+	it("handles a malformed / absent details without throwing and keeps the command", () => {
+		expect(() =>
+			run([
+				{ type: "suggest_next", command: "/x" },
+				{
+					type: "tool_execution_end",
+					toolCallId: "s1",
+					toolName: "suggest_next",
+					result: "oops-string",
+					isError: false,
+				},
+			]),
+		).not.toThrow();
+		const state = run([
+			{ type: "suggest_next", command: "/x" },
+			{ type: "tool_execution_end", toolCallId: "s1", toolName: "suggest_next", result: {}, isError: false },
+		]);
+		expect(state.suggestion).toEqual({ command: "/x", summary: undefined });
+	});
+
+	it("ignores a blank summary string", () => {
+		const state = run([
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/x", "   "),
+				isError: false,
+			},
+		]);
+		expect(state.suggestion).toEqual({ command: "/x", summary: undefined });
+	});
+
+	it("clears the suggestion when the next turn starts (agent_start)", () => {
+		const state = run([{ type: "suggest_next", command: "/x" }, { type: "agent_start" }]);
+		expect(state.suggestion).toBeUndefined();
+	});
+
+	it("clears the suggestion when the user opens a new exchange (message_start user)", () => {
+		const state = run([
+			{ type: "suggest_next", command: "/x" },
+			{ type: "message_start", message: { role: "user", content: "next thing" } },
+		]);
+		expect(state.suggestion).toBeUndefined();
+	});
+
+	it("survives a JSON snapshot round-trip (host → webview)", () => {
+		const state = run([
+			{ type: "suggest_next", command: "/skill:mach6-push" },
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/skill:mach6-push", "Recap."),
+				isError: false,
+			},
+		]);
+		const roundTripped = JSON.parse(JSON.stringify(state)) as TranscriptState;
+		expect(roundTripped.suggestion).toEqual({ command: "/skill:mach6-push", summary: "Recap." });
+	});
+});
+
+describe("retryableResponseId", () => {
+	/** Events that produce one completed, provider-errored assistant turn preceded
+	 * by its user message (the shape a failed/unanswered turn leaves behind). */
+	const erroredTurn = (message = "boom") => [
+		{ type: "message_start", message: { role: "user", content: "do the thing" } },
+		{ type: "agent_start" },
+		{ type: "message_start", message: { role: "assistant" } },
+		{ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: message } },
+		{ type: "agent_end" },
+	];
+
+	it("returns the id of a completed, errored last turn", () => {
+		const state = run(erroredTurn());
+		const group = onlyResponse(state);
+		expect(group.error).toBe("boom");
+		expect(retryableResponseId(state)).toBe(group.id);
+	});
+
+	it("returns undefined for a fresh, empty transcript", () => {
+		expect(retryableResponseId(createTranscriptState())).toBeUndefined();
+	});
+
+	it("returns undefined when the last turn is clean (no error)", () => {
+		const state = run([
+			{ type: "message_start", message: { role: "user", content: "hi" } },
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "all good" } },
+			{ type: "agent_end" },
+		]);
+		expect(retryableResponseId(state)).toBeUndefined();
+	});
+
+	it("returns undefined while the errored turn is still streaming", () => {
+		// Same errored turn but without the terminal agent_end: the run may still
+		// resolve, so no retry control is offered yet.
+		const state = run(erroredTurn().slice(0, -1));
+		expect(state.streaming).toBe(true);
+		expect(retryableResponseId(state)).toBeUndefined();
+	});
+
+	it("returns undefined when an errored turn is not the most recent item", () => {
+		// An errored turn followed by a later user message: retry only ever targets
+		// the latest turn, never a stale error buried above newer activity.
+		const state = run([...erroredTurn(), { type: "message_start", message: { role: "user", content: "moving on" } }]);
+		expect(retryableResponseId(state)).toBeUndefined();
+	});
+
+	it("returns undefined when a host error stamped the last turn (dead RPC child)", () => {
+		// A mid-turn RPC crash whose recovery gave up: host_error sets state.hostError
+		// AND closeActiveResponse stamps the active group's `error`, so the last item
+		// would otherwise qualify. Retrying a dead child only hits the disconnected
+		// guard, so no Retry control is offered — the reopen banner owns this path.
+		const state = run([
+			{ type: "message_start", message: { role: "user", content: "do the thing" } },
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "host_error", message: "dreb process exited (code 1, signal null)" },
+		]);
+		const group = onlyResponse(state);
+		expect(state.hostError).toBeTruthy();
+		expect(group.error).toBeTruthy();
+		expect(group.streaming).toBe(false);
+		expect(retryableResponseId(state)).toBeUndefined();
 	});
 });

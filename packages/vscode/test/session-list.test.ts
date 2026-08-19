@@ -19,6 +19,7 @@ function disk(overrides: Partial<DiskSessionInput> & { path: string }): DiskSess
 		cwd: "/proj",
 		firstMessage: "hello",
 		modified: "2026-01-01T00:00:00.000Z",
+		created: "2026-01-01T00:00:00.000Z",
 		messageCount: 1,
 		...overrides,
 	};
@@ -44,6 +45,20 @@ describe("deriveSessionStatus", () => {
 	});
 	it("is idle when not streaming with no requests", () => {
 		expect(deriveSessionStatus({ streaming: false, uiRequests: [] })).toBe("idle");
+	});
+	it("is background when not streaming with running background agents", () => {
+		expect(deriveSessionStatus({ streaming: false, uiRequests: [], backgroundAgentIds: ["a"] })).toBe("background");
+	});
+	it("prefers running over background when streaming with background agents", () => {
+		expect(deriveSessionStatus({ streaming: true, uiRequests: [], backgroundAgentIds: ["a"] })).toBe("running");
+	});
+	it("prefers needs-input over background when a UI request is pending", () => {
+		expect(deriveSessionStatus({ streaming: false, uiRequests: [{}], backgroundAgentIds: ["a"] })).toBe(
+			"needs-input",
+		);
+	});
+	it("is idle when the background set is empty", () => {
+		expect(deriveSessionStatus({ streaming: false, uiRequests: [], backgroundAgentIds: [] })).toBe("idle");
 	});
 });
 
@@ -140,21 +155,86 @@ describe("buildSessionList", () => {
 		expect(fresh?.state).toBe("running");
 	});
 
-	it("(d) sorts pinned rows before unpinned, then by modified desc", () => {
+	it("(d) sorts pinned rows before unpinned, then by created desc (newest first)", () => {
 		const list = buildSessionList({
 			currentCwd: "/proj",
 			disk: [
-				disk({ path: "/proj/old.jsonl", name: "Old", modified: "2026-01-01T00:00:00.000Z" }),
-				disk({ path: "/proj/new.jsonl", name: "New", modified: "2026-06-01T00:00:00.000Z" }),
-				disk({ path: "/proj/pinned.jsonl", name: "Pinned", modified: "2020-01-01T00:00:00.000Z" }),
+				disk({ path: "/proj/old.jsonl", name: "Old", created: "2026-01-01T00:00:00.000Z" }),
+				disk({ path: "/proj/new.jsonl", name: "New", created: "2026-06-01T00:00:00.000Z" }),
+				disk({ path: "/proj/pinned.jsonl", name: "Pinned", created: "2020-01-01T00:00:00.000Z" }),
 			],
 			live: [],
 			flags: flagsFrom({ "/proj/pinned.jsonl": { pinned: true, archived: false } }),
 		});
 
 		const titles = list.groups[0].sessions.map((s) => s.title);
-		// Pinned first despite being oldest; then modified DESC among unpinned.
+		// Pinned first despite being oldest; then created DESC among unpinned.
 		expect(titles).toEqual(["Pinned", "New", "Old"]);
+	});
+
+	it("(d2) a newer `modified` does not reorder rows — only `created` orders them", () => {
+		const list = buildSessionList({
+			currentCwd: "/proj",
+			disk: [
+				// "Old" was created first but touched most recently; it must still sort
+				// last, proving activity (`modified`) no longer promotes a row.
+				disk({
+					path: "/proj/old.jsonl",
+					name: "Old",
+					created: "2026-01-01T00:00:00.000Z",
+					modified: "2026-12-31T00:00:00.000Z",
+				}),
+				disk({
+					path: "/proj/new.jsonl",
+					name: "New",
+					created: "2026-06-01T00:00:00.000Z",
+					modified: "2026-06-01T00:00:00.000Z",
+				}),
+			],
+			live: [],
+			flags: noFlags,
+		});
+		expect(list.groups[0].sessions.map((s) => s.title)).toEqual(["New", "Old"]);
+	});
+
+	it("(d3) a manual order rank overrides the default created ordering", () => {
+		const input = {
+			currentCwd: "/proj",
+			disk: [
+				disk({ path: "/proj/a.jsonl", name: "A", created: "2026-06-01T00:00:00.000Z" }),
+				disk({ path: "/proj/b.jsonl", name: "B", created: "2026-05-01T00:00:00.000Z" }),
+				disk({ path: "/proj/c.jsonl", name: "C", created: "2026-04-01T00:00:00.000Z" }),
+			],
+			live: [],
+			flags: noFlags,
+		};
+
+		// Default: newest-created first -> A, B, C.
+		expect(buildSessionList(input).groups[0].sessions.map((s) => s.title)).toEqual(["A", "B", "C"]);
+
+		// Manual ranks (higher sorts first) place C, A, B — overriding created order.
+		const ranks: Record<string, number> = { "/proj/c.jsonl": 3, "/proj/a.jsonl": 2, "/proj/b.jsonl": 1 };
+		const reordered = buildSessionList({ ...input, order: (p) => (p ? ranks[p] : undefined) });
+		expect(reordered.groups[0].sessions.map((s) => s.title)).toEqual(["C", "A", "B"]);
+	});
+
+	it("(d4) a session created after a manual reorder still surfaces at the top", () => {
+		// Manually-ordered rows carry small integer ranks; a freshly-created row has
+		// no rank and falls back to its creation epoch, which sits above them.
+		const ranks: Record<string, number> = { "/proj/a.jsonl": 2, "/proj/b.jsonl": 1 };
+		const list = buildSessionList({
+			currentCwd: "/proj",
+			disk: [
+				disk({ path: "/proj/a.jsonl", name: "A", created: "2026-01-01T00:00:00.000Z" }),
+				disk({ path: "/proj/b.jsonl", name: "B", created: "2026-01-02T00:00:00.000Z" }),
+				disk({ path: "/proj/fresh.jsonl", name: "Fresh", created: "2026-08-01T00:00:00.000Z" }),
+			],
+			live: [],
+			flags: noFlags,
+			order: (p) => (p ? ranks[p] : undefined),
+		});
+		// Fresh (unranked, newest) on top; the manually-ordered block A,B beneath.
+		expect(list.groups[0].sessions.map((s) => s.title)).toEqual(["Fresh", "A", "B"]);
 	});
 
 	it("(e) moves archived rows to the Archived group regardless of cwd", () => {
@@ -205,8 +285,8 @@ describe("buildSessionList", () => {
 		const base = {
 			currentCwd: "/proj",
 			disk: [
-				disk({ path: "/proj/a.jsonl", name: "A", modified: "2026-01-02T00:00:00.000Z" }),
-				disk({ path: "/proj/b.jsonl", name: "B", modified: "2026-01-01T00:00:00.000Z" }),
+				disk({ path: "/proj/a.jsonl", name: "A", created: "2026-01-02T00:00:00.000Z" }),
+				disk({ path: "/proj/b.jsonl", name: "B", created: "2026-01-01T00:00:00.000Z" }),
 			],
 			flags: noFlags,
 		};
@@ -222,6 +302,26 @@ describe("buildSessionList", () => {
 		expect(order(idle)).toEqual(["A", "B"]);
 		expect(order(running)).toEqual(["A", "B"]);
 		expect(running.groups[0].sessions[1].state).toBe("running");
+	});
+
+	it("(g2) a pathless live session falls back its `created` to `modified` then now", () => {
+		const list = buildSessionList({
+			currentCwd: "/proj",
+			disk: [],
+			live: [live({ key: "pool-new", state: "running", modified: "2026-03-03T00:00:00.000Z" })],
+			flags: noFlags,
+		});
+		expect(list.groups[0].sessions[0].created).toBe("2026-03-03T00:00:00.000Z");
+
+		const noModified = buildSessionList({
+			currentCwd: "/proj",
+			disk: [],
+			live: [live({ key: "pool-new", state: "running" })],
+			flags: noFlags,
+		});
+		// No modified either -> a valid ISO "now" fallback (non-empty, parseable).
+		const created = noModified.groups[0].sessions[0].created;
+		expect(Number.isNaN(Date.parse(created))).toBe(false);
 	});
 
 	it("(h) each group carries a stable, unique key (for webview reconcile)", () => {

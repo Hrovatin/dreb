@@ -135,6 +135,9 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 			case "submit":
 				void controller.submit(raw.text, raw.attachments, raw.images);
 				return;
+			case "retry":
+				void controller.retry();
+				return;
 			case "abort":
 				void controller.abort();
 				return;
@@ -176,6 +179,9 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 				return;
 			case "show-tree":
 				void controller.requestTree();
+				return;
+			case "dismiss-suggestion":
+				controller.dismissSuggestion();
 				return;
 			case "ui-response":
 				controller.respondUi(raw.response);

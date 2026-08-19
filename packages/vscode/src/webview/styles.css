@@ -250,6 +250,26 @@ body {
 	background: var(--vscode-inputValidation-errorBackground, rgba(220, 50, 50, 0.15));
 	border: 1px solid var(--vscode-inputValidation-errorBorder, #d33);
 	color: var(--vscode-foreground);
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.dreb-banner-text {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+.dreb-retry-btn {
+	flex: 0 0 auto;
+	font: inherit;
+	color: var(--vscode-button-foreground, #fff);
+	background: var(--vscode-button-background, #0e639c);
+	border: none;
+	border-radius: 4px;
+	padding: 2px 10px;
+	cursor: pointer;
+}
+.dreb-retry-btn:hover {
+	background: var(--vscode-button-hoverBackground, #1177bb);
 }
 
 /* Change-review bar ------------------------------------------------------- */
@@ -336,6 +356,79 @@ body {
 	text-transform: uppercase;
 	letter-spacing: 0.03em;
 	color: var(--vscode-descriptionForeground);
+}
+
+/* Next-step suggestion bar (suggest_next) ---------------------------------- */
+.dreb-suggestion-bar {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 8px 12px;
+	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+}
+.dreb-suggestion-summary {
+	font-size: 0.9em;
+	color: var(--vscode-foreground);
+}
+.dreb-suggestion-summary > :first-child {
+	margin-top: 0;
+}
+.dreb-suggestion-summary > :last-child {
+	margin-bottom: 0;
+}
+.dreb-suggestion-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+.dreb-suggestion-label {
+	font-size: 0.8em;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--vscode-descriptionForeground);
+}
+.dreb-suggestion-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	max-width: 100%;
+	overflow: hidden;
+	font-size: 0.85em;
+	padding: 2px 10px;
+	border-radius: 12px;
+	border: 1px solid var(--vscode-focusBorder, rgba(56, 128, 255, 0.5));
+	background: var(--vscode-button-secondaryBackground, transparent);
+	color: var(--vscode-foreground);
+	cursor: pointer;
+}
+.dreb-suggestion-pill:hover {
+	background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15)));
+}
+.dreb-suggestion-arrow {
+	opacity: 0.7;
+}
+.dreb-suggestion-cmd {
+	font-family: var(--vscode-editor-font-family, monospace);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.dreb-suggestion-dismiss {
+	margin-left: auto;
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	padding: 0 2px;
+	font-size: 1.1em;
+	line-height: 1;
+}
+.dreb-suggestion-dismiss:hover {
+	color: var(--vscode-foreground);
 }
 
 

@@ -186,6 +186,7 @@ describe("connectWebview", () => {
 		const controller = await makeController(fake);
 		const submit = vi.spyOn(controller, "submit").mockResolvedValue();
 		const abort = vi.spyOn(controller, "abort").mockResolvedValue();
+		const retry = vi.spyOn(controller, "retry").mockResolvedValue();
 		const respondUi = vi.spyOn(controller, "respondUi").mockImplementation(() => {});
 		const refresh = vi.spyOn(controller, "refreshCommands");
 
@@ -193,14 +194,29 @@ describe("connectWebview", () => {
 		connectWebview(webview as any, controller);
 
 		send({ type: "submit", text: "hi there" });
+		send({ type: "retry" });
 		send({ type: "abort" });
 		send({ type: "ui-response", response: { id: "u1", confirmed: true } });
 		send({ type: "refresh-commands" });
 
 		expect(submit).toHaveBeenCalledWith("hi there", undefined, undefined);
+		expect(retry).toHaveBeenCalledTimes(1);
 		expect(abort).toHaveBeenCalledTimes(1);
 		expect(respondUi).toHaveBeenCalledWith({ id: "u1", confirmed: true });
 		expect(refresh).toHaveBeenCalled();
+	});
+
+	it("dispatches a dismiss-suggestion message to the controller", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const dismiss = vi.spyOn(controller, "dismissSuggestion");
+
+		const { webview, send } = makeWebview();
+		connectWebview(webview as any, controller);
+
+		send({ type: "dismiss-suggestion" });
+
+		expect(dismiss).toHaveBeenCalledTimes(1);
 	});
 
 	it("forwards submit attachments to the controller", async () => {

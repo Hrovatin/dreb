@@ -148,6 +148,36 @@ body {
 	background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.24));
 }
 
+/* Drag-to-reorder: grab handle, revealed on hover like the action buttons. */
+.dreb-side-drag {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	padding: 0 2px;
+	cursor: grab;
+	opacity: 0;
+	color: var(--vscode-descriptionForeground, #888);
+	user-select: none;
+}
+.dreb-side-row:hover .dreb-side-drag,
+.dreb-side-row:focus-within .dreb-side-drag {
+	opacity: 0.7;
+}
+.dreb-side-drag:active {
+	cursor: grabbing;
+}
+/* The row currently being dragged. */
+.dreb-side-row-dragging {
+	opacity: 0.5;
+}
+/* Drop-target indicators: a line above/below the hovered row. */
+.dreb-side-drop-before {
+	box-shadow: inset 0 2px 0 0 var(--vscode-focusBorder, #07d);
+}
+.dreb-side-drop-after {
+	box-shadow: inset 0 -2px 0 0 var(--vscode-focusBorder, #07d);
+}
+
 .dreb-side-row-main {
 	flex: 1;
 	min-width: 0;
@@ -208,6 +238,7 @@ body {
 /* Status indicators ------------------------------------------------------- */
 .dreb-state-running,
 .dreb-state-needs-input,
+.dreb-state-background,
 .dreb-state-idle {
 	flex: none;
 	display: inline-block;
@@ -231,6 +262,26 @@ body {
 .dreb-state-needs-input {
 	background: var(--vscode-charts-yellow, #db3);
 	box-shadow: 0 0 0 2px color-mix(in srgb, var(--vscode-charts-yellow, #db3) 30%, transparent);
+}
+
+/* Background work in progress: a filled blue dot that gently pulses — visually
+ * distinct from the spinning-green "running" ring, the solid-yellow
+ * "needs-input" dot, and the hollow "idle" outline, so a session doing work on
+ * its own reads differently from one waiting on the user. */
+.dreb-state-background {
+	background: var(--vscode-charts-blue, #39f);
+	animation: dreb-side-pulse 1.4s ease-in-out infinite;
+}
+@keyframes dreb-side-pulse {
+	0%,
+	100% {
+		opacity: 1;
+		box-shadow: 0 0 0 0 color-mix(in srgb, var(--vscode-charts-blue, #39f) 45%, transparent);
+	}
+	50% {
+		opacity: 0.55;
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--vscode-charts-blue, #39f) 0%, transparent);
+	}
 }
 
 .dreb-state-idle {

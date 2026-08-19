@@ -40,6 +40,8 @@ function stateMarker(state: SessionRunState): string {
 			return " ●";
 		case "needs-input":
 			return " ⚠";
+		case "background":
+			return " ◐";
 		default:
 			return "";
 	}
@@ -47,8 +49,9 @@ function stateMarker(state: SessionRunState): string {
 
 /**
  * Build a chat tab title from a session's display title and run-state:
- * `D: <shortened title>` plus a compact `●` (running) / `⚠` (needs input)
- * marker. An empty/undefined title falls back to `D: New session`.
+ * `D: <shortened title>` plus a compact `●` (running) / `⚠` (needs input) /
+ * `◐` (working in background) marker. An empty/undefined title falls back to
+ * `D: New session`.
  */
 export function formatTabTitle(
 	title: string | undefined,

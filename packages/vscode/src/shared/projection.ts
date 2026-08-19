@@ -61,6 +61,17 @@ export interface SystemItem {
 
 export type TranscriptItem = UserItem | ResponseGroup | SystemItem;
 
+/** The agent's end-of-turn next-step suggestion (`suggest_next` tool). Mirrors
+ * the TUI's ghost-text affordance: a single command the user most likely wants
+ * to run next, plus an optional markdown recap of the work just done. The
+ * command arrives on the `suggest_next` event; the `summary` (when present) is
+ * folded in from the `suggest_next` tool result's `details`. Cleared at the
+ * start of the next turn so it never lingers stale. */
+export interface SuggestionState {
+	command: string;
+	summary?: string;
+}
+
 /**
  * An inline restore/fork control descriptor (Phase 6). Maps a rendered response
  * group to the session entry the webview forks from / navigates to. Kept out of
@@ -119,16 +130,24 @@ export interface TranscriptState {
 	streaming: boolean;
 	/** Blocking extension-UI requests awaiting a response. */
 	uiRequests: UiRequest[];
+	/** Registry ids of background agents currently running for this session (added
+	 * on `background_agent_start`, removed on `background_agent_end`). A non-empty
+	 * set while the main turn is idle means work is still happening in the
+	 * background — see {@link deriveSessionStatus}. */
+	backgroundAgentIds: string[];
 	/** Transient non-fatal status (retry/compaction); MVP surfaces a single line. */
 	statusText?: string;
 	/** Fatal host-side error (e.g. the RPC child process exited). */
 	hostError?: string;
+	/** The agent's end-of-turn next-step suggestion (`suggest_next`), surfaced as
+	 * a dismissable bar above the composer. Undefined when there is none. */
+	suggestion?: SuggestionState;
 	/** Monotonic id source for response groups. */
 	nextResponseId: number;
 }
 
 export function createTranscriptState(): TranscriptState {
-	return { items: [], streaming: false, uiRequests: [], nextResponseId: 1 };
+	return { items: [], streaming: false, uiRequests: [], backgroundAgentIds: [], nextResponseId: 1 };
 }
 
 /** Flatten message content (string or content-part array) to plain text. */
@@ -215,6 +234,23 @@ function partialResultText(payload: unknown): string | undefined {
 	return undefined;
 }
 
+/** Fold a `suggest_next` tool result into `state.suggestion`, reading the
+ * command and (optional) recap out of the result's `details`. The `details`
+ * cross the RPC boundary intact (the generic RPC output serializes the whole
+ * event), so this is where the `summary` — absent from the lean `suggest_next`
+ * event — becomes available to the webview. Defensive throughout: a missing or
+ * oddly-shaped `details` simply contributes nothing and never throws. Merges,
+ * so a command already set by the `suggest_next` event is preserved. */
+function captureSuggestionFromToolResult(state: TranscriptState, result: unknown): void {
+	const details = result && typeof result === "object" ? (result as { details?: unknown }).details : undefined;
+	if (!details || typeof details !== "object") return;
+	const d = details as { suggestion?: unknown; summary?: unknown };
+	const command =
+		typeof d.suggestion === "string" && d.suggestion.trim().length > 0 ? d.suggestion : state.suggestion?.command;
+	const summary = typeof d.summary === "string" && d.summary.trim().length > 0 ? d.summary : state.suggestion?.summary;
+	if (command) state.suggestion = { command, summary };
+}
+
 function providerErrorText(message: {
 	role?: unknown;
 	stopReason?: unknown;
@@ -279,16 +315,37 @@ export function applyEvent(state: TranscriptState, event: any): void {
 			state.statusText = undefined;
 			// A new run resolves any prior blocking UI requests server-side.
 			state.uiRequests = [];
+			// The previous turn's next-step suggestion is stale once a new run
+			// begins — clear it so it never lingers into the next turn.
+			state.suggestion = undefined;
 			break;
 		}
 		case "agent_end": {
 			closeActiveResponse(state);
 			break;
 		}
+		case "background_agent_start": {
+			// A background subagent began running for this session. Track its id so
+			// the sidebar can show "working in background" once the main turn ends.
+			const agentId = event.agentId !== undefined ? String(event.agentId) : undefined;
+			if (agentId && !state.backgroundAgentIds.includes(agentId)) {
+				state.backgroundAgentIds.push(agentId);
+			}
+			break;
+		}
+		case "background_agent_end": {
+			// A background subagent finished (success/failure/cancel all clear it).
+			const agentId = event.agentId !== undefined ? String(event.agentId) : undefined;
+			if (agentId) state.backgroundAgentIds = state.backgroundAgentIds.filter((id) => id !== agentId);
+			break;
+		}
 		case "message_start": {
 			const message = event.message as { role?: string; content?: unknown } | undefined;
 			if (message?.role === "user") {
 				state.items.push({ kind: "user", text: contentToText(message.content) });
+				// A user message opens a new exchange — any pending suggestion from
+				// the previous turn is now stale.
+				state.suggestion = undefined;
 			} else if (message?.role === "assistant") {
 				activeResponse(state, true);
 			}
@@ -378,6 +435,11 @@ export function applyEvent(state: TranscriptState, event: any): void {
 				const text = partialResultText(event.result);
 				if (text !== undefined) tool.resultText = text;
 			}
+			// The next-step suggestion's recap (`summary`) rides the tool result's
+			// `details`, not the lean `suggest_next` event — fold it in here.
+			if (event.toolName === "suggest_next" && !event.isError) {
+				captureSuggestionFromToolResult(state, event.result);
+			}
 			break;
 		}
 		case "extension_ui_request": {
@@ -423,6 +485,14 @@ export function applyEvent(state: TranscriptState, event: any): void {
 			state.statusText = String(event.message ?? "");
 			break;
 		}
+		case "suggest_next": {
+			// The agent's end-of-turn next-step command. The recap (`summary`) is
+			// folded in separately from the tool result (see tool_execution_end);
+			// preserve it if it arrived first (event ordering is not guaranteed).
+			const command = typeof event.command === "string" ? event.command.trim() : "";
+			if (command) state.suggestion = { command, summary: state.suggestion?.summary };
+			break;
+		}
 		case "host_system": {
 			// Synthetic event for host-side output that should persist in the
 			// transcript (e.g. `/session` stats), not a transient status line.
@@ -442,6 +512,25 @@ export function activitySummary(group: ResponseGroup): string {
 	if (thoughtCount > 0) parts.push(`${thoughtCount} thought${thoughtCount === 1 ? "" : "s"}`);
 	if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount === 1 ? "" : "s"}`);
 	return parts.length > 0 ? parts.join(" · ") : "no activity";
+}
+
+/**
+ * The id of the response group eligible for a **Retry** control, or `undefined`
+ * when none is. Only the *most recent* turn qualifies, and only when it ended in
+ * a provider error (`error` set) and is no longer streaming — so a stale errored
+ * turn buried above later successful turns never offers a misleading resend, and
+ * an in-flight turn never offers one while it may still succeed. Kept pure and
+ * dependency-free so both the webview (to render the button) and unit tests can
+ * use it. Retrying a fatal host error (dead RPC child) is out of scope — that
+ * path surfaces its own reopen banner, so when `hostError` is set (e.g. crash
+ * recovery gave up and stamped the active group's `error`) no Retry is offered:
+ * the child is gone and a resend would only hit the disconnected guard.
+ */
+export function retryableResponseId(state: TranscriptState): number | undefined {
+	if (state.hostError) return undefined;
+	const last = state.items[state.items.length - 1];
+	if (last && last.kind === "response" && !last.streaming && last.error) return last.id;
+	return undefined;
 }
 
 /**

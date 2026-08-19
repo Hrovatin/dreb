@@ -14,11 +14,14 @@ import { buildSessionList, type LiveSessionInput, type SessionListDto } from "..
 import type { HostToSidebar, SidebarToHost } from "../shared/sidebar-protocol.js";
 import type { SessionFlagsStore } from "./session-flags.js";
 import type { SessionInventory } from "./session-inventory.js";
+import type { SessionOrderStore } from "./session-order.js";
 
 /** Ports the view-model needs; all vscode/pool specifics live behind these. */
 export interface SessionsViewDeps {
 	inventory: SessionInventory;
 	flags: SessionFlagsStore;
+	/** Persisted manual drag order for sessions (keyed by path). */
+	order: SessionOrderStore;
 	/** The workspace cwd whose sessions sort first. */
 	currentCwd: () => string;
 	/** Snapshot of the currently-live sessions in the host's pool. */
@@ -91,6 +94,18 @@ export class SessionsViewModel {
 				await this.deps.deleteSession(msg.key);
 				await this.refresh();
 				return;
+			case "reorder": {
+				// Resolve the dragged row keys to session paths, dropping any
+				// not-yet-persisted (`new:`) rows that have no path to key an order by.
+				const paths = msg.orderedKeys
+					.map((key) => this.deps.pathForKey(key))
+					.filter((p): p is string => p !== undefined);
+				if (paths.length > 0) {
+					await this.deps.order.setGroupOrder(paths);
+					await this.refresh();
+				}
+				return;
+			}
 			case "stop":
 				// Stopping tears the controller down; the host refreshes the list as a
 				// side effect of the pool change. Refresh anyway so a slept/aborted row
@@ -131,6 +146,7 @@ export class SessionsViewModel {
 			live,
 			flags: (path) => this.deps.flags.get(path),
 			activeKey: this.deps.activeKey?.(),
+			order: (path) => this.deps.order.get(path),
 		});
 	}
 }

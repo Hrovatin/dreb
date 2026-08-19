@@ -15,6 +15,7 @@ describe("formatTabTitle", () => {
 	it("appends a compact marker for each non-idle run state", () => {
 		expect(formatTabTitle("Task", "running")).toBe("D: Task ●");
 		expect(formatTabTitle("Task", "needs-input")).toBe("D: Task ⚠");
+		expect(formatTabTitle("Task", "background")).toBe("D: Task ◐");
 		expect(formatTabTitle("Task", "idle")).toBe("D: Task");
 	});
 

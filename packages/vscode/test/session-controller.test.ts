@@ -98,6 +98,10 @@ class FakeClient implements RpcClientLike {
 	private eventListener: ((event: any) => void) | undefined;
 	private exitListener: ((info: any) => void) | undefined;
 
+	/** Seed for `listBackgroundAgents()`; empty by default. */
+	backgroundAgents: Array<{ agentId: string; status: string }> = [];
+	listBackgroundAgentsCalls = 0;
+
 	async start(): Promise<void> {
 		if (this.startError) throw this.startError;
 		this.started = true;
@@ -179,6 +183,10 @@ class FakeClient implements RpcClientLike {
 		this.getStateCalls += 1;
 		if (this.stateGate) await this.stateGate;
 		return this.state;
+	}
+	async listBackgroundAgents(): Promise<Array<{ agentId: string; status: string }>> {
+		this.listBackgroundAgentsCalls += 1;
+		return this.backgroundAgents;
 	}
 	async getDailyCost(): Promise<number> {
 		this.dailyCostCalls += 1;
@@ -331,6 +339,20 @@ function makeController(fake: FakeClient, opts: { cwd?: string; ui?: HostUi; ses
 	});
 }
 
+/** Collect host-notice messages emitted by the controller. Notices ride the
+ * update stream as `host_notice` events; the returned accessor reads the list
+ * captured so far. */
+function collectNotices(controller: SessionController): () => string[] {
+	const notices: string[] = [];
+	controller.onUpdate((u) => {
+		if (u.kind === "event") {
+			const event = u.event as { type?: string; message?: string };
+			if (event?.type === "host_notice" && typeof event.message === "string") notices.push(event.message);
+		}
+	});
+	return () => notices;
+}
+
 describe("SessionController", () => {
 	it("starts the client, connects, and merges agent + builtin commands", async () => {
 		const fake = new FakeClient();
@@ -450,6 +472,24 @@ describe("SessionController", () => {
 		const transcript = controller.getTranscript();
 		expect(transcript.items.some((i) => i.kind === "response" && i.answer === "Hi")).toBe(true);
 		expect(updates.filter((u) => u.kind === "event")).toHaveLength(3);
+	});
+
+	it("dismissSuggestion clears the authoritative suggestion so it can't reappear on reload", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		// A turn ends with a next-step suggestion, captured into host state.
+		fake.emit({ type: "suggest_next", command: "/skill:mach6-push" });
+		expect(controller.getTranscript().suggestion).toEqual({
+			command: "/skill:mach6-push",
+			summary: undefined,
+		});
+
+		// The user dismisses the bar — the host must drop its copy, otherwise a
+		// webview reload would re-snapshot the dismissed suggestion back in.
+		controller.dismissSuggestion();
+		expect(controller.getTranscript().suggestion).toBeUndefined();
 	});
 
 	it("routes plain text to prompt and /compact to compact", async () => {
@@ -676,6 +716,102 @@ describe("SessionController", () => {
 		expect(fake.compactions).toEqual(["tidy"]);
 	});
 
+	it("retry with nothing sent yet surfaces a notice and sends no prompt", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		const notices = collectNotices(controller);
+		await controller.retry();
+
+		expect(fake.prompts).toHaveLength(0);
+		expect(notices()).toContain("Nothing to retry yet — send a message first.");
+	});
+
+	it("retry resends the last prompt verbatim", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("fix the bug");
+		await controller.retry();
+
+		expect(fake.prompts).toEqual(["fix the bug", "fix the bug"]);
+	});
+
+	it("retry re-includes the original attached context", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("explain this", [
+			{
+				kind: "selection",
+				path: "src/a.ts",
+				startLine: 5,
+				endLine: 7,
+				language: "typescript",
+				text: "const y = 2;",
+			},
+		]);
+		await controller.retry();
+
+		const folded = "`src/a.ts` (lines 5-7):\n```typescript\nconst y = 2;\n```\n\nexplain this";
+		expect(fake.prompts).toEqual([folded, folded]);
+	});
+
+	it("retry resends an attachment-only turn (empty text) verbatim", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		// The composer allows sending chips with no typed text; the empty-text
+		// branch of submit() must also be retained so retry replays the folded
+		// context rather than surfacing "nothing to retry".
+		await controller.submit("", [
+			{
+				kind: "selection",
+				path: "src/a.ts",
+				startLine: 5,
+				endLine: 5,
+				language: "typescript",
+				text: "const y = 2;",
+			},
+		]);
+		await controller.retry();
+
+		const folded = "`src/a.ts` (line 5):\n```typescript\nconst y = 2;\n```";
+		expect(fake.prompts).toEqual([folded, folded]);
+	});
+
+	it("does not retain a slash builtin as the retry target", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		// A real prompt is retained; a following builtin must not overwrite it, so
+		// retry still resends the last *message* rather than replaying /compact.
+		await controller.submit("hello");
+		await controller.submit("/compact");
+		await controller.retry();
+
+		expect(fake.prompts).toEqual(["hello", "hello"]);
+		expect(fake.compactions).toEqual([undefined]);
+	});
+
+	it("a slash builtin alone leaves nothing to retry", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		const notices = collectNotices(controller);
+		await controller.submit("/compact");
+		await controller.retry();
+
+		expect(fake.prompts).toHaveLength(0);
+		expect(notices()).toContain("Nothing to retry yet — send a message first.");
+	});
+
 	it("tagContext emits a tag-context update to listeners", async () => {
 		const fake = new FakeClient();
 		const controller = makeController(fake);
@@ -881,6 +1017,26 @@ describe("SessionController", () => {
 
 		expect(fake.newSessions).toBe(1);
 		expect(controller.getTranscript().items).toHaveLength(0);
+	});
+
+	it("/new drops a stale next-step suggestion so it can't leak into the fresh session", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+		// A turn ended with a next-step suggestion captured into host state.
+		fake.emit({ type: "suggest_next", command: "/skill:mach6-push" });
+		expect(controller.getTranscript().suggestion).toEqual({
+			command: "/skill:mach6-push",
+			summary: undefined,
+		});
+
+		// Starting a new session must reset the suggestion (resetTranscriptState),
+		// otherwise the prior conversation's suggestion would flash into the fresh
+		// one via the resync snapshot until the next turn cleared it.
+		await controller.submit("/new");
+
+		expect(fake.newSessions).toBe(1);
+		expect(controller.getTranscript().suggestion).toBeUndefined();
 	});
 
 	it("/reload reloads and re-emits the command list", async () => {
@@ -1553,6 +1709,66 @@ describe("SessionController", () => {
 		expect(controller.runState).toBe("idle");
 		fake.emit({ type: "extension_ui_request", id: "u1", method: "confirm", title: "Proceed?" });
 		expect(controller.runState).toBe("needs-input");
+	});
+
+	it("runState is 'background' when the main turn is idle but a background agent is running", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+		expect(controller.runState).toBe("idle");
+
+		// A background agent starts while the main turn is not streaming.
+		fake.emit({ type: "background_agent_start", agentId: "bg1", agentType: "Explore" });
+		expect(controller.runState).toBe("background");
+
+		// A second one starts, then the first ends — still background while any remain.
+		fake.emit({ type: "background_agent_start", agentId: "bg2" });
+		fake.emit({ type: "background_agent_end", agentId: "bg1" });
+		expect(controller.runState).toBe("background");
+
+		// The last one ends → back to idle.
+		fake.emit({ type: "background_agent_end", agentId: "bg2" });
+		expect(controller.runState).toBe("idle");
+	});
+
+	it("runState prefers 'running' over 'background' while the main turn streams", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		fake.emit({ type: "background_agent_start", agentId: "bg1" });
+		expect(controller.runState).toBe("background");
+		// The parent turn resumes (e.g. delivering a background result) → running.
+		fake.emit({ type: "agent_start" });
+		expect(controller.runState).toBe("running");
+		// When that turn ends with the agent still running, it drops back to background.
+		fake.emit({ type: "agent_end" });
+		expect(controller.runState).toBe("background");
+	});
+
+	it("seeds background agents from the RPC registry on start (reconnect while running)", async () => {
+		const fake = new FakeClient();
+		fake.backgroundAgents = [
+			{ agentId: "bg1", status: "running" },
+			{ agentId: "done", status: "completed" }, // not running → ignored
+		];
+		const controller = makeController(fake);
+		await controller.start();
+
+		expect(fake.listBackgroundAgentsCalls).toBe(1);
+		// Only the running agent seeds the indicator.
+		expect(controller.runState).toBe("background");
+		expect(controller.getTranscript().backgroundAgentIds).toEqual(["bg1"]);
+	});
+
+	it("start still succeeds when the background-agent seed query fails", async () => {
+		const fake = new FakeClient();
+		fake.listBackgroundAgents = async () => {
+			throw new Error("registry unavailable");
+		};
+		const controller = makeController(fake);
+		await expect(controller.start()).resolves.toBeUndefined();
+		expect(controller.runState).toBe("idle");
 	});
 
 	it("sessionPath reflects the live session file from a status refresh", async () => {

@@ -252,6 +252,9 @@ export type HostToWebview =
 export type WebviewToHost =
 	| { type: "ready" }
 	| { type: "submit"; text: string; attachments?: TaggedContextDto[]; images?: ImageAttachmentDto[] }
+	/** Resend the last submitted message (with its attached context) after a turn
+	 * failed / the model didn't respond — no retyping. */
+	| { type: "retry" }
 	| { type: "abort" }
 	| { type: "refresh-commands" }
 	| { type: "ui-response"; response: UiResponse }
@@ -279,4 +282,9 @@ export type WebviewToHost =
 	/** Restore (navigate) to a session entry — rewind or branch-jump (Phase 6). */
 	| { type: "navigate-tree"; entryId: string }
 	/** Request the session branch tree for the branch-tree view (Phase 6). */
-	| { type: "show-tree" };
+	| { type: "show-tree" }
+	/** The user dismissed the end-of-turn `suggest_next` bar. The webview already
+	 * cleared its own copy for immediacy; this tells the host to drop the
+	 * suggestion from its authoritative `TranscriptState` too, so a dismissed
+	 * suggestion does not reappear when the webview reloads and re-snapshots. */
+	| { type: "dismiss-suggestion" };
