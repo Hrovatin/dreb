@@ -324,13 +324,17 @@ export function App() {
 								mode: "fill-if-empty",
 							}))
 						}
-						onDismiss={() =>
+						onDismiss={() => {
+							// Clear our own copy immediately, and tell the host to drop
+							// its authoritative copy too so the dismissed suggestion does
+							// not reappear when the webview reloads and re-snapshots.
 							setState(
 								produce((s) => {
 									s.suggestion = undefined;
 								}),
-							)
-						}
+							);
+							postToHost({ type: "dismiss-suggestion" });
+						}}
 					/>
 				)}
 			</Show>

@@ -394,6 +394,15 @@ export class SessionController {
 		return this.state;
 	}
 
+	/** Drop the end-of-turn `suggest_next` suggestion from the authoritative
+	 * transcript state after the user dismisses its bar in the webview. Without
+	 * this, the host would keep the suggestion (it is only cleared at the next
+	 * turn's `agent_start`/user message) and re-send it in the reload snapshot,
+	 * so a dismissed bar would reappear on the next webview reload. */
+	dismissSuggestion(): void {
+		this.state.suggestion = undefined;
+	}
+
 	getStatus(): HostStatus {
 		return this.status;
 	}
@@ -895,6 +904,10 @@ export class SessionController {
 		this.state.statusText = undefined;
 		this.state.hostError = undefined;
 		this.state.nextResponseId = 1;
+		// A prior session's end-of-turn suggestion must not survive into a
+		// new/imported/forked session (it is otherwise only cleared at the next
+		// turn's agent_start); drop it so it can't leak across the resync.
+		this.state.suggestion = undefined;
 		// Drop the prior session's checkpoints so a new/imported session doesn't
 		// render stale Restore/Fork controls on its first turn (the new session's
 		// first response group reuses id 1 and would otherwise match a stale

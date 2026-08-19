@@ -446,6 +446,24 @@ describe("SessionController", () => {
 		expect(updates.filter((u) => u.kind === "event")).toHaveLength(3);
 	});
 
+	it("dismissSuggestion clears the authoritative suggestion so it can't reappear on reload", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		// A turn ends with a next-step suggestion, captured into host state.
+		fake.emit({ type: "suggest_next", command: "/skill:mach6-push" });
+		expect(controller.getTranscript().suggestion).toEqual({
+			command: "/skill:mach6-push",
+			summary: undefined,
+		});
+
+		// The user dismisses the bar — the host must drop its copy, otherwise a
+		// webview reload would re-snapshot the dismissed suggestion back in.
+		controller.dismissSuggestion();
+		expect(controller.getTranscript().suggestion).toBeUndefined();
+	});
+
 	it("routes plain text to prompt and /compact to compact", async () => {
 		const fake = new FakeClient();
 		const controller = makeController(fake);

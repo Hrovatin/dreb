@@ -177,6 +177,9 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 			case "show-tree":
 				void controller.requestTree();
 				return;
+			case "dismiss-suggestion":
+				controller.dismissSuggestion();
+				return;
 			case "ui-response":
 				controller.respondUi(raw.response);
 				return;

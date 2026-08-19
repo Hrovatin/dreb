@@ -203,6 +203,19 @@ describe("connectWebview", () => {
 		expect(refresh).toHaveBeenCalled();
 	});
 
+	it("dispatches a dismiss-suggestion message to the controller", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const dismiss = vi.spyOn(controller, "dismissSuggestion");
+
+		const { webview, send } = makeWebview();
+		connectWebview(webview as any, controller);
+
+		send({ type: "dismiss-suggestion" });
+
+		expect(dismiss).toHaveBeenCalledTimes(1);
+	});
+
 	it("forwards submit attachments to the controller", async () => {
 		const fake = new BridgeFakeClient();
 		const controller = await makeController(fake);
