@@ -60,11 +60,23 @@ export interface HostStatus {
 	error?: string;
 }
 
-/** A response to a blocking extension-UI request, mirroring RpcExtensionUIResponse. */
+/** A single answer to one question in an `ask` wizard, mirroring RpcAskAnswer.
+ * One per question, in the same order as the request's `questions[]`. */
+export interface AskUiAnswer {
+	/** Options the user selected (empty when only free text was typed, or skipped). */
+	selected: string[];
+	/** Free-text answer, when provided. */
+	customText?: string;
+	/** True when the user left this question unanswered. */
+	skipped?: boolean;
+}
+
+/** A response to a blocking extension-UI request, mirroring RpcExtensionUIResponse.
+ * The `ask` method answers with one {@link AskUiAnswer} per question. */
 export type UiResponse =
 	| { id: string; value: string }
 	| { id: string; confirmed: boolean }
-	| { id: string; selected: string[]; customText?: string }
+	| { id: string; answers: AskUiAnswer[] }
 	| { id: string; cancelled: true };
 
 /** One file pending change-review, shown in the webview indicator + SCM group. */

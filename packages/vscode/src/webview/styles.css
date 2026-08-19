@@ -376,6 +376,23 @@ body {
 	align-items: center;
 	gap: 6px;
 }
+/* One question block inside a multi-question ask wizard. */
+.dreb-ask-question {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding-bottom: 8px;
+}
+.dreb-ask-question + .dreb-ask-question {
+	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+	padding-top: 10px;
+}
+.dreb-ask-question-title {
+	font-weight: 600;
+}
+.dreb-ask-question-body {
+	word-break: break-word;
+}
 
 /* Composer ---------------------------------------------------------------- */
 .dreb-composer {

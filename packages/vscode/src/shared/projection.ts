@@ -35,6 +35,11 @@ export interface ResponseGroup {
 	activity: ActivityItem[];
 	/** Accumulated final-answer markdown (assistant text content). */
 	answer: string;
+	/** Internal: `activity.length` when the last answer text was appended. Used to
+	 * detect a new narration block (activity arrived since the last text) so
+	 * consecutive text blocks in one run are separated instead of concatenated.
+	 * Not rendered. */
+	answerActivityMark?: number;
 	/** True between agent_start and agent_end for this run. */
 	streaming: boolean;
 	/** Activity box collapse state; auto-collapses when the run ends. */
@@ -77,6 +82,22 @@ export interface Checkpoint {
 	canFork: boolean;
 }
 
+/** One question inside an `ask` wizard request, mirroring RpcAskQuestion. */
+export interface AskQuestion {
+	/** The question prompt (rendered as Markdown). */
+	question: string;
+	/** Optional per-question heading. */
+	title?: string;
+	/** Selectable options, if any. */
+	options?: string[];
+	/** Offer a free-text field (defaults true). */
+	allowFreeText?: boolean;
+	/** Render options as checkboxes instead of radios. */
+	multiSelect?: boolean;
+	/** Use a multi-line text area for free text. */
+	multiline?: boolean;
+}
+
 /** A pending, blocking extension-UI request the user must answer. */
 export interface UiRequest {
 	id: string;
@@ -86,14 +107,8 @@ export interface UiRequest {
 	options?: string[];
 	placeholder?: string;
 	prefill?: string;
-	/** ask: the question prompt. */
-	question?: string;
-	/** ask: offer a free-text field (defaults true). */
-	allowFreeText?: boolean;
-	/** ask: render options as checkboxes instead of radios. */
-	multiSelect?: boolean;
-	/** ask: use a multi-line text area for free text. */
-	multiline?: boolean;
+	/** ask: one or more questions asked together as a single wizard. */
+	questions?: AskQuestion[];
 	/** ask: absolute runtime deadline (ms epoch); survives reload. */
 	expiresAt?: number;
 }
@@ -156,6 +171,20 @@ function lastThinking(group: ResponseGroup): ThinkingActivity | undefined {
 	return last?.kind === "thinking" ? last : undefined;
 }
 
+/** Append assistant answer text, inserting a blank-line separator when a new text
+ * block begins after intervening activity (a tool call or thinking) since the last
+ * text was written. This keeps consecutive narration blocks in a single run from
+ * running together into one wall of text. */
+function appendAnswerText(group: ResponseGroup, text: string): void {
+	if (!text) return;
+	const mark = group.answerActivityMark ?? 0;
+	if (group.answer.length > 0 && group.activity.length > mark && !group.answer.endsWith("\n\n")) {
+		group.answer += group.answer.endsWith("\n") ? "\n" : "\n\n";
+	}
+	group.answer += text;
+	group.answerActivityMark = group.activity.length;
+}
+
 function findTool(group: ResponseGroup, toolCallId: string): ToolActivity | undefined {
 	for (let i = group.activity.length - 1; i >= 0; i--) {
 		const item = group.activity[i];
@@ -213,19 +242,33 @@ function uiRequestFromEvent(event: any): UiRequest | undefined {
 		};
 	}
 	if (method === "ask") {
+		const rawQuestions = Array.isArray(event.questions) ? event.questions : undefined;
+		const questions: AskQuestion[] = rawQuestions
+			? rawQuestions.map((q: any) => normalizeAskQuestion(q))
+			: // Defensive fallback for a legacy single flat-question event shape so an
+				// older RPC child still renders one question rather than an empty widget.
+				[normalizeAskQuestion(event)];
 		return {
 			id,
 			method: "ask",
 			title: String(event.title ?? "Question"),
-			question: typeof event.question === "string" ? event.question : "",
-			options,
-			allowFreeText: typeof event.allowFreeText === "boolean" ? event.allowFreeText : undefined,
-			multiSelect: typeof event.multiSelect === "boolean" ? event.multiSelect : undefined,
-			multiline: typeof event.multiline === "boolean" ? event.multiline : undefined,
+			questions,
 			expiresAt: typeof event.expiresAt === "number" ? event.expiresAt : undefined,
 		};
 	}
 	return undefined;
+}
+
+/** Coerce an untrusted RPC ask-question payload into a typed {@link AskQuestion}. */
+function normalizeAskQuestion(q: any): AskQuestion {
+	return {
+		question: typeof q?.question === "string" ? q.question : "",
+		title: typeof q?.title === "string" ? q.title : undefined,
+		options: Array.isArray(q?.options) ? q.options.map((o: unknown) => String(o)) : undefined,
+		allowFreeText: typeof q?.allowFreeText === "boolean" ? q.allowFreeText : undefined,
+		multiSelect: typeof q?.multiSelect === "boolean" ? q.multiSelect : undefined,
+		multiline: typeof q?.multiline === "boolean" ? q.multiline : undefined,
+	};
 }
 
 /** Apply one session event (or synthetic host event) to the transcript state. */
@@ -258,7 +301,7 @@ export function applyEvent(state: TranscriptState, event: any): void {
 			if (!group) break;
 			switch (stream.type) {
 				case "text_delta":
-					group.answer += stream.delta ?? "";
+					appendAnswerText(group, stream.delta ?? "");
 					break;
 				case "text_end":
 					// text_end carries the authoritative block content; if no deltas
@@ -422,7 +465,7 @@ interface RebuildMessage {
  * them). Mirrors the live event projection so a rebuilt run renders identically. */
 function foldAssistantContent(group: ResponseGroup, content: unknown): void {
 	if (typeof content === "string") {
-		group.answer += content;
+		appendAnswerText(group, content);
 		return;
 	}
 	if (!Array.isArray(content)) return;
@@ -436,7 +479,7 @@ function foldAssistantContent(group: ResponseGroup, content: unknown): void {
 			arguments?: unknown;
 		};
 		if (part?.type === "text" && typeof part.text === "string") {
-			group.answer += part.text;
+			appendAnswerText(group, part.text);
 		} else if (part?.type === "thinking" && typeof part.thinking === "string") {
 			group.activity.push({ kind: "thinking", text: part.thinking });
 		} else if (part?.type === "toolCall") {
