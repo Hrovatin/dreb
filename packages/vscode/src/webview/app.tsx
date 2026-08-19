@@ -11,6 +11,7 @@ import {
 	createTranscriptState,
 	type ResponseGroup,
 	retryableResponseId,
+	type SuggestionState,
 	type ToolActivity,
 	type TranscriptState,
 	type UiRequest,
@@ -321,6 +322,34 @@ export function App() {
 				</div>
 			</Show>
 
+			<Show when={state.suggestion}>
+				{(suggestion) => (
+					<SuggestionBar
+						suggestion={suggestion()}
+						onAccept={(command) =>
+							setPrefill((prev) => ({
+								text: command,
+								nonce: (prev?.nonce ?? 0) + 1,
+								// Fill only when the composer is empty so an in-progress
+								// draft is never clobbered (TUI ghost-text parity).
+								mode: "fill-if-empty",
+							}))
+						}
+						onDismiss={() => {
+							// Clear our own copy immediately, and tell the host to drop
+							// its authoritative copy too so the dismissed suggestion does
+							// not reappear when the webview reloads and re-snapshots.
+							setState(
+								produce((s) => {
+									s.suggestion = undefined;
+								}),
+							);
+							postToHost({ type: "dismiss-suggestion" });
+						}}
+					/>
+				)}
+			</Show>
+
 			<Composer
 				streaming={state.streaming}
 				commands={commands()}
@@ -332,12 +361,59 @@ export function App() {
 				onSubmit={(text, images) => {
 					postToHost({ type: "submit", text, attachments: attachments(), images });
 					setAttachments([]);
+					// Submitting opens a new exchange; drop any suggestion immediately
+					// rather than waiting for the run's agent_start to clear it.
+					setState(
+						produce((s) => {
+							s.suggestion = undefined;
+						}),
+					);
 				}}
 				onAbort={() => postToHost({ type: "abort" })}
 				onPickFile={() => postToHost({ type: "pick-file" })}
 				onSearchWorkspace={searchWorkspace}
 				onTagContext={(context) => setAttachments((current) => [...current, context])}
 			/>
+		</div>
+	);
+}
+
+/** The agent's end-of-turn next-step suggestion (`suggest_next`), rendered as a
+ * dismissable bar above the composer — the GUI analogue of the TUI's Tab-accept
+ * ghost text. Shows the optional markdown recap and a clickable command pill;
+ * clicking the pill *fills* the composer (the parent guards against clobbering a
+ * draft), and the `×` dismisses the bar. Exported for isolated component tests. */
+export function SuggestionBar(props: {
+	suggestion: SuggestionState;
+	onAccept: (command: string) => void;
+	onDismiss: () => void;
+}) {
+	return (
+		<div class="dreb-suggestion-bar">
+			<Show when={props.suggestion.summary}>
+				{(summary) => <div class="dreb-suggestion-summary" innerHTML={renderMarkdown(summary())} />}
+			</Show>
+			<div class="dreb-suggestion-row">
+				<span class="dreb-suggestion-label">Next</span>
+				<button
+					type="button"
+					class="dreb-suggestion-pill"
+					title="Fill the composer with this command"
+					onClick={() => props.onAccept(props.suggestion.command)}
+				>
+					<span class="dreb-suggestion-arrow">→</span>
+					<span class="dreb-suggestion-cmd">{props.suggestion.command}</span>
+				</button>
+				<button
+					type="button"
+					class="dreb-suggestion-dismiss"
+					title="Dismiss suggestion"
+					aria-label="Dismiss suggestion"
+					onClick={() => props.onDismiss()}
+				>
+					×
+				</button>
+			</div>
 		</div>
 	);
 }
