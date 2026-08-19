@@ -22,6 +22,7 @@ import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
 import { createSessionInventory, deletePersistedSession, type SessionInventory } from "./session-inventory.js";
+import { SessionOrderStore } from "./session-order.js";
 import { SessionPool } from "./session-registry.js";
 import {
 	readSleepSetting,
@@ -81,6 +82,7 @@ const pool = new SessionPool<ChatSession>({
 let sessionsView: SessionsViewProvider | undefined;
 let inventory: SessionInventory;
 let flags: SessionFlagsStore;
+let order: SessionOrderStore;
 /** The activation context, kept so `reveal` can rebuild a panel for a
  * backgrounded session that outlived its original panel. */
 let extensionContext: vscode.ExtensionContext | undefined;
@@ -100,9 +102,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	extensionContext = context;
 	inventory = createSessionInventory();
 	flags = new SessionFlagsStore(context.globalState);
+	order = new SessionOrderStore(context.globalState);
 	sessionsView = new SessionsViewProvider(context.extensionUri, {
 		inventory,
 		flags,
+		order,
 		currentCwd: workspaceCwd,
 		liveSessions: () =>
 			pool.list().map(
@@ -507,9 +511,16 @@ async function deleteSession(key: string): Promise<void> {
 		// Delete the transcript and drop its flags only on success. `activeSessionPath`
 		// is read *after* disposing the target above, so the guard only fires for a
 		// genuinely different session that is still active.
-		await deletePersistedSession(inventory, flags, path, pool.active?.controller.sessionPath, (message) =>
-			vscode.window.showErrorMessage(message),
+		const result = await deletePersistedSession(
+			inventory,
+			flags,
+			path,
+			pool.active?.controller.sessionPath,
+			(message) => vscode.window.showErrorMessage(message),
 		);
+		// Drop any persisted manual order rank too, so a re-created session at the
+		// same path doesn't inherit a stale position.
+		if (result.ok) await order.clear(path);
 	}
 	scheduleSidebarRefresh();
 }

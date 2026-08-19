@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { type FlagMemento, SessionFlagsStore } from "../src/host/session-flags.js";
 import type { DiskSession, SessionInventory } from "../src/host/session-inventory.js";
+import { SessionOrderStore } from "../src/host/session-order.js";
 import { type SessionsViewDeps, SessionsViewModel } from "../src/host/sessions-view-model.js";
 import type { LiveSessionInput } from "../src/shared/session-list.js";
 import type { HostToSidebar } from "../src/shared/sidebar-protocol.js";
 
-/** In-memory Memento for the flags store. */
+/** In-memory Memento for the flags and order stores. */
 class FakeMemento implements FlagMemento {
 	private readonly map = new Map<string, unknown>();
 	get<T>(key: string): T | undefined {
@@ -38,10 +39,12 @@ function makeModel(over: Partial<SessionsViewDeps> = {}) {
 		deleteSession: async () => ({ ok: true, method: "trash" }),
 	};
 	const flags = new SessionFlagsStore(new FakeMemento());
+	const order = new SessionOrderStore(new FakeMemento());
 	let live: LiveSessionInput[] = [];
 	const deps: SessionsViewDeps = {
 		inventory,
 		flags,
+		order,
 		currentCwd: () => "/p",
 		liveSessions: () => live,
 		pathForKey: (key) => (key.startsWith("new:") ? undefined : key),
@@ -59,6 +62,7 @@ function makeModel(over: Partial<SessionsViewDeps> = {}) {
 		deps,
 		posted,
 		flags,
+		order,
 		setLive: (l: LiveSessionInput[]) => {
 			live = l;
 		},
@@ -145,6 +149,31 @@ describe("SessionsViewModel", () => {
 		await model.handle({ type: "stop", key: "/p/a.jsonl" });
 		expect(deps.stopSession).toHaveBeenCalledWith("/p/a.jsonl");
 		expect(posted.some((m) => m.type === "list")).toBe(true);
+	});
+
+	it("reorder persists the group's order (keys->paths) via the order store and refreshes", async () => {
+		const { model, order, posted } = makeModel();
+		const spy = vi.spyOn(order, "setGroupOrder");
+		await model.handle({ type: "reorder", groupKey: "current:/p", orderedKeys: ["/p/b.jsonl", "/p/a.jsonl"] });
+		expect(spy).toHaveBeenCalledWith(["/p/b.jsonl", "/p/a.jsonl"]);
+		expect(order.get("/p/b.jsonl")).toBe(2);
+		expect(order.get("/p/a.jsonl")).toBe(1);
+		expect(posted.some((m) => m.type === "list")).toBe(true);
+	});
+
+	it("reorder drops not-yet-persisted (new:) keys but persists the rest", async () => {
+		const { model, order } = makeModel();
+		await model.handle({ type: "reorder", groupKey: "current:/p", orderedKeys: ["new:abc", "/p/a.jsonl"] });
+		// Only the persisted path is ranked; the transient new: key is skipped.
+		expect(order.get("/p/a.jsonl")).toBe(1);
+	});
+
+	it("reorder with only not-yet-persisted keys is a no-op (no persist, no refresh)", async () => {
+		const { model, order, posted } = makeModel();
+		const spy = vi.spyOn(order, "setGroupOrder");
+		await model.handle({ type: "reorder", groupKey: "current:/p", orderedKeys: ["new:abc"] });
+		expect(spy).not.toHaveBeenCalled();
+		expect(posted.some((m) => m.type === "list")).toBe(false);
 	});
 
 	it("swallows inventory errors without throwing", async () => {
