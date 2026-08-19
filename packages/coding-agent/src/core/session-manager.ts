@@ -850,21 +850,27 @@ export class SessionManager {
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
-		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		if (!hasAssistant) {
-			// Mark as not flushed so when assistant arrives, all entries get written
-			this.flushed = false;
+		// Once the file has been flushed, every subsequent entry is appended
+		// individually — the accumulated entries are already on disk.
+		if (this.flushed) {
+			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 			return;
 		}
 
-		if (!this.flushed) {
-			for (const e of this.fileEntries) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(e)}\n`);
-			}
-			this.flushed = true;
-		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+		// Defer the first disk write until the session has real content — an
+		// assistant reply — so abandoned/empty sessions don't litter the sessions
+		// directory. Exception: an explicit session name (`session_info`) is durable
+		// user intent and is persisted immediately, even before the first assistant
+		// reply, so a rename is never silently lost.
+		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
+		if (!hasAssistant && entry.type !== "session_info") {
+			return;
 		}
+
+		for (const e of this.fileEntries) {
+			appendFileSync(this.sessionFile, `${JSON.stringify(e)}\n`);
+		}
+		this.flushed = true;
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
