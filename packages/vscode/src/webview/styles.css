@@ -250,6 +250,26 @@ body {
 	background: var(--vscode-inputValidation-errorBackground, rgba(220, 50, 50, 0.15));
 	border: 1px solid var(--vscode-inputValidation-errorBorder, #d33);
 	color: var(--vscode-foreground);
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.dreb-banner-text {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+.dreb-retry-btn {
+	flex: 0 0 auto;
+	font: inherit;
+	color: var(--vscode-button-foreground, #fff);
+	background: var(--vscode-button-background, #0e639c);
+	border: none;
+	border-radius: 4px;
+	padding: 2px 10px;
+	cursor: pointer;
+}
+.dreb-retry-btn:hover {
+	background: var(--vscode-button-hoverBackground, #1177bb);
 }
 
 /* Change-review bar ------------------------------------------------------- */

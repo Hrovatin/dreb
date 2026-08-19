@@ -325,6 +325,20 @@ function makeController(fake: FakeClient, opts: { cwd?: string; ui?: HostUi; ses
 	});
 }
 
+/** Collect host-notice messages emitted by the controller. Notices ride the
+ * update stream as `host_notice` events; the returned accessor reads the list
+ * captured so far. */
+function collectNotices(controller: SessionController): () => string[] {
+	const notices: string[] = [];
+	controller.onUpdate((u) => {
+		if (u.kind === "event") {
+			const event = u.event as { type?: string; message?: string };
+			if (event?.type === "host_notice" && typeof event.message === "string") notices.push(event.message);
+		}
+	});
+	return () => notices;
+}
+
 describe("SessionController", () => {
 	it("starts the client, connects, and merges agent + builtin commands", async () => {
 		const fake = new FakeClient();
@@ -606,6 +620,78 @@ describe("SessionController", () => {
 
 		expect(fake.prompts).toHaveLength(0);
 		expect(fake.compactions).toEqual(["tidy"]);
+	});
+
+	it("retry with nothing sent yet surfaces a notice and sends no prompt", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		const notices = collectNotices(controller);
+		await controller.retry();
+
+		expect(fake.prompts).toHaveLength(0);
+		expect(notices()).toContain("Nothing to retry yet — send a message first.");
+	});
+
+	it("retry resends the last prompt verbatim", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("fix the bug");
+		await controller.retry();
+
+		expect(fake.prompts).toEqual(["fix the bug", "fix the bug"]);
+	});
+
+	it("retry re-includes the original attached context", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("explain this", [
+			{
+				kind: "selection",
+				path: "src/a.ts",
+				startLine: 5,
+				endLine: 7,
+				language: "typescript",
+				text: "const y = 2;",
+			},
+		]);
+		await controller.retry();
+
+		const folded = "`src/a.ts` (lines 5-7):\n```typescript\nconst y = 2;\n```\n\nexplain this";
+		expect(fake.prompts).toEqual([folded, folded]);
+	});
+
+	it("does not retain a slash builtin as the retry target", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		// A real prompt is retained; a following builtin must not overwrite it, so
+		// retry still resends the last *message* rather than replaying /compact.
+		await controller.submit("hello");
+		await controller.submit("/compact");
+		await controller.retry();
+
+		expect(fake.prompts).toEqual(["hello", "hello"]);
+		expect(fake.compactions).toEqual([undefined]);
+	});
+
+	it("a slash builtin alone leaves nothing to retry", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		const notices = collectNotices(controller);
+		await controller.submit("/compact");
+		await controller.retry();
+
+		expect(fake.prompts).toHaveLength(0);
+		expect(notices()).toContain("Nothing to retry yet — send a message first.");
 	});
 
 	it("tagContext emits a tag-context update to listeners", async () => {

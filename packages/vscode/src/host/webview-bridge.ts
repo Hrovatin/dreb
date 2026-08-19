@@ -135,6 +135,9 @@ export function connectWebview(webview: vscode.Webview, controller: SessionContr
 			case "submit":
 				void controller.submit(raw.text, raw.attachments);
 				return;
+			case "retry":
+				void controller.retry();
+				return;
 			case "abort":
 				void controller.abort();
 				return;

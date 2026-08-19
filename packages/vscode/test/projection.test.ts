@@ -6,6 +6,7 @@ import {
 	createTranscriptState,
 	foldMessagesIntoState,
 	type ResponseGroup,
+	retryableResponseId,
 	type TranscriptState,
 } from "../src/shared/projection.js";
 
@@ -425,5 +426,54 @@ describe("alignCheckpoints (Phase 6)", () => {
 
 	it("returns nothing when there are no entries", () => {
 		expect(alignCheckpoints(withResponses(2), [], new Set())).toEqual([]);
+	});
+});
+
+describe("retryableResponseId", () => {
+	/** Events that produce one completed, provider-errored assistant turn preceded
+	 * by its user message (the shape a failed/unanswered turn leaves behind). */
+	const erroredTurn = (message = "boom") => [
+		{ type: "message_start", message: { role: "user", content: "do the thing" } },
+		{ type: "agent_start" },
+		{ type: "message_start", message: { role: "assistant" } },
+		{ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: message } },
+		{ type: "agent_end" },
+	];
+
+	it("returns the id of a completed, errored last turn", () => {
+		const state = run(erroredTurn());
+		const group = onlyResponse(state);
+		expect(group.error).toBe("boom");
+		expect(retryableResponseId(state)).toBe(group.id);
+	});
+
+	it("returns undefined for a fresh, empty transcript", () => {
+		expect(retryableResponseId(createTranscriptState())).toBeUndefined();
+	});
+
+	it("returns undefined when the last turn is clean (no error)", () => {
+		const state = run([
+			{ type: "message_start", message: { role: "user", content: "hi" } },
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "all good" } },
+			{ type: "agent_end" },
+		]);
+		expect(retryableResponseId(state)).toBeUndefined();
+	});
+
+	it("returns undefined while the errored turn is still streaming", () => {
+		// Same errored turn but without the terminal agent_end: the run may still
+		// resolve, so no retry control is offered yet.
+		const state = run(erroredTurn().slice(0, -1));
+		expect(state.streaming).toBe(true);
+		expect(retryableResponseId(state)).toBeUndefined();
+	});
+
+	it("returns undefined when an errored turn is not the most recent item", () => {
+		// An errored turn followed by a later user message: retry only ever targets
+		// the latest turn, never a stale error buried above newer activity.
+		const state = run([...erroredTurn(), { type: "message_start", message: { role: "user", content: "moving on" } }]);
+		expect(retryableResponseId(state)).toBeUndefined();
 	});
 });

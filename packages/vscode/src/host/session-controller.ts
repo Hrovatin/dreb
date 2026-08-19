@@ -339,6 +339,13 @@ export class SessionController {
 	private statusBusy = false;
 	private statusAgain = false;
 	private statusAgainIncludeDaily = false;
+	/** The last message the user actually sent to the model (raw composer text +
+	 * attachments, pre-fold), retained so a failed / unanswered turn can be resent
+	 * verbatim via {@link retry}. Set only for prompt sends — never for slash
+	 * builtins, which are not model turns and have nothing to "retry". Survives an
+	 * in-place RPC-child restart (the controller instance outlives it), so a retry
+	 * after auto-recovery targets the recovered child. */
+	private lastPrompt: { text: string; attachments?: TaggedContextDto[] } | undefined;
 
 	constructor(options: SessionControllerOptions) {
 		this.options = options;
@@ -559,11 +566,15 @@ export class SessionController {
 				case "empty":
 					// Reached only with attachments present (see guard above): send the
 					// folded context so a chips-only submit isn't silently dropped.
+					this.lastPrompt = { text, attachments };
 					await this.deliver(buildPromptWithContext(text, attachments));
 					return;
 				case "prompt":
 					// Fold any tagged editor selections into the prompt as located
 					// context (attachments only apply to prompts, not slash builtins).
+					// Retain the raw inputs so a failed turn can be resent verbatim; a
+					// retry re-routes the same text, reproducing the identical prompt.
+					this.lastPrompt = { text, attachments };
 					await this.deliver(buildPromptWithContext(decision.message, attachments));
 					return;
 				case "builtin":
@@ -576,6 +587,22 @@ export class SessionController {
 		} catch (err) {
 			this.emitNotice(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
+	}
+
+	/** Resend the last message the user sent to the model — used to recover a turn
+	 * that failed or went unanswered (provider unavailable, rate-limited, transient
+	 * error). Re-drives the retained payload through {@link submit}, inheriting all
+	 * of its guards (disconnected → notice, streaming → steer) and re-emitting user
+	 * engagement, and reproducing the identical folded prompt (same text + tagged
+	 * context). No-ops with a notice when there is nothing to resend (e.g. only
+	 * slash builtins have been run). */
+	async retry(): Promise<void> {
+		const last = this.lastPrompt;
+		if (!last) {
+			this.emitNotice("Nothing to retry yet — send a message first.");
+			return;
+		}
+		await this.submit(last.text, last.attachments);
 	}
 
 	/** Send composer text to the model. While the agent is working, `prompt()`
