@@ -265,6 +265,20 @@ export function App() {
 								<div class="dreb-user">{item.text}</div>
 							) : item.kind === "system" ? (
 								<pre class="dreb-system">{item.text}</pre>
+							) : item.kind === "recovery" ? (
+								<div class="dreb-banner error">
+									<span class="dreb-banner-text">{item.text}</span>
+									<Show when={item.canRetry}>
+										<button
+											type="button"
+											class="dreb-retry-btn"
+											title="Resend the last message"
+											onClick={() => postToHost({ type: "retry" })}
+										>
+											↻ Retry
+										</button>
+									</Show>
+								</div>
 							) : (
 								<>
 									<ResponseView
