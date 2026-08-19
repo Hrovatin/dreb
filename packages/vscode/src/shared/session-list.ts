@@ -9,10 +9,12 @@
  * that row (so opening it round-trips through the pool key) rather than showing
  * twice; a live session without a path is a brand-new not-yet-persisted one.
  *
- * Ordering is deliberately **deterministic** — pinned-first, then modified
- * DESC, then title, then key — and live run-state never affects placement, so
- * rows don't jump around as sessions stream (see AGENTS.md "Determinism Over
- * Recency").
+ * Ordering is deliberately **deterministic** and stable — pinned-first, then a
+ * per-session manual order (when the user has dragged rows) else creation time
+ * DESC (newest-created first), then title, then key. Neither live run-state nor
+ * the mutable `modified` timestamp affects placement, so rows keep a fixed
+ * position and don't jump around as sessions become active or stream (see
+ * AGENTS.md "Determinism Over Recency").
  *
  * Like `shared/tagged-context.ts`, this module is intentionally free of
  * `vscode` AND of any `node:` builtins so it can be bundled into the webview,
@@ -56,6 +58,9 @@ export interface SessionSummaryDto {
 	title: string;
 	/** ISO timestamp. */
 	modified: string;
+	/** ISO timestamp of session creation. Stable — drives default ordering
+	 * (newest-created first) and, unlike `modified`, never changes with activity. */
+	created: string;
 	messageCount: number;
 	/** `"idle"` for disk-only rows. */
 	state: SessionRunState;
@@ -91,6 +96,8 @@ export interface DiskSessionInput {
 	name?: string;
 	firstMessage: string;
 	modified: string;
+	/** ISO timestamp of session creation (stable; drives default ordering). */
+	created: string;
 	messageCount: number;
 }
 
@@ -102,6 +109,9 @@ export interface LiveSessionInput {
 	state: SessionRunState;
 	title?: string;
 	modified?: string;
+	/** ISO timestamp of session creation, when known. A brand-new not-yet-persisted
+	 * session has none; ordering then falls back to `modified` or now. */
+	created?: string;
 	messageCount?: number;
 }
 
@@ -111,6 +121,11 @@ export interface BuildSessionListInput {
 	disk: DiskSessionInput[];
 	live: LiveSessionInput[];
 	flags: (path: string | undefined) => SessionFlags;
+	/** Optional per-session manual order rank (keyed by session path). Present
+	 * only for sessions the user has dragged to reorder; a defined rank overrides
+	 * the default creation-time ordering within a group. Undefined -> use
+	 * creation time. */
+	order?: (path: string | undefined) => number | undefined;
 }
 
 /** Last path segment of a slash/back-slash separated path (falls back to the
@@ -130,7 +145,8 @@ function basename(cwd: string): string {
  * grouped list. See the module doc for the merge/ordering rules.
  */
 export function buildSessionList(input: BuildSessionListInput): SessionListDto {
-	const { currentCwd, disk, live, flags } = input;
+	const { currentCwd, disk, live, flags, order } = input;
+	const orderOf = (path: string | undefined): number | undefined => (order ? order(path) : undefined);
 
 	// 1. Map disk sessions to rows, indexed by path for live merging.
 	const rows: SessionSummaryDto[] = [];
@@ -143,6 +159,7 @@ export function buildSessionList(input: BuildSessionListInput): SessionListDto {
 			cwd: d.cwd,
 			title: d.name?.trim() || d.firstMessage?.trim() || "(untitled session)",
 			modified: d.modified,
+			created: d.created,
 			messageCount: d.messageCount,
 			state: "idle",
 			live: false,
@@ -172,6 +189,7 @@ export function buildSessionList(input: BuildSessionListInput): SessionListDto {
 			cwd: l.cwd,
 			title: l.title?.trim() || "New session",
 			modified: l.modified ?? new Date().toISOString(),
+			created: l.created ?? l.modified ?? new Date().toISOString(),
 			messageCount: l.messageCount ?? 0,
 			state: l.state,
 			live: true,
@@ -198,12 +216,28 @@ export function buildSessionList(input: BuildSessionListInput): SessionListDto {
 		}
 	}
 
-	// 4. Deterministic ordering — pinned first, then modified DESC, then title
-	//    ascending, then key ascending. Live run-state never affects ordering.
+	// 4. Deterministic, stable ordering — pinned first, then by an effective rank
+	//    (a persisted manual drag order when present, else creation time), highest
+	//    rank first, then title ascending, then key ascending. Neither live
+	//    run-state nor the mutable `modified` timestamp affects ordering, so rows
+	//    keep a fixed position (see AGENTS.md "Determinism Over Recency").
+	//
+	//    Manual ranks are small integers (see SessionOrderStore), which sit below
+	//    creation-time epoch values, so a session created *after* a manual reorder
+	//    still surfaces at the top by newest-created while the dragged block keeps
+	//    its relative order beneath it.
+	const rankOf = (row: SessionSummaryDto): number => {
+		const manual = orderOf(row.path);
+		if (manual !== undefined) return manual;
+		const t = Date.parse(row.created);
+		return Number.isNaN(t) ? 0 : t;
+	};
 	const sortRows = (list: SessionSummaryDto[]): SessionSummaryDto[] =>
 		list.slice().sort((a, b) => {
 			if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-			if (a.modified !== b.modified) return a.modified < b.modified ? 1 : -1;
+			const ra = rankOf(a);
+			const rb = rankOf(b);
+			if (ra !== rb) return ra < rb ? 1 : -1;
 			if (a.title !== b.title) return a.title < b.title ? -1 : 1;
 			return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
 		});

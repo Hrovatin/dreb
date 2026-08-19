@@ -1,6 +1,7 @@
 import { createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { SessionGroupDto, SessionListDto, SessionSummaryDto } from "../../shared/session-list.js";
+import { computeReorder } from "./reorder.js";
 import { onHostMessage, postToHost } from "./vscode-api.js";
 
 export function SidebarApp() {
@@ -65,6 +66,21 @@ export function SidebarApp() {
 
 function GroupView(props: { group: SessionGroupDto }) {
 	const group = props.group;
+	// Local drag state for reordering rows within this group. The dragged row's
+	// key is held while a drag is in flight; on drop we compute the new key order
+	// and hand it to the host, which persists it and pushes back a rebuilt list.
+	const [draggingKey, setDraggingKey] = createSignal<string | null>(null);
+
+	const keys = () => props.group.sessions.map((s) => s.key);
+
+	const drop = (targetKey: string, placeAfter: boolean) => {
+		const dragged = draggingKey();
+		setDraggingKey(null);
+		if (!dragged || dragged === targetKey) return;
+		const next = computeReorder(keys(), dragged, targetKey, placeAfter);
+		postToHost({ type: "reorder", groupKey: props.group.key, orderedKeys: next });
+	};
+
 	return (
 		<details class="dreb-side-group" open={group.kind === "current"}>
 			<summary class="dreb-side-group-head">
@@ -72,15 +88,37 @@ function GroupView(props: { group: SessionGroupDto }) {
 				<span class="dreb-side-group-count">{group.sessions.length}</span>
 			</summary>
 			<div class="dreb-side-group-body">
-				<For each={group.sessions}>{(session) => <SessionRow session={session} groupKind={group.kind} />}</For>
+				<For each={group.sessions}>
+					{(session) => (
+						<SessionRow
+							session={session}
+							groupKind={group.kind}
+							dragging={() => draggingKey() === session.key}
+							onDragStart={() => setDraggingKey(session.key)}
+							onDragEnd={() => setDraggingKey(null)}
+							onDrop={(placeAfter) => drop(session.key, placeAfter)}
+						/>
+					)}
+				</For>
 			</div>
 		</details>
 	);
 }
 
-function SessionRow(props: { session: SessionSummaryDto; groupKind: SessionGroupDto["kind"] }) {
+function SessionRow(props: {
+	session: SessionSummaryDto;
+	groupKind: SessionGroupDto["kind"];
+	dragging: () => boolean;
+	onDragStart: () => void;
+	onDragEnd: () => void;
+	onDrop: (placeAfter: boolean) => void;
+}) {
 	const [editing, setEditing] = createSignal(false);
 	const [draft, setDraft] = createSignal("");
+	// Highlights the row as a drop target while another row is dragged over it,
+	// and remembers which half (top/bottom) the pointer is in so the drop lands
+	// before or after this row.
+	const [dropHint, setDropHint] = createSignal<"none" | "before" | "after">("none");
 
 	const session = () => props.session;
 
@@ -122,8 +160,61 @@ function SessionRow(props: { session: SessionSummaryDto; groupKind: SessionGroup
 		return parts.join(" · ");
 	};
 
+	// --- Drag-to-reorder wiring -------------------------------------------------
+	const onHandleDragStart = (event: DragEvent) => {
+		props.onDragStart();
+		if (event.dataTransfer) {
+			event.dataTransfer.effectAllowed = "move";
+			// Firefox requires data to be set for a drag to start.
+			event.dataTransfer.setData("text/plain", session().key);
+		}
+	};
+
+	const onRowDragOver = (event: DragEvent) => {
+		if (props.dragging()) return; // don't hint over the row being dragged
+		event.preventDefault(); // allow the drop
+		if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+		const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+		setDropHint(event.clientY - rect.top < rect.height / 2 ? "before" : "after");
+	};
+
+	const onRowDragLeave = () => setDropHint("none");
+
+	const onRowDrop = (event: DragEvent) => {
+		event.preventDefault();
+		const placeAfter = dropHint() === "after";
+		setDropHint("none");
+		props.onDrop(placeAfter);
+	};
+
 	return (
-		<div class="dreb-side-row" classList={{ "dreb-side-row-live": session().live }}>
+		// biome-ignore lint/a11y/noStaticElementInteractions: drop target for drag-to-reorder; the draggable handle is the interactive control and the row's open/rename actions are real buttons
+		<div
+			class="dreb-side-row"
+			classList={{
+				"dreb-side-row-live": session().live,
+				"dreb-side-row-dragging": props.dragging(),
+				"dreb-side-drop-before": dropHint() === "before",
+				"dreb-side-drop-after": dropHint() === "after",
+			}}
+			onDragOver={onRowDragOver}
+			onDragLeave={onRowDragLeave}
+			onDrop={onRowDrop}
+		>
+			<span
+				class="dreb-side-drag"
+				aria-hidden="true"
+				draggable={true}
+				title="Drag to reorder"
+				onDragStart={onHandleDragStart}
+				onDragEnd={() => {
+					setDropHint("none");
+					props.onDragEnd();
+				}}
+			>
+				⠿
+			</span>
+
 			<Show
 				when={editing()}
 				fallback={
