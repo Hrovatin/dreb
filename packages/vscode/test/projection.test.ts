@@ -476,4 +476,22 @@ describe("retryableResponseId", () => {
 		const state = run([...erroredTurn(), { type: "message_start", message: { role: "user", content: "moving on" } }]);
 		expect(retryableResponseId(state)).toBeUndefined();
 	});
+
+	it("returns undefined when a host error stamped the last turn (dead RPC child)", () => {
+		// A mid-turn RPC crash whose recovery gave up: host_error sets state.hostError
+		// AND closeActiveResponse stamps the active group's `error`, so the last item
+		// would otherwise qualify. Retrying a dead child only hits the disconnected
+		// guard, so no Retry control is offered — the reopen banner owns this path.
+		const state = run([
+			{ type: "message_start", message: { role: "user", content: "do the thing" } },
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "host_error", message: "dreb process exited (code 1, signal null)" },
+		]);
+		const group = onlyResponse(state);
+		expect(state.hostError).toBeTruthy();
+		expect(group.error).toBeTruthy();
+		expect(group.streaming).toBe(false);
+		expect(retryableResponseId(state)).toBeUndefined();
+	});
 });

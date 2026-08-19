@@ -666,6 +666,30 @@ describe("SessionController", () => {
 		expect(fake.prompts).toEqual([folded, folded]);
 	});
 
+	it("retry resends an attachment-only turn (empty text) verbatim", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		// The composer allows sending chips with no typed text; the empty-text
+		// branch of submit() must also be retained so retry replays the folded
+		// context rather than surfacing "nothing to retry".
+		await controller.submit("", [
+			{
+				kind: "selection",
+				path: "src/a.ts",
+				startLine: 5,
+				endLine: 5,
+				language: "typescript",
+				text: "const y = 2;",
+			},
+		]);
+		await controller.retry();
+
+		const folded = "`src/a.ts` (line 5):\n```typescript\nconst y = 2;\n```";
+		expect(fake.prompts).toEqual([folded, folded]);
+	});
+
 	it("does not retain a slash builtin as the retry target", async () => {
 		const fake = new FakeClient();
 		const controller = makeController(fake);

@@ -409,9 +409,12 @@ export function activitySummary(group: ResponseGroup): string {
  * an in-flight turn never offers one while it may still succeed. Kept pure and
  * dependency-free so both the webview (to render the button) and unit tests can
  * use it. Retrying a fatal host error (dead RPC child) is out of scope — that
- * path surfaces its own reopen banner.
+ * path surfaces its own reopen banner, so when `hostError` is set (e.g. crash
+ * recovery gave up and stamped the active group's `error`) no Retry is offered:
+ * the child is gone and a resend would only hit the disconnected guard.
  */
 export function retryableResponseId(state: TranscriptState): number | undefined {
+	if (state.hostError) return undefined;
 	const last = state.items[state.items.length - 1];
 	if (last && last.kind === "response" && !last.streaming && last.error) return last.id;
 	return undefined;
