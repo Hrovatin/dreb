@@ -23,6 +23,7 @@ src/
     session-view-lifecycle.ts sleep-on-inactivity driver — backgrounds a closed session, sleeps it on an idle timer or a no-user-input cap; treats a crashed controller as not-reusable so reopen restarts it (pure, tested)
     session-inventory.ts on-disk session enumeration via @dreb/coding-agent's SessionManager (vscode-free)
     session-flags.ts    pin/archive persistence over globalState, keyed by session path (pure seam, tested)
+    session-order.ts    manual drag-reorder persistence over globalState, keyed by session path (pure seam, tested)
     sessions-view-model.ts sidebar list-building + action routing (pure, vscode-free, tested)
     sessions-view.ts    the `dreb.sessions` WebviewView glue (postMessage transport + HTML shell)
     tag-selection.ts    tag-selection-into-chat orchestration (pure, vscode-free, tested)
@@ -40,7 +41,7 @@ src/
     format.ts           status-header + `/session` display formatters (pure, tested)
     tagged-context.ts   selection + file/folder/symbol context DTOs, chip label, prompt fold + threshold (pure, tested)
     mention.ts          `@`/`@@` composer trigger parsing, glob escaping, and typeahead result ranking (pure, tested)
-    session-list.ts     disk+live session reconciliation, grouping, deterministic ordering, status (pure, tested)
+    session-list.ts     disk+live session reconciliation, grouping, stable creation-order + manual-order sort, status (pure, tested)
     sidebar-protocol.ts host ↔ sessions-sidebar message envelopes (no @dreb import)
   webview/       # SolidJS UI — bundled with Vite → dist/webview (chat) + dist/webview-sidebar (sessions)
     app.tsx             transcript, collapsible activity box, composer, needs-input,
@@ -50,7 +51,8 @@ src/
     code-links.ts       grounded file/symbol linkification of answers (pure, tested)
     composer-resize.ts  clamp helper for the drag-resizable composer height (pure, tested)
     sidebar/app.tsx     the sessions side panel — grouped list, live status, resume,
-                        inline rename, pin / archive / delete
+                        inline rename, pin / archive / delete, drag-to-reorder
+    sidebar/reorder.ts  pure move-math for drag-to-reorder — new key order from a drop (DOM-free, tested)
 ```
 
 - The host keeps the authoritative `TranscriptState`. On (re)load the webview announces `ready` and receives a full snapshot, so recreating the webview never loses the conversation.
