@@ -16,14 +16,15 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { relative, sep } from "node:path";
 import * as vscode from "vscode";
-import type { LiveSessionInput, SessionRunState } from "../shared/session-list.js";
+import type { LiveSessionInput } from "../shared/session-list.js";
+import { formatTabTitle } from "../shared/tab-title.js";
 import { resolveCliPath } from "./cli-path.js";
 import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
 import { createSessionInventory, deletePersistedSession, type SessionInventory } from "./session-inventory.js";
 import { SessionOrderStore } from "./session-order.js";
-import { SessionPool } from "./session-registry.js";
+import { nextActiveKey, SessionPool } from "./session-registry.js";
 import {
 	readSleepSetting,
 	revealOrReattach,
@@ -114,9 +115,15 @@ export function activate(context: vscode.ExtensionContext): void {
 					key: s.key,
 					cwd: s.controller.cwd,
 					path: s.controller.sessionPath,
+					// Source the sidebar row's title from the same `controller.title` the
+					// chat tab uses, so a session's tab (`D: <shortened>`) is always a
+					// shortened form of the exact name its sidebar row shows — they can
+					// never diverge (a live rename reflects in both immediately).
+					title: s.controller.title,
 					state: s.controller.runState,
 				}),
 			),
+		activeKey: () => pool.active?.key,
 		pathForKey: (key) => pool.get(key)?.controller.sessionPath ?? (key.startsWith("new:") ? undefined : key),
 		openSession: (key) => void openSession(context, key),
 		newSession: () => void openNewSession(context),
@@ -355,16 +362,11 @@ function createSession(context: vscode.ExtensionContext, key: string, sessionPat
  * controller — on first creation and again when reopening a backgrounded session
  * whose original panel was closed. */
 function attachView(context: vscode.ExtensionContext, session: ChatSession): void {
-	const panel = vscode.window.createWebviewPanel(
-		"dreb.chat",
-		panelTitle(session.controller.runState),
-		vscode.ViewColumn.Active,
-		{
-			enableScripts: true,
-			retainContextWhenHidden: true,
-			localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist", "webview")],
-		},
-	);
+	const panel = vscode.window.createWebviewPanel("dreb.chat", panelTitle(session), vscode.ViewColumn.Active, {
+		enableScripts: true,
+		retainContextWhenHidden: true,
+		localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist", "webview")],
+	});
 
 	const connection = connectWebview(panel.webview, session.controller);
 	panel.webview.html = getWebviewHtml(panel.webview, context.extensionUri, makeNonce());
@@ -380,10 +382,17 @@ function attachView(context: vscode.ExtensionContext, session: ChatSession): voi
 		// It stays alive while working / awaiting input, and sleeps once idle.
 		detachView(session);
 		session.sleep.onDetach();
+		// If the closed tab was the focused one, no dreb chat is active anymore
+		// (focus may land on a non-dreb editor that emits no view-state event).
+		pool.setActive(nextActiveKey(pool.active?.key, session.key, false));
 		scheduleSidebarRefresh();
 	});
 	panel.onDidChangeViewState((e) => {
-		if (e.webviewPanel.active) pool.setActive(session.key);
+		// Track which session's tab is focused so the sidebar can highlight it.
+		// The decision is order-independent (deactivate(old) + activate(new) fire
+		// in either order) — see `nextActiveKey`.
+		pool.setActive(nextActiveKey(pool.active?.key, session.key, e.webviewPanel.active));
+		scheduleSidebarRefresh();
 	});
 }
 
@@ -411,23 +420,16 @@ function revealSession(session: ChatSession): void {
 	);
 }
 
-/** The chat tab title reflecting run-state, so a backgrounded / unfocused
- * session's running or needs-input status is visible in the editor tab strip. */
-function panelTitle(state: SessionRunState): string {
-	switch (state) {
-		case "running":
-			return "dreb ● running";
-		case "needs-input":
-			return "dreb ⚠ needs input";
-		case "background":
-			return "dreb ◐ working";
-		default:
-			return "dreb";
-	}
+/** The chat tab title: `D: <session name>` (shortened) plus a compact run-state
+ * marker, so multiple open chats are distinguishable in the tab strip, map back
+ * to their sidebar row, and a backgrounded / unfocused session's running,
+ * working, or needs-input status stays visible. */
+function panelTitle(session: ChatSession): string {
+	return formatTabTitle(session.controller.title, session.controller.runState);
 }
 
 function updateTabTitle(session: ChatSession): void {
-	if (session.panel) session.panel.title = panelTitle(session.controller.runState);
+	if (session.panel) session.panel.title = panelTitle(session);
 }
 
 /** Put a session to sleep: release its controller / RPC child (via the pool
