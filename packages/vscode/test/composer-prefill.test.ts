@@ -27,4 +27,18 @@ describe("mergeComposerPrefill", () => {
 	it("prepend preserves the draft's own internal/trailing whitespace when it has real content", () => {
 		expect(mergeComposerPrefill("prepend", "queued", "  keep me  ")).toBe("queued\n\n  keep me  ");
 	});
+
+	it("fill-if-empty fills an empty composer with the command", () => {
+		expect(mergeComposerPrefill("fill-if-empty", "/skill:mach6-push", "")).toBe("/skill:mach6-push");
+	});
+
+	it("fill-if-empty leaves a non-empty draft untouched (never clobbers)", () => {
+		expect(mergeComposerPrefill("fill-if-empty", "/skill:mach6-push", "half-typed thought")).toBe(
+			"half-typed thought",
+		);
+	});
+
+	it("fill-if-empty treats a whitespace-only draft as empty and fills it", () => {
+		expect(mergeComposerPrefill("fill-if-empty", "/skill:mach6-push", "   \n ")).toBe("/skill:mach6-push");
+	});
 });

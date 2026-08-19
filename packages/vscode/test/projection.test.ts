@@ -427,3 +427,142 @@ describe("alignCheckpoints (Phase 6)", () => {
 		expect(alignCheckpoints(withResponses(2), [], new Set())).toEqual([]);
 	});
 });
+
+describe("suggest_next → state.suggestion", () => {
+	/** A `suggest_next` tool result as it crosses RPC: the command + recap live
+	 * in `details` (plain JSON), alongside the "Suggestion registered" content. */
+	const suggestResult = (suggestion: string, summary?: string) => ({
+		content: [{ type: "text", text: `Suggestion registered: ${suggestion}` }],
+		details: { suggestion, summary },
+	});
+
+	it("sets the command from the suggest_next event", () => {
+		const state = run([{ type: "suggest_next", command: "/skill:mach6-push" }]);
+		expect(state.suggestion).toEqual({ command: "/skill:mach6-push", summary: undefined });
+	});
+
+	it("trims the command and ignores an empty one", () => {
+		expect(run([{ type: "suggest_next", command: "  /x  " }]).suggestion).toEqual({
+			command: "/x",
+			summary: undefined,
+		});
+		expect(run([{ type: "suggest_next", command: "   " }]).suggestion).toBeUndefined();
+	});
+
+	it("folds the summary in from the tool result, after the command event", () => {
+		const state = run([
+			{ type: "suggest_next", command: "/skill:mach6-push" },
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/skill:mach6-push", "Did the thing."),
+				isError: false,
+			},
+		]);
+		expect(state.suggestion).toEqual({ command: "/skill:mach6-push", summary: "Did the thing." });
+	});
+
+	it("captures both command and summary from the tool result alone (event never arrives)", () => {
+		const state = run([
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/skill:mach6-push", "Recap."),
+				isError: false,
+			},
+		]);
+		expect(state.suggestion).toEqual({ command: "/skill:mach6-push", summary: "Recap." });
+	});
+
+	it("merges regardless of event/tool ordering (tool result first)", () => {
+		const state = run([
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/from-details", "Recap."),
+				isError: false,
+			},
+			{ type: "suggest_next", command: "/from-event" },
+		]);
+		// The event is authoritative for the command; the summary is retained.
+		expect(state.suggestion).toEqual({ command: "/from-event", summary: "Recap." });
+	});
+
+	it("does not capture the summary when the suggest_next tool errored", () => {
+		const state = run([
+			{ type: "suggest_next", command: "/x" },
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/x", "Recap."),
+				isError: true,
+			},
+		]);
+		expect(state.suggestion).toEqual({ command: "/x", summary: undefined });
+	});
+
+	it("handles a malformed / absent details without throwing and keeps the command", () => {
+		expect(() =>
+			run([
+				{ type: "suggest_next", command: "/x" },
+				{
+					type: "tool_execution_end",
+					toolCallId: "s1",
+					toolName: "suggest_next",
+					result: "oops-string",
+					isError: false,
+				},
+			]),
+		).not.toThrow();
+		const state = run([
+			{ type: "suggest_next", command: "/x" },
+			{ type: "tool_execution_end", toolCallId: "s1", toolName: "suggest_next", result: {}, isError: false },
+		]);
+		expect(state.suggestion).toEqual({ command: "/x", summary: undefined });
+	});
+
+	it("ignores a blank summary string", () => {
+		const state = run([
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/x", "   "),
+				isError: false,
+			},
+		]);
+		expect(state.suggestion).toEqual({ command: "/x", summary: undefined });
+	});
+
+	it("clears the suggestion when the next turn starts (agent_start)", () => {
+		const state = run([{ type: "suggest_next", command: "/x" }, { type: "agent_start" }]);
+		expect(state.suggestion).toBeUndefined();
+	});
+
+	it("clears the suggestion when the user opens a new exchange (message_start user)", () => {
+		const state = run([
+			{ type: "suggest_next", command: "/x" },
+			{ type: "message_start", message: { role: "user", content: "next thing" } },
+		]);
+		expect(state.suggestion).toBeUndefined();
+	});
+
+	it("survives a JSON snapshot round-trip (host → webview)", () => {
+		const state = run([
+			{ type: "suggest_next", command: "/skill:mach6-push" },
+			{
+				type: "tool_execution_end",
+				toolCallId: "s1",
+				toolName: "suggest_next",
+				result: suggestResult("/skill:mach6-push", "Recap."),
+				isError: false,
+			},
+		]);
+		const roundTripped = JSON.parse(JSON.stringify(state)) as TranscriptState;
+		expect(roundTripped.suggestion).toEqual({ command: "/skill:mach6-push", summary: "Recap." });
+	});
+});
