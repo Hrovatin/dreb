@@ -1636,6 +1636,62 @@ describe("SessionController", () => {
 		expect(fake.names).toEqual(["My name"]);
 	});
 
+	describe("title (chat-tab / sidebar display name)", () => {
+		it("returns the explicit name (trimmed) after rename()", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+
+			await controller.rename("  Fix auth  ");
+			expect(controller.title).toBe("Fix auth");
+		});
+
+		it("returns the explicit name after the /name command", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+
+			await controller.submit("/name My Session");
+			expect(controller.title).toBe("My Session");
+		});
+
+		it("falls back to the first user message (trimmed) when unnamed", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+
+			fake.emit({ type: "message_start", message: { role: "user", content: "  first thing  " } });
+			expect(controller.title).toBe("first thing");
+		});
+
+		it("prefers an explicit name over an existing first user message", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+
+			fake.emit({ type: "message_start", message: { role: "user", content: "first thing" } });
+			await controller.rename("Named");
+			expect(controller.title).toBe("Named");
+		});
+
+		it("is undefined for a brand-new session with no name and no messages", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+
+			expect(controller.title).toBeUndefined();
+		});
+
+		it("skips a whitespace-only first user message", async () => {
+			const fake = new FakeClient();
+			const controller = makeController(fake);
+			await controller.start();
+
+			fake.emit({ type: "message_start", message: { role: "user", content: "   " } });
+			expect(controller.title).toBeUndefined();
+		});
+	});
+
 	it("runState reflects the projected transcript (idle → running → needs-input)", async () => {
 		const fake = new FakeClient();
 		const controller = makeController(fake);
