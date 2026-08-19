@@ -98,6 +98,10 @@ class FakeClient implements RpcClientLike {
 	private eventListener: ((event: any) => void) | undefined;
 	private exitListener: ((info: any) => void) | undefined;
 
+	/** Seed for `listBackgroundAgents()`; empty by default. */
+	backgroundAgents: Array<{ agentId: string; status: string }> = [];
+	listBackgroundAgentsCalls = 0;
+
 	async start(): Promise<void> {
 		if (this.startError) throw this.startError;
 		this.started = true;
@@ -179,6 +183,10 @@ class FakeClient implements RpcClientLike {
 		this.getStateCalls += 1;
 		if (this.stateGate) await this.stateGate;
 		return this.state;
+	}
+	async listBackgroundAgents(): Promise<Array<{ agentId: string; status: string }>> {
+		this.listBackgroundAgentsCalls += 1;
+		return this.backgroundAgents;
 	}
 	async getDailyCost(): Promise<number> {
 		this.dailyCostCalls += 1;
@@ -1607,6 +1615,66 @@ describe("SessionController", () => {
 		expect(controller.runState).toBe("idle");
 		fake.emit({ type: "extension_ui_request", id: "u1", method: "confirm", title: "Proceed?" });
 		expect(controller.runState).toBe("needs-input");
+	});
+
+	it("runState is 'background' when the main turn is idle but a background agent is running", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+		expect(controller.runState).toBe("idle");
+
+		// A background agent starts while the main turn is not streaming.
+		fake.emit({ type: "background_agent_start", agentId: "bg1", agentType: "Explore" });
+		expect(controller.runState).toBe("background");
+
+		// A second one starts, then the first ends — still background while any remain.
+		fake.emit({ type: "background_agent_start", agentId: "bg2" });
+		fake.emit({ type: "background_agent_end", agentId: "bg1" });
+		expect(controller.runState).toBe("background");
+
+		// The last one ends → back to idle.
+		fake.emit({ type: "background_agent_end", agentId: "bg2" });
+		expect(controller.runState).toBe("idle");
+	});
+
+	it("runState prefers 'running' over 'background' while the main turn streams", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		fake.emit({ type: "background_agent_start", agentId: "bg1" });
+		expect(controller.runState).toBe("background");
+		// The parent turn resumes (e.g. delivering a background result) → running.
+		fake.emit({ type: "agent_start" });
+		expect(controller.runState).toBe("running");
+		// When that turn ends with the agent still running, it drops back to background.
+		fake.emit({ type: "agent_end" });
+		expect(controller.runState).toBe("background");
+	});
+
+	it("seeds background agents from the RPC registry on start (reconnect while running)", async () => {
+		const fake = new FakeClient();
+		fake.backgroundAgents = [
+			{ agentId: "bg1", status: "running" },
+			{ agentId: "done", status: "completed" }, // not running → ignored
+		];
+		const controller = makeController(fake);
+		await controller.start();
+
+		expect(fake.listBackgroundAgentsCalls).toBe(1);
+		// Only the running agent seeds the indicator.
+		expect(controller.runState).toBe("background");
+		expect(controller.getTranscript().backgroundAgentIds).toEqual(["bg1"]);
+	});
+
+	it("start still succeeds when the background-agent seed query fails", async () => {
+		const fake = new FakeClient();
+		fake.listBackgroundAgents = async () => {
+			throw new Error("registry unavailable");
+		};
+		const controller = makeController(fake);
+		await expect(controller.start()).resolves.toBeUndefined();
+		expect(controller.runState).toBe("idle");
 	});
 
 	it("sessionPath reflects the live session file from a status refresh", async () => {

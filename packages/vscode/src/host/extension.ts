@@ -415,6 +415,8 @@ function panelTitle(state: SessionRunState): string {
 			return "dreb ● running";
 		case "needs-input":
 			return "dreb ⚠ needs input";
+		case "background":
+			return "dreb ◐ working";
 		default:
 			return "dreb";
 	}

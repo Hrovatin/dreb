@@ -45,6 +45,20 @@ describe("deriveSessionStatus", () => {
 	it("is idle when not streaming with no requests", () => {
 		expect(deriveSessionStatus({ streaming: false, uiRequests: [] })).toBe("idle");
 	});
+	it("is background when not streaming with running background agents", () => {
+		expect(deriveSessionStatus({ streaming: false, uiRequests: [], backgroundAgentIds: ["a"] })).toBe("background");
+	});
+	it("prefers running over background when streaming with background agents", () => {
+		expect(deriveSessionStatus({ streaming: true, uiRequests: [], backgroundAgentIds: ["a"] })).toBe("running");
+	});
+	it("prefers needs-input over background when a UI request is pending", () => {
+		expect(deriveSessionStatus({ streaming: false, uiRequests: [{}], backgroundAgentIds: ["a"] })).toBe(
+			"needs-input",
+		);
+	});
+	it("is idle when the background set is empty", () => {
+		expect(deriveSessionStatus({ streaming: false, uiRequests: [], backgroundAgentIds: [] })).toBe("idle");
+	});
 });
 
 describe("buildSessionList", () => {
