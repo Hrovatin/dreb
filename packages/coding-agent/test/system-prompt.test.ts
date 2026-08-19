@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "vitest";
+import { getVscodeReadmePath } from "../src/config.js";
 import type { GitRepoState } from "../src/core/git-repo-state.js";
 import { buildSystemPrompt } from "../src/core/system-prompt.js";
 import { subagentToolDefinition } from "../src/core/tools/subagent.js";
@@ -390,6 +391,48 @@ describe("buildSystemPrompt", () => {
 			expect(dateIdx).toBeGreaterThan(-1);
 			expect(modelIdx).toBeGreaterThan(-1);
 			expect(modelIdx).toBeGreaterThan(dateIdx);
+		});
+	});
+
+	describe("vscode extension pointer", () => {
+		test("default prompt points to the VSCode extension README", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: [],
+				contextFiles: [],
+				skills: [],
+			});
+
+			expect(prompt).toContain("native VSCode extension");
+			expect(prompt).toContain(getVscodeReadmePath());
+			// The pointer notes the path may be absent (e.g. standalone install / not built).
+			expect(prompt).toContain("may not exist in all installations");
+		});
+
+		test("pointer lives inside the Dreb documentation section", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: [],
+				contextFiles: [],
+				skills: [],
+			});
+
+			const docsIdx = prompt.indexOf("Dreb documentation");
+			const pointerIdx = prompt.indexOf("native VSCode extension");
+			expect(docsIdx).toBeGreaterThan(-1);
+			expect(pointerIdx).toBeGreaterThan(docsIdx);
+		});
+
+		test("pointer stays lightweight — no extension capabilities inlined", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: [],
+				contextFiles: [],
+				skills: [],
+			});
+
+			// The pointer must not enumerate what the extension does — it only
+			// says the extension exists and where to read about it.
+			for (const capability of ["change review", "accept/reject", "reject hunk", "selection tag", "webview"]) {
+				expect(prompt).not.toContain(capability);
+			}
 		});
 	});
 });
