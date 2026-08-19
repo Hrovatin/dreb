@@ -26,12 +26,11 @@ const UNTITLED = "New session";
  * even a wide tab strip readable and predictable. */
 const DEFAULT_MAX_LEN = 20;
 
-/** Collapse internal whitespace/newlines (a first user message may be
- * multi-line) and trim, then truncate to `maxLen` with an ellipsis. */
+/** Truncate to `maxLen` with a trailing ellipsis. `text` is expected to be
+ * already whitespace-collapsed and trimmed by the caller ({@link formatTabTitle}). */
 function shorten(text: string, maxLen: number): string {
-	const clean = text.replace(/\s+/g, " ").trim();
-	if (clean.length <= maxLen) return clean;
-	return `${clean.slice(0, Math.max(1, maxLen - 1)).trimEnd()}…`;
+	if (text.length <= maxLen) return text;
+	return `${text.slice(0, Math.max(1, maxLen - 1)).trimEnd()}…`;
 }
 
 /** Compact run-state marker appended after the name (empty for idle). */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type SessionOps, SessionPool } from "../src/host/session-registry.js";
+import { nextActiveKey, type SessionOps, SessionPool } from "../src/host/session-registry.js";
 
 /** A fake session with controllable disposed-state and an observable teardown
  * whose completion a test can gate to simulate slow/racing `/quit` reopen. */
@@ -264,5 +264,42 @@ describe("SessionPool", () => {
 		expect(pool.size).toBe(0);
 		expect(pool.list()).toEqual([]);
 		expect(pool.active).toBeUndefined();
+	});
+});
+
+describe("nextActiveKey (view-state focus decision)", () => {
+	it("makes a newly-focused panel the active session", () => {
+		expect(nextActiveKey(undefined, "b", true)).toBe("b");
+		// Even if another session was active, focusing this one takes over.
+		expect(nextActiveKey("a", "b", true)).toBe("b");
+	});
+
+	it("clears when the recorded-active panel loses focus (blur to non-dreb)", () => {
+		expect(nextActiveKey("a", "a", false)).toBeUndefined();
+	});
+
+	it("leaves the active key unchanged when a non-active panel blurs", () => {
+		// deactivate(old) can fire AFTER activate(new): old blurring must not
+		// wipe the newly-active session.
+		expect(nextActiveKey("b", "a", false)).toBe("b");
+	});
+
+	it("is order-independent for a switch from a to b", () => {
+		// activate(b) then deactivate(a):
+		let active: string | undefined = "a";
+		active = nextActiveKey(active, "b", true); // activate(b)
+		active = nextActiveKey(active, "a", false); // deactivate(a)
+		expect(active).toBe("b");
+
+		// deactivate(a) then activate(b):
+		active = "a";
+		active = nextActiveKey(active, "a", false); // deactivate(a)
+		active = nextActiveKey(active, "b", true); // activate(b)
+		expect(active).toBe("b");
+	});
+
+	it("on dispose (not active), clears only if the closed tab was active", () => {
+		expect(nextActiveKey("a", "a", false)).toBeUndefined(); // closed active tab
+		expect(nextActiveKey("a", "b", false)).toBe("a"); // closed a background tab
 	});
 });

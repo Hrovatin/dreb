@@ -109,6 +109,19 @@ describe("buildSessionList", () => {
 		expect(row.messageCount).toBe(5);
 	});
 
+	it("(b2) a live session's title (from controller.title) overrides the disk name", () => {
+		// The host feeds `controller.title` as the live title so the sidebar row
+		// and the chat tab (`D: <shortened title>`) always share one source and
+		// can't diverge — e.g. a live rename shows in the sidebar immediately.
+		const list = buildSessionList({
+			currentCwd: "/proj",
+			disk: [disk({ path: "/proj/a.jsonl", name: "Old disk name" })],
+			live: [live({ key: "pool-1", path: "/proj/a.jsonl", title: "Live renamed" })],
+			flags: noFlags,
+		});
+		expect(list.groups[0].sessions[0].title).toBe("Live renamed");
+	});
+
 	it("(c) appends a pathless live session as a New session in the current group", () => {
 		const list = buildSessionList({
 			currentCwd: "/proj",

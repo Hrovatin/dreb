@@ -23,7 +23,7 @@ import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
 import { createSessionInventory, deletePersistedSession, type SessionInventory } from "./session-inventory.js";
-import { SessionPool } from "./session-registry.js";
+import { nextActiveKey, SessionPool } from "./session-registry.js";
 import {
 	readSleepSetting,
 	revealOrReattach,
@@ -111,6 +111,11 @@ export function activate(context: vscode.ExtensionContext): void {
 					key: s.key,
 					cwd: s.controller.cwd,
 					path: s.controller.sessionPath,
+					// Source the sidebar row's title from the same `controller.title` the
+					// chat tab uses, so a session's tab (`D: <shortened>`) is always a
+					// shortened form of the exact name its sidebar row shows — they can
+					// never diverge (a live rename reflects in both immediately).
+					title: s.controller.title,
 					state: s.controller.runState,
 				}),
 			),
@@ -375,20 +380,14 @@ function attachView(context: vscode.ExtensionContext, session: ChatSession): voi
 		session.sleep.onDetach();
 		// If the closed tab was the focused one, no dreb chat is active anymore
 		// (focus may land on a non-dreb editor that emits no view-state event).
-		if (pool.active?.key === session.key) pool.setActive(undefined);
+		pool.setActive(nextActiveKey(pool.active?.key, session.key, false));
 		scheduleSidebarRefresh();
 	});
 	panel.onDidChangeViewState((e) => {
 		// Track which session's tab is focused so the sidebar can highlight it.
-		// Switching chats fires deactivate(old) + activate(new) in either order;
-		// only clearing when *this* panel is still the recorded active one makes
-		// the net result the newly-activated session regardless of order, and
-		// clears the highlight when focus leaves for a non-dreb editor.
-		if (e.webviewPanel.active) {
-			pool.setActive(session.key);
-		} else if (pool.active?.key === session.key) {
-			pool.setActive(undefined);
-		}
+		// The decision is order-independent (deactivate(old) + activate(new) fire
+		// in either order) — see `nextActiveKey`.
+		pool.setActive(nextActiveKey(pool.active?.key, session.key, e.webviewPanel.active));
 		scheduleSidebarRefresh();
 	});
 }

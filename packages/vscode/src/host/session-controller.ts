@@ -736,11 +736,12 @@ export class SessionController {
 			}
 			case "name": {
 				const name = arg ?? (await this.ui.inputBox({ prompt: "Session name", placeholder: "My session" }));
-				if (!name || name.trim().length === 0) return;
-				this.sessionName = name.trim();
-				await client.setSessionName(name.trim());
+				const trimmed = name?.trim();
+				if (!trimmed) return;
+				this.sessionName = trimmed;
+				await client.setSessionName(trimmed);
 				await this.refreshStatus(false);
-				this.emitNotice(`Renamed session to "${name.trim()}".`);
+				this.emitNotice(`Renamed session to "${trimmed}".`);
 				return;
 			}
 			case "export": {
