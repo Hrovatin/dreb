@@ -26,13 +26,11 @@ export function isImageClipboardItem(item: ClipboardItemLike): boolean {
 
 /** Parse a `data:<mime>;base64,<data>` URL (as produced by
  * `FileReader.readAsDataURL`) into an {@link ImageAttachmentDto}. Returns `null`
- * for anything that isn't a base64 image data URL, or that carries no data, so a
- * malformed / empty read is dropped rather than sent as a broken attachment. */
+ * for anything that isn't a base64 image data URL, so a malformed read is
+ * dropped rather than sent as a broken attachment. The capture group requires at
+ * least one base64 char, so a matched `data` is always non-empty. */
 export function parseImageDataUrl(dataUrl: string): ImageAttachmentDto | null {
 	const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl.trim());
 	if (!match) return null;
-	const mimeType = match[1];
-	const data = match[2];
-	if (data.length === 0) return null;
-	return { data, mimeType };
+	return { data: match[2], mimeType: match[1] };
 }
