@@ -119,6 +119,11 @@ export interface TranscriptState {
 	streaming: boolean;
 	/** Blocking extension-UI requests awaiting a response. */
 	uiRequests: UiRequest[];
+	/** Registry ids of background agents currently running for this session (added
+	 * on `background_agent_start`, removed on `background_agent_end`). A non-empty
+	 * set while the main turn is idle means work is still happening in the
+	 * background — see {@link deriveSessionStatus}. */
+	backgroundAgentIds: string[];
 	/** Transient non-fatal status (retry/compaction); MVP surfaces a single line. */
 	statusText?: string;
 	/** Fatal host-side error (e.g. the RPC child process exited). */
@@ -128,7 +133,7 @@ export interface TranscriptState {
 }
 
 export function createTranscriptState(): TranscriptState {
-	return { items: [], streaming: false, uiRequests: [], nextResponseId: 1 };
+	return { items: [], streaming: false, uiRequests: [], backgroundAgentIds: [], nextResponseId: 1 };
 }
 
 /** Flatten message content (string or content-part array) to plain text. */
@@ -283,6 +288,21 @@ export function applyEvent(state: TranscriptState, event: any): void {
 		}
 		case "agent_end": {
 			closeActiveResponse(state);
+			break;
+		}
+		case "background_agent_start": {
+			// A background subagent began running for this session. Track its id so
+			// the sidebar can show "working in background" once the main turn ends.
+			const agentId = event.agentId !== undefined ? String(event.agentId) : undefined;
+			if (agentId && !state.backgroundAgentIds.includes(agentId)) {
+				state.backgroundAgentIds.push(agentId);
+			}
+			break;
+		}
+		case "background_agent_end": {
+			// A background subagent finished (success/failure/cancel all clear it).
+			const agentId = event.agentId !== undefined ? String(event.agentId) : undefined;
+			if (agentId) state.backgroundAgentIds = state.backgroundAgentIds.filter((id) => id !== agentId);
 			break;
 		}
 		case "message_start": {

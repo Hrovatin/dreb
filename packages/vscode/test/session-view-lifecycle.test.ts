@@ -113,6 +113,21 @@ describe("SleepController — idle deactivation timer (detached + idle)", () => 
 		expect(h.sleepCalls()).toBe(1);
 	});
 
+	it("never sleeps a detached BACKGROUND session until its work finishes (going idle)", () => {
+		const h = harness({ initial: "background", idleMs: 60_000, capMs: 0 });
+		h.setView(false);
+		h.sleep.onDetach();
+		h.advance(60_000);
+		// Background agents run inside this session's RPC child — sleeping would kill
+		// them, so a background session must never be slept while work continues.
+		expect(h.sleepCalls()).toBe(0);
+
+		h.setState("idle");
+		h.sleep.onUpdate();
+		h.advance(60_000);
+		expect(h.sleepCalls()).toBe(1);
+	});
+
 	it("never sleeps while a view is attached", () => {
 		const h = harness({ idleMs: 60_000, capMs: 0 }); // view attached (default)
 		h.sleep.onUpdate();

@@ -20,7 +20,7 @@
  */
 
 /** A session's live run state derived from its projected transcript. */
-export type SessionRunState = "running" | "needs-input" | "idle";
+export type SessionRunState = "running" | "needs-input" | "background" | "idle";
 
 /** Per-session flags the host persists (keyed by session path). */
 export interface SessionFlags {
@@ -28,10 +28,20 @@ export interface SessionFlags {
 	archived: boolean;
 }
 
-/** Derive a session's live run state from its projected transcript. */
-export function deriveSessionStatus(transcript: { streaming: boolean; uiRequests: unknown[] }): SessionRunState {
+/** Derive a session's live run state from its projected transcript.
+ *
+ * Precedence: an in-flight main turn is `running`; otherwise a pending blocking
+ * UI request means the model is `needs-input` (the user must act now, so it
+ * outranks background work); otherwise any still-running background agent means
+ * work is happening in the `background`; otherwise the session is `idle`. */
+export function deriveSessionStatus(transcript: {
+	streaming: boolean;
+	uiRequests: unknown[];
+	backgroundAgentIds?: unknown[];
+}): SessionRunState {
 	if (transcript.streaming) return "running";
 	if (transcript.uiRequests.length > 0) return "needs-input";
+	if (transcript.backgroundAgentIds && transcript.backgroundAgentIds.length > 0) return "background";
 	return "idle";
 }
 

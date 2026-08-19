@@ -270,6 +270,42 @@ describe("projection", () => {
 		expect(activitySummary(group)).toBe("1 thought · 2 tool calls");
 		expect(activitySummary({ ...group, activity: [] })).toBe("no activity");
 	});
+
+	describe("background agents", () => {
+		it("tracks a running background agent id on background_agent_start", () => {
+			const state = run([{ type: "background_agent_start", agentId: "abc123", agentType: "Explore" }]);
+			expect(state.backgroundAgentIds).toEqual(["abc123"]);
+		});
+
+		it("dedupes a repeated start for the same agent id", () => {
+			const state = run([
+				{ type: "background_agent_start", agentId: "abc123" },
+				{ type: "background_agent_start", agentId: "abc123" },
+			]);
+			expect(state.backgroundAgentIds).toEqual(["abc123"]);
+		});
+
+		it("removes the id on background_agent_end", () => {
+			const state = run([
+				{ type: "background_agent_start", agentId: "a" },
+				{ type: "background_agent_start", agentId: "b" },
+				{ type: "background_agent_end", agentId: "a" },
+			]);
+			expect(state.backgroundAgentIds).toEqual(["b"]);
+		});
+
+		it("ignores background_agent_end for an unknown id", () => {
+			const state = run([
+				{ type: "background_agent_start", agentId: "a" },
+				{ type: "background_agent_end", agentId: "zzz" },
+			]);
+			expect(state.backgroundAgentIds).toEqual(["a"]);
+		});
+
+		it("initializes an empty set on a fresh transcript", () => {
+			expect(createTranscriptState().backgroundAgentIds).toEqual([]);
+		});
+	});
 });
 
 describe("foldMessagesIntoState (Phase 6 full-content rebuild)", () => {
