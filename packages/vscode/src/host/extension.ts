@@ -235,13 +235,16 @@ async function openNewSession(context: vscode.ExtensionContext): Promise<ChatSes
 	return openSession(context, `new:${randomUUID()}`);
 }
 
-/** Reveal the focused session, or start a new one — used by the chat command and
- * the "Add Selection to Chat" flow (which need *some* live target). */
+/** Reveal the last-active session, or start a new one — used by the chat command
+ * and the "Add Selection to Chat" flow (which need *some* live target). Uses
+ * `pool.lastActive` (not `pool.active`) so that tagging from the editor targets
+ * the chat the user was last in, rather than spawning a new one just because
+ * focus moved from the chat webview to the code editor. */
 async function openActiveOrNew(context: vscode.ExtensionContext): Promise<ChatSession | undefined> {
-	const active = pool.active;
-	if (active && !active.controller.isDisposed() && !active.controller.hasFailed()) {
-		revealSession(active);
-		return active;
+	const target = pool.lastActive;
+	if (target && !target.controller.isDisposed() && !target.controller.hasFailed()) {
+		revealSession(target);
+		return target;
 	}
 	return openNewSession(context);
 }

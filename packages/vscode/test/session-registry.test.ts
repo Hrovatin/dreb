@@ -238,6 +238,69 @@ describe("SessionPool", () => {
 		expect(pool.get("b")).toBe(b); // other session untouched
 	});
 
+	it("retains lastActive when focus is cleared (blur to a non-dreb window)", async () => {
+		const pool = makePool();
+		const a = new FakeSession("a");
+		await pool.open("a", () => a);
+
+		expect(pool.lastActive).toBeUndefined(); // nothing focused yet
+
+		pool.setActive("a");
+		expect(pool.active).toBe(a);
+		expect(pool.lastActive).toBe(a);
+
+		pool.setActive(undefined); // focus leaves for a code editor
+		expect(pool.active).toBeUndefined(); // focus cleared
+		expect(pool.lastActive).toBe(a); // last-active retained
+	});
+
+	it("lastActive follows the most recently focused session", async () => {
+		const pool = makePool();
+		const a = new FakeSession("a");
+		const b = new FakeSession("b");
+		await pool.open("a", () => a);
+		await pool.open("b", () => b);
+
+		pool.setActive("a");
+		expect(pool.lastActive).toBe(a);
+
+		pool.setActive("b");
+		expect(pool.lastActive).toBe(b); // switched chats
+
+		pool.setActive("nope"); // absent key -> no-op
+		expect(pool.lastActive).toBe(b); // unchanged
+
+		pool.setActive(undefined); // blur
+		expect(pool.lastActive).toBe(b); // still the last real focus
+	});
+
+	it("clears lastActive when the last-active session is disposed (falls back to new)", async () => {
+		const pool = makePool();
+		const a = new FakeSession("a");
+		const b = new FakeSession("b");
+		await pool.open("a", () => a);
+		await pool.open("b", () => b);
+		pool.setActive("a");
+		pool.setActive(undefined); // focus gone, but a is still last-active
+		expect(pool.lastActive).toBe(a);
+
+		await pool.disposeSession(a);
+		expect(pool.lastActive).toBeUndefined(); // cleared on teardown
+		expect(pool.get("b")).toBe(b); // other session untouched
+	});
+
+	it("disposeAll clears lastActive", async () => {
+		const pool = makePool();
+		const a = new FakeSession("a");
+		await pool.open("a", () => a);
+		pool.setActive("a");
+		pool.setActive(undefined);
+		expect(pool.lastActive).toBe(a);
+
+		await pool.disposeAll();
+		expect(pool.lastActive).toBeUndefined();
+	});
+
 	it("disposeKey tears down the session under a key", async () => {
 		const pool = makePool();
 		const a = new FakeSession("a");

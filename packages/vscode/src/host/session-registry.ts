@@ -38,6 +38,15 @@ export class SessionPool<S extends object> {
 	private readonly tornDown = new WeakSet<S>();
 	/** Key of the currently focused session, if any. */
 	private activeKey: string | undefined;
+	/**
+	 * Key of the *most recently focused* session — retained even after focus
+	 * leaves the webview for a non-dreb window (e.g. a code editor), unlike
+	 * {@link activeKey} which clears on blur. This is the target for actions
+	 * invoked from the editor (e.g. "Add Selection to Chat"), which run precisely
+	 * when no dreb panel is focused. Only cleared when the session it points at is
+	 * torn down.
+	 */
+	private lastActiveKey: string | undefined;
 
 	constructor(private readonly ops: SessionOps<S>) {}
 
@@ -67,15 +76,29 @@ export class SessionPool<S extends object> {
 	}
 
 	/**
+	 * The most recently focused live session, if any. Retained across focus loss
+	 * to a non-dreb window (unlike {@link active}); returns `undefined` only when
+	 * no session has ever been focused or the last-focused one has been torn down.
+	 */
+	get lastActive(): S | undefined {
+		return this.lastActiveKey === undefined ? undefined : this.sessions.get(this.lastActiveKey);
+	}
+
+	/**
 	 * Set the focused session key. `undefined` clears the focus; a key that is
-	 * not present in the pool is ignored (no-op).
+	 * not present in the pool is ignored (no-op). A defined, present key is also
+	 * recorded as the {@link lastActive} target, which — unlike the focus — is
+	 * *not* cleared when focus later leaves for a non-dreb window.
 	 */
 	setActive(key: string | undefined): void {
 		if (key === undefined) {
 			this.activeKey = undefined;
 			return;
 		}
-		if (this.sessions.has(key)) this.activeKey = key;
+		if (this.sessions.has(key)) {
+			this.activeKey = key;
+			this.lastActiveKey = key;
+		}
 	}
 
 	/**
@@ -143,6 +166,7 @@ export class SessionPool<S extends object> {
 		if (foundKey !== undefined && this.sessions.get(foundKey) === session) {
 			this.sessions.delete(foundKey);
 			if (foundKey === this.activeKey) this.activeKey = undefined;
+			if (foundKey === this.lastActiveKey) this.lastActiveKey = undefined;
 		}
 		await this.ops.teardown(session);
 	}
@@ -152,6 +176,7 @@ export class SessionPool<S extends object> {
 		const snapshot = this.list();
 		for (const session of snapshot) await this.disposeSession(session);
 		this.activeKey = undefined;
+		this.lastActiveKey = undefined;
 	}
 }
 
