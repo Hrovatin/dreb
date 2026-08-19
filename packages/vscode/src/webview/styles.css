@@ -469,6 +469,19 @@ body {
 	color: var(--vscode-foreground);
 }
 
+/* Pasted-image chips: a small thumbnail preview with a remove button, reusing
+   the attachment-chip frame but sized for imagery. */
+.dreb-image-attachment {
+	padding: 2px 4px 2px 2px;
+}
+.dreb-image-thumb {
+	display: block;
+	width: 40px;
+	height: 40px;
+	object-fit: cover;
+	border-radius: 3px;
+}
+
 .dreb-input {
 	flex: 1;
 	/* Height is driven by the top drag handle (see `.dreb-resize-handle` and

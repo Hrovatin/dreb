@@ -10,6 +10,10 @@ class FakeClient implements RpcClientLike {
 	stopped = 0;
 	aborted = 0;
 	prompts: string[] = [];
+	/** Images passed alongside each `prompt` call (parallel to `prompts`). */
+	promptImages: Array<unknown[] | undefined> = [];
+	/** Images passed alongside each `steer` call (parallel to `steers`). */
+	steerImages: Array<unknown[] | undefined> = [];
 	compactions: Array<string | undefined> = [];
 	uiResponses: unknown[] = [];
 	commandsResult: Array<{
@@ -101,9 +105,10 @@ class FakeClient implements RpcClientLike {
 	async stop(): Promise<void> {
 		this.stopped += 1;
 	}
-	async prompt(message: string): Promise<void> {
+	async prompt(message: string, images?: unknown[]): Promise<void> {
 		if (this.callError) throw this.callError;
 		this.prompts.push(message);
+		this.promptImages.push(images);
 	}
 	async abort(): Promise<void> {
 		if (this.callError) throw this.callError;
@@ -117,9 +122,10 @@ class FakeClient implements RpcClientLike {
 	pendingSteering: string[] = [];
 	pendingFollowUp: string[] = [];
 	clearPendingCalls = 0;
-	async steer(message: string): Promise<void> {
+	async steer(message: string, images?: unknown[]): Promise<void> {
 		if (this.callError) throw this.callError;
 		this.steers.push(message);
+		this.steerImages.push(images);
 		this.pendingSteering.push(message);
 	}
 	async followUp(message: string): Promise<void> {
@@ -555,6 +561,68 @@ describe("SessionController", () => {
 		]);
 
 		expect(fake.prompts).toEqual(["`src/a.ts` (lines 5-7):\n```typescript\nconst y = 2;\n```\n\nexplain this"]);
+	});
+
+	it("sends pasted images to prompt as image content parts when idle", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("look at this", undefined, [
+			{ data: "AQID", mimeType: "image/png" },
+			{ data: "BQYH", mimeType: "image/jpeg" },
+		]);
+
+		expect(fake.prompts).toEqual(["look at this"]);
+		expect(fake.promptImages[0]).toEqual([
+			{ type: "image", data: "AQID", mimeType: "image/png" },
+			{ type: "image", data: "BQYH", mimeType: "image/jpeg" },
+		]);
+	});
+
+	it("carries images via steer (not prompt) when a submit lands mid-stream", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		fake.emit({ type: "agent_start" }); // now streaming
+		await controller.submit("also see this", undefined, [{ data: "AQID", mimeType: "image/png" }]);
+
+		expect(fake.prompts).toEqual([]);
+		expect(fake.steers).toEqual(["also see this"]);
+		expect(fake.steerImages[0]).toEqual([{ type: "image", data: "AQID", mimeType: "image/png" }]);
+	});
+
+	it("sends an image-only submit (no text, no attachments)", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("", undefined, [{ data: "AQID", mimeType: "image/png" }]);
+
+		expect(fake.prompts).toEqual([""]);
+		expect(fake.promptImages[0]).toEqual([{ type: "image", data: "AQID", mimeType: "image/png" }]);
+	});
+
+	it("passes no images arg for a text-only submit", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("plain text");
+
+		expect(fake.prompts).toEqual(["plain text"]);
+		expect(fake.promptImages[0]).toBeUndefined();
+	});
+
+	it("does not prompt on an empty submit with empty attachment and image arrays", async () => {
+		const fake = new FakeClient();
+		const controller = makeController(fake);
+		await controller.start();
+
+		await controller.submit("", [], []);
+
+		expect(fake.prompts).toHaveLength(0);
 	});
 
 	it("sends the folded context for an attachment-only submit (empty text)", async () => {
