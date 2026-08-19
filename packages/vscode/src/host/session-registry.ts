@@ -203,3 +203,42 @@ export function nextActiveKey(
 	if (currentActive === thisKey) return undefined;
 	return currentActive;
 }
+
+/** vscode-free operations for the "reveal last-active chat, else start new" flow. */
+export interface ActiveOrNewOps<S> {
+	/** Whether the candidate session's controller has been torn down. */
+	isDisposed(session: S): boolean;
+	/** Whether the candidate session's controller has failed (crashed child / failed start). */
+	hasFailed(session: S): boolean;
+	/** Bring the reused session's panel to the foreground. */
+	reveal(session: S): void;
+	/** Start a brand-new session (used when there is no reusable target). */
+	openNew(): Promise<S | undefined>;
+}
+
+/**
+ * Resolve the target for the "reveal the last-active chat, or start a new one"
+ * flow — used by the chat command and the "Add Selection to Chat" action, which
+ * fires precisely when no dreb panel is focused.
+ *
+ * Reads `pool.lastActive` (NOT `pool.active`): the last-active session is
+ * retained across focus loss to a non-dreb window, so tagging code from the
+ * editor targets the chat the user was last in rather than spawning a new one.
+ * The last-active session is reused (and revealed) only when it is present and
+ * neither disposed nor failed; otherwise a new session is opened.
+ *
+ * This is the vscode-free core of `extension.ts`'s `openActiveOrNew`, extracted
+ * so the field selection (`lastActive`) and the disposed/failed fallback guard
+ * can be unit-tested without a webview mock.
+ */
+export async function resolveActiveOrNew<S>(
+	pool: { readonly lastActive: S | undefined },
+	ops: ActiveOrNewOps<S>,
+): Promise<S | undefined> {
+	const target = pool.lastActive;
+	if (target !== undefined && !ops.isDisposed(target) && !ops.hasFailed(target)) {
+		ops.reveal(target);
+		return target;
+	}
+	return ops.openNew();
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextActiveKey, type SessionOps, SessionPool } from "../src/host/session-registry.js";
+import { nextActiveKey, resolveActiveOrNew, type SessionOps, SessionPool } from "../src/host/session-registry.js";
 
 /** A fake session with controllable disposed-state and an observable teardown
  * whose completion a test can gate to simulate slow/racing `/quit` reopen. */
@@ -364,5 +364,121 @@ describe("nextActiveKey (view-state focus decision)", () => {
 	it("on dispose (not active), clears only if the closed tab was active", () => {
 		expect(nextActiveKey("a", "a", false)).toBeUndefined(); // closed active tab
 		expect(nextActiveKey("a", "b", false)).toBe("a"); // closed a background tab
+	});
+});
+
+describe("resolveActiveOrNew (reveal last-active chat, else start new)", () => {
+	/** A candidate session with controllable disposed/failed state, mirroring the
+	 * `isDisposed()`/`hasFailed()` composite the extension applies to a controller. */
+	class FakeChat {
+		disposed = false;
+		failed = false;
+		constructor(public readonly id: string) {}
+	}
+
+	/** Build the vscode-free ops, recording reveal calls and gating openNew's result. */
+	function makeOps(openNewResult: FakeChat | undefined) {
+		const revealed: FakeChat[] = [];
+		let openNewCalls = 0;
+		const ops = {
+			isDisposed: (s: FakeChat) => s.disposed,
+			hasFailed: (s: FakeChat) => s.failed,
+			reveal: (s: FakeChat) => {
+				revealed.push(s);
+			},
+			openNew: async () => {
+				openNewCalls += 1;
+				return openNewResult;
+			},
+		};
+		return { ops, revealed, openNewCalls: () => openNewCalls };
+	}
+
+	it("reveals and returns lastActive when it is present and healthy (no new chat)", async () => {
+		const last = new FakeChat("last");
+		const { ops, revealed, openNewCalls } = makeOps(undefined);
+
+		const result = await resolveActiveOrNew({ lastActive: last }, ops);
+
+		expect(result).toBe(last); // reused the last-active chat
+		expect(revealed).toEqual([last]); // brought to the foreground
+		expect(openNewCalls()).toBe(0); // did NOT spawn a new chat
+	});
+
+	it("reads lastActive, NOT active — targets the last-active chat after a blur", async () => {
+		// Guards finding 2: if the field were `active` (the old, wrong one), the
+		// helper would see `undefined` (focus cleared on blur) and open a new chat.
+		const last = new FakeChat("last");
+		const poolAfterBlur = { active: undefined, lastActive: last };
+		const { ops, revealed, openNewCalls } = makeOps(new FakeChat("fresh"));
+
+		const result = await resolveActiveOrNew(poolAfterBlur, ops);
+
+		expect(result).toBe(last); // used lastActive despite active === undefined
+		expect(revealed).toEqual([last]);
+		expect(openNewCalls()).toBe(0);
+	});
+
+	it("opens a new chat when there is no last-active session", async () => {
+		const fresh = new FakeChat("fresh");
+		const { ops, revealed, openNewCalls } = makeOps(fresh);
+
+		const result = await resolveActiveOrNew({ lastActive: undefined }, ops);
+
+		expect(result).toBe(fresh); // fell back to a new chat
+		expect(revealed).toEqual([]); // nothing revealed
+		expect(openNewCalls()).toBe(1);
+	});
+
+	it("opens a new chat when the last-active session is DISPOSED", async () => {
+		const last = new FakeChat("last");
+		last.disposed = true;
+		const fresh = new FakeChat("fresh");
+		const { ops, revealed, openNewCalls } = makeOps(fresh);
+
+		const result = await resolveActiveOrNew({ lastActive: last }, ops);
+
+		expect(result).toBe(fresh); // disposed target not reused
+		expect(revealed).toEqual([]);
+		expect(openNewCalls()).toBe(1);
+	});
+
+	it("opens a new chat when the last-active session has FAILED (crashed, not disposed)", async () => {
+		// Guards finding 1: a crashed controller still present in the pool (failed
+		// but NOT disposed) must fall back to a fresh chat, not reveal the dead one.
+		const last = new FakeChat("last");
+		last.failed = true; // hasFailed() true, isDisposed() false
+		const fresh = new FakeChat("fresh");
+		const { ops, revealed, openNewCalls } = makeOps(fresh);
+
+		const result = await resolveActiveOrNew({ lastActive: last }, ops);
+
+		expect(result).toBe(fresh); // crashed target not reused
+		expect(revealed).toEqual([]); // did NOT reveal the dead panel
+		expect(openNewCalls()).toBe(1);
+	});
+
+	it("integrates with a real SessionPool: reuses last-active after a blur", async () => {
+		// End-to-end-ish: drive an actual pool through focus + blur, then confirm
+		// the helper reuses the retained last-active session rather than spawning.
+		const ops2: SessionOps<FakeChat> = {
+			isDisposed: (s) => s.disposed || s.failed,
+			reveal: () => {},
+			teardown: async () => {},
+		};
+		const pool = new SessionPool<FakeChat>(ops2);
+		const a = new FakeChat("a");
+		await pool.open("a", () => a);
+		pool.setActive("a");
+		pool.setActive(undefined); // focus leaves for the code editor
+		expect(pool.active).toBeUndefined();
+		expect(pool.lastActive).toBe(a);
+
+		const { ops, revealed, openNewCalls } = makeOps(new FakeChat("fresh"));
+		const result = await resolveActiveOrNew(pool, ops);
+
+		expect(result).toBe(a); // reused the retained last-active chat
+		expect(revealed).toEqual([a]);
+		expect(openNewCalls()).toBe(0);
 	});
 });
