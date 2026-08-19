@@ -57,14 +57,14 @@ export function SidebarApp() {
 				}
 			>
 				<div class="dreb-side-list">
-					<For each={list.groups}>{(group) => <GroupView group={group} />}</For>
+					<For each={list.groups}>{(group) => <GroupView group={group} activeKey={list.activeKey} />}</For>
 				</div>
 			</Show>
 		</div>
 	);
 }
 
-function GroupView(props: { group: SessionGroupDto }) {
+function GroupView(props: { group: SessionGroupDto; activeKey?: string }) {
 	const group = props.group;
 	// Local drag state for reordering rows within this group. The dragged row's
 	// key is held while a drag is in flight; on drop we compute the new key order
@@ -93,6 +93,7 @@ function GroupView(props: { group: SessionGroupDto }) {
 						<SessionRow
 							session={session}
 							groupKind={group.kind}
+							active={props.activeKey === session.key}
 							dragging={() => draggingKey() === session.key}
 							onDragStart={() => setDraggingKey(session.key)}
 							onDragEnd={() => setDraggingKey(null)}
@@ -108,6 +109,7 @@ function GroupView(props: { group: SessionGroupDto }) {
 function SessionRow(props: {
 	session: SessionSummaryDto;
 	groupKind: SessionGroupDto["kind"];
+	active?: boolean;
 	dragging: () => boolean;
 	onDragStart: () => void;
 	onDragEnd: () => void;
@@ -193,6 +195,7 @@ function SessionRow(props: {
 			class="dreb-side-row"
 			classList={{
 				"dreb-side-row-live": session().live,
+				"dreb-side-row-active": props.active,
 				"dreb-side-row-dragging": props.dragging(),
 				"dreb-side-drop-before": dropHint() === "before",
 				"dreb-side-drop-after": dropHint() === "after",

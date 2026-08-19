@@ -124,6 +124,19 @@ describe("buildSessionList", () => {
 		expect(row.messageCount).toBe(5);
 	});
 
+	it("(b2) a live session's title (from controller.title) overrides the disk name", () => {
+		// The host feeds `controller.title` as the live title so the sidebar row
+		// and the chat tab (`D: <shortened title>`) always share one source and
+		// can't diverge — e.g. a live rename shows in the sidebar immediately.
+		const list = buildSessionList({
+			currentCwd: "/proj",
+			disk: [disk({ path: "/proj/a.jsonl", name: "Old disk name" })],
+			live: [live({ key: "pool-1", path: "/proj/a.jsonl", title: "Live renamed" })],
+			flags: noFlags,
+		});
+		expect(list.groups[0].sessions[0].title).toBe("Live renamed");
+	});
+
 	it("(c) appends a pathless live session as a New session in the current group", () => {
 		const list = buildSessionList({
 			currentCwd: "/proj",
@@ -342,5 +355,42 @@ describe("buildSessionList", () => {
 			flags: (p) => ({ pinned: false, archived: p === "/proj/z.jsonl" }),
 		});
 		expect(rebuilt.groups.map((g) => g.key)).toEqual(keys);
+	});
+
+	it("(g) passes activeKey straight through to the DTO", () => {
+		const list = buildSessionList({
+			currentCwd: "/proj",
+			disk: [disk({ path: "/proj/a.jsonl", name: "Alpha" })],
+			live: [],
+			flags: noFlags,
+			activeKey: "/proj/a.jsonl",
+		});
+		expect(list.activeKey).toBe("/proj/a.jsonl");
+	});
+
+	it("(h) leaves activeKey undefined when not supplied", () => {
+		const list = buildSessionList({
+			currentCwd: "/proj",
+			disk: [disk({ path: "/proj/a.jsonl", name: "Alpha" })],
+			live: [],
+			flags: noFlags,
+		});
+		expect(list.activeKey).toBeUndefined();
+	});
+
+	it("(i) activeKey never affects row ordering or grouping", () => {
+		const base = {
+			currentCwd: "/proj",
+			disk: [
+				disk({ path: "/proj/a.jsonl", name: "A", modified: "2026-01-02T00:00:00.000Z" }),
+				disk({ path: "/proj/b.jsonl", name: "B", modified: "2026-01-01T00:00:00.000Z" }),
+			],
+			live: [],
+			flags: noFlags,
+		};
+		const without = buildSessionList(base);
+		const withActive = buildSessionList({ ...base, activeKey: "/proj/b.jsonl" });
+		const order = (l: ReturnType<typeof buildSessionList>) => l.groups.flatMap((g) => g.sessions.map((s) => s.key));
+		expect(order(withActive)).toEqual(order(without));
 	});
 });

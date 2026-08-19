@@ -26,6 +26,9 @@ export interface SessionsViewDeps {
 	currentCwd: () => string;
 	/** Snapshot of the currently-live sessions in the host's pool. */
 	liveSessions: () => LiveSessionInput[];
+	/** Row `key` of the session whose chat tab is currently focused (for the
+	 * active-row highlight), or `undefined` when no dreb chat tab is focused. */
+	activeKey?: () => string | undefined;
 	/** Resolve a row key to its session `.jsonl` path (for pin/archive/delete),
 	 * or undefined for a brand-new not-yet-persisted session. */
 	pathForKey: (key: string) => string | undefined;
@@ -142,6 +145,7 @@ export class SessionsViewModel {
 			disk,
 			live,
 			flags: (path) => this.deps.flags.get(path),
+			activeKey: this.deps.activeKey?.(),
 			order: (path) => this.deps.order.get(path),
 		});
 	}

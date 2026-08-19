@@ -154,3 +154,27 @@ export class SessionPool<S extends object> {
 		this.activeKey = undefined;
 	}
 }
+
+/**
+ * Pure decision for which session key should be "active" (its sidebar row
+ * highlighted) after a chat panel's focus state changes.
+ *
+ * VS Code fires panel view-state events as deactivate(old) + activate(new) in
+ * either order, so the logic must be order-independent:
+ * - the panel just became focused → it is now the active session;
+ * - the panel just lost focus and *was* the recorded active one → clear (focus
+ *   left for a non-dreb editor, or another chat's activate hasn't fired yet);
+ * - otherwise (another chat is active) → leave the active key unchanged.
+ *
+ * Also used on panel dispose (a closed tab counts as "not active"): if the
+ * closed tab was active the highlight clears, else it is untouched.
+ */
+export function nextActiveKey(
+	currentActive: string | undefined,
+	thisKey: string,
+	isActive: boolean,
+): string | undefined {
+	if (isActive) return thisKey;
+	if (currentActive === thisKey) return undefined;
+	return currentActive;
+}
