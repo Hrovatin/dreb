@@ -85,6 +85,21 @@ describe('editor right-click "dreb" submenu', () => {
 		}
 	});
 
+	it("contains only the two selection actions (no other commands leak into the submenu)", () => {
+		const submenu = menus["dreb.editorContext"] ?? [];
+		const submenuCommands = submenu.map((e) => e.command).sort();
+		expect(submenuCommands).toEqual(["dreb.tagSelectionToChat", "dreb.tagSelectionToNewChat"]);
+	});
+
+	it("keeps the reject-hunk review action out of every menu (command-palette only)", () => {
+		const inAnyMenu = Object.values(menus)
+			.flat()
+			.some((e) => e.command === "dreb.review.rejectHunkAtCursor");
+		expect(inAnyMenu, "dreb.review.rejectHunkAtCursor must not appear in any menu").toBe(false);
+		// It must still be a declared command so the Command Palette can run it.
+		expect(commandIds).toContain("dreb.review.rejectHunkAtCursor");
+	});
+
 	it("declares both selection commands with distinct titles under the dreb category", () => {
 		for (const command of ["dreb.tagSelectionToChat", "dreb.tagSelectionToNewChat"]) {
 			const declared = commands.find((c) => c.command === command);

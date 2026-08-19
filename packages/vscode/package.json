@@ -161,11 +161,6 @@
 					"command": "dreb.tagSelectionToNewChat",
 					"when": "editorHasSelection",
 					"group": "selection@2"
-				},
-				{
-					"command": "dreb.review.rejectHunkAtCursor",
-					"when": "editorTextFocus",
-					"group": "review@1"
 				}
 			]
 		},
