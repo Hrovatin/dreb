@@ -4,6 +4,7 @@ import { type ComposerPrefillMode, mergeComposerPrefill } from "../shared/compos
 import { formatContextUsage, formatCost, formatModel, formatThinking } from "../shared/format.js";
 import { activeMention, isFullPickerTrigger, mentionReference, replaceMention } from "../shared/mention.js";
 import {
+	type AskQuestion,
 	activitySummary,
 	applyEvent,
 	type Checkpoint,
@@ -505,7 +506,7 @@ function ToolCard(props: { tool: ToolActivity }) {
 	);
 }
 
-function UiRequestView(props: { request: UiRequest; onRespond: (response: UiResponse) => void }) {
+export function UiRequestView(props: { request: UiRequest; onRespond: (response: UiResponse) => void }) {
 	const request = props.request;
 	const cancel = () => props.onRespond({ id: request.id, cancelled: true });
 
@@ -556,7 +557,7 @@ function UiRequestView(props: { request: UiRequest; onRespond: (response: UiResp
 			</Show>
 
 			<Show when={request.method === "ask"}>
-				<AskResponse request={request} onRespond={props.onRespond} onCancel={cancel} />
+				<AskWizard request={request} onRespond={props.onRespond} onCancel={cancel} />
 			</Show>
 		</div>
 	);
@@ -602,67 +603,101 @@ function TextResponse(props: {
 	);
 }
 
-function AskResponse(props: { request: UiRequest; onRespond: (response: UiResponse) => void; onCancel: () => void }) {
-	const request = props.request;
-	const [selected, setSelected] = createSignal<string[]>([]);
-	const [customText, setCustomText] = createSignal("");
-	const allowFreeText = request.allowFreeText !== false;
+interface AskDraft {
+	selected: string[];
+	customText: string;
+}
 
-	const toggle = (option: string) => {
-		if (request.multiSelect) {
-			setSelected((prev) => (prev.includes(option) ? prev.filter((o) => o !== option) : [...prev, option]));
-		} else {
-			setSelected([option]);
-		}
+/**
+ * Render an `ask` request's `questions[]` as a multi-question wizard. Each question
+ * shows its (Markdown) prompt, optional per-question title, selectable options
+ * (radio for single-select, checkbox for multi-select), and a free-text field when
+ * the question allows it. Submit sends one {@link AskUiAnswer} per question in order
+ * (unanswered questions marked `skipped`); Cancel cancels the whole request. This
+ * mirrors the Dashboard's `AskWizard` so the RPC multi-question protocol renders
+ * with parity instead of the old single-flat-question widget.
+ */
+function AskWizard(props: { request: UiRequest; onRespond: (response: UiResponse) => void; onCancel: () => void }) {
+	const questions = (): AskQuestion[] => props.request.questions ?? [];
+	const [drafts, setDrafts] = createSignal<AskDraft[]>(questions().map(() => ({ selected: [], customText: "" })));
+
+	const setDraft = (index: number, update: (draft: AskDraft) => AskDraft) => {
+		setDrafts((prev) => prev.map((draft, i) => (i === index ? update(draft) : draft)));
+	};
+
+	const toggle = (index: number, option: string, multiSelect: boolean) => {
+		setDraft(index, (draft) => {
+			if (multiSelect) {
+				const selected = draft.selected.includes(option)
+					? draft.selected.filter((o) => o !== option)
+					: [...draft.selected, option];
+				return { ...draft, selected };
+			}
+			return { ...draft, selected: [option] };
+		});
 	};
 
 	const submit = () => {
-		const text = customText().trim();
-		props.onRespond({
-			id: request.id,
-			selected: selected(),
-			customText: text.length > 0 ? text : undefined,
+		const answers = drafts().map((draft) => {
+			const customText = draft.customText.trim() || undefined;
+			const answered = draft.selected.length > 0 || !!customText;
+			return answered ? { selected: draft.selected, customText } : { selected: [], skipped: true };
 		});
+		props.onRespond({ id: props.request.id, answers });
 	};
 
 	return (
 		<div class="dreb-uireq-actions column">
-			<Show when={request.question}>
-				<div class="dreb-uireq-message">{request.question}</div>
-			</Show>
-			<For each={request.options ?? []}>
-				{(option) => (
-					<label class="dreb-option">
-						<input
-							type={request.multiSelect ? "checkbox" : "radio"}
-							name={`ask-${request.id}`}
-							checked={selected().includes(option)}
-							onChange={() => toggle(option)}
-						/>
-						<span>{option}</span>
-					</label>
-				)}
+			<For each={questions()}>
+				{(question, index) => {
+					const allowFreeText = question.allowFreeText !== false;
+					const options = question.options ?? [];
+					const multiSelect = question.multiSelect === true;
+					return (
+						<div class="dreb-ask-question">
+							<Show when={question.title}>
+								<div class="dreb-ask-question-title">{question.title}</div>
+							</Show>
+							<div class="dreb-ask-question-body dreb-answer" innerHTML={renderMarkdown(question.question)} />
+							<For each={options}>
+								{(option) => (
+									<label class="dreb-option">
+										<input
+											type={multiSelect ? "checkbox" : "radio"}
+											name={`ask-${props.request.id}-${index()}`}
+											checked={drafts()[index()]?.selected.includes(option) ?? false}
+											onChange={() => toggle(index(), option, multiSelect)}
+										/>
+										<span>{option}</span>
+									</label>
+								)}
+							</For>
+							<Show when={allowFreeText}>
+								<Show
+									when={question.multiline}
+									fallback={
+										<input
+											type="text"
+											placeholder="Type your own answer…"
+											value={drafts()[index()]?.customText ?? ""}
+											onInput={(e) =>
+												setDraft(index(), (d) => ({ ...d, customText: e.currentTarget.value }))
+											}
+										/>
+									}
+								>
+									<textarea
+										rows={4}
+										placeholder="Type your own answer…"
+										value={drafts()[index()]?.customText ?? ""}
+										onInput={(e) => setDraft(index(), (d) => ({ ...d, customText: e.currentTarget.value }))}
+									/>
+								</Show>
+							</Show>
+						</div>
+					);
+				}}
 			</For>
-			<Show when={allowFreeText}>
-				<Show
-					when={request.multiline}
-					fallback={
-						<input
-							type="text"
-							placeholder="Type your own answer…"
-							value={customText()}
-							onInput={(e) => setCustomText(e.currentTarget.value)}
-						/>
-					}
-				>
-					<textarea
-						rows={4}
-						placeholder="Type your own answer…"
-						value={customText()}
-						onInput={(e) => setCustomText(e.currentTarget.value)}
-					/>
-				</Show>
-			</Show>
 			<div class="dreb-uireq-actions">
 				<button type="button" onClick={submit}>
 					Send
