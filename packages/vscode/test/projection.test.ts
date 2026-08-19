@@ -6,6 +6,7 @@ import {
 	createTranscriptState,
 	foldMessagesIntoState,
 	type ResponseGroup,
+	retryableResponseId,
 	type TranscriptState,
 } from "../src/shared/projection.js";
 
@@ -57,6 +58,21 @@ describe("projection", () => {
 		});
 	});
 
+	it("separates narration text blocks split by a tool call, but not within one block", () => {
+		const state = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Let me look. " } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "First the config." } },
+			{ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: { path: "a.ts" } },
+			{ type: "tool_execution_end", toolCallId: "t1", result: "body", isError: false },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Now the answer." } },
+			{ type: "agent_end" },
+		]);
+		// Deltas within one block stay joined; a new block after the tool gets a blank line.
+		expect(onlyResponse(state).answer).toBe("Let me look. First the config.\n\nNow the answer.");
+	});
+
 	it("marks the run streaming, then collapses activity at agent_end", () => {
 		const state = createTranscriptState();
 		applyEvent(state, { type: "agent_start" });
@@ -88,30 +104,51 @@ describe("projection", () => {
 		expect(onlyResponse(nonStreaming).answer).toBe("whole answer");
 	});
 
-	it("tracks and clears blocking extension-UI requests", () => {
+	it("maps an ask request's questions[] into a structured multi-question wizard", () => {
 		const state = createTranscriptState();
 		applyEvent(state, {
 			type: "extension_ui_request",
 			id: "u1",
 			method: "ask",
-			title: "Pick",
-			question: "Which?",
-			options: ["a", "b"],
-			allowFreeText: false,
-			multiSelect: true,
+			title: "Choices",
+			questions: [
+				{ question: "Which?", title: "Pick one", options: ["a", "b"], allowFreeText: false, multiSelect: true },
+				{ question: "Free thoughts?", allowFreeText: true, multiline: true },
+			],
+			expiresAt: 123456,
 		});
 		expect(state.uiRequests).toHaveLength(1);
 		expect(state.uiRequests[0]).toMatchObject({
 			id: "u1",
 			method: "ask",
-			question: "Which?",
-			options: ["a", "b"],
-			allowFreeText: false,
-			multiSelect: true,
+			title: "Choices",
+			expiresAt: 123456,
+			questions: [
+				{ question: "Which?", title: "Pick one", options: ["a", "b"], allowFreeText: false, multiSelect: true },
+				{ question: "Free thoughts?", allowFreeText: true, multiline: true },
+			],
 		});
 
 		applyEvent(state, { type: "extension_ui_response_handled", id: "u1" });
 		expect(state.uiRequests).toHaveLength(0);
+	});
+
+	it("falls back to a single question for a legacy flat ask event shape", () => {
+		const state = createTranscriptState();
+		applyEvent(state, {
+			type: "extension_ui_request",
+			id: "u2",
+			method: "ask",
+			title: "Legacy",
+			question: "Old shape?",
+			options: ["x", "y"],
+			allowFreeText: false,
+		});
+		expect(state.uiRequests[0]).toMatchObject({
+			id: "u2",
+			method: "ask",
+			questions: [{ question: "Old shape?", options: ["x", "y"], allowFreeText: false }],
+		});
 	});
 
 	it("clears pending UI requests when a new run starts", () => {
@@ -233,6 +270,42 @@ describe("projection", () => {
 		};
 		expect(activitySummary(group)).toBe("1 thought · 2 tool calls");
 		expect(activitySummary({ ...group, activity: [] })).toBe("no activity");
+	});
+
+	describe("background agents", () => {
+		it("tracks a running background agent id on background_agent_start", () => {
+			const state = run([{ type: "background_agent_start", agentId: "abc123", agentType: "Explore" }]);
+			expect(state.backgroundAgentIds).toEqual(["abc123"]);
+		});
+
+		it("dedupes a repeated start for the same agent id", () => {
+			const state = run([
+				{ type: "background_agent_start", agentId: "abc123" },
+				{ type: "background_agent_start", agentId: "abc123" },
+			]);
+			expect(state.backgroundAgentIds).toEqual(["abc123"]);
+		});
+
+		it("removes the id on background_agent_end", () => {
+			const state = run([
+				{ type: "background_agent_start", agentId: "a" },
+				{ type: "background_agent_start", agentId: "b" },
+				{ type: "background_agent_end", agentId: "a" },
+			]);
+			expect(state.backgroundAgentIds).toEqual(["b"]);
+		});
+
+		it("ignores background_agent_end for an unknown id", () => {
+			const state = run([
+				{ type: "background_agent_start", agentId: "a" },
+				{ type: "background_agent_end", agentId: "zzz" },
+			]);
+			expect(state.backgroundAgentIds).toEqual(["a"]);
+		});
+
+		it("initializes an empty set on a fresh transcript", () => {
+			expect(createTranscriptState().backgroundAgentIds).toEqual([]);
+		});
 	});
 });
 
@@ -564,5 +637,72 @@ describe("suggest_next → state.suggestion", () => {
 		]);
 		const roundTripped = JSON.parse(JSON.stringify(state)) as TranscriptState;
 		expect(roundTripped.suggestion).toEqual({ command: "/skill:mach6-push", summary: "Recap." });
+	});
+});
+
+describe("retryableResponseId", () => {
+	/** Events that produce one completed, provider-errored assistant turn preceded
+	 * by its user message (the shape a failed/unanswered turn leaves behind). */
+	const erroredTurn = (message = "boom") => [
+		{ type: "message_start", message: { role: "user", content: "do the thing" } },
+		{ type: "agent_start" },
+		{ type: "message_start", message: { role: "assistant" } },
+		{ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: message } },
+		{ type: "agent_end" },
+	];
+
+	it("returns the id of a completed, errored last turn", () => {
+		const state = run(erroredTurn());
+		const group = onlyResponse(state);
+		expect(group.error).toBe("boom");
+		expect(retryableResponseId(state)).toBe(group.id);
+	});
+
+	it("returns undefined for a fresh, empty transcript", () => {
+		expect(retryableResponseId(createTranscriptState())).toBeUndefined();
+	});
+
+	it("returns undefined when the last turn is clean (no error)", () => {
+		const state = run([
+			{ type: "message_start", message: { role: "user", content: "hi" } },
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "all good" } },
+			{ type: "agent_end" },
+		]);
+		expect(retryableResponseId(state)).toBeUndefined();
+	});
+
+	it("returns undefined while the errored turn is still streaming", () => {
+		// Same errored turn but without the terminal agent_end: the run may still
+		// resolve, so no retry control is offered yet.
+		const state = run(erroredTurn().slice(0, -1));
+		expect(state.streaming).toBe(true);
+		expect(retryableResponseId(state)).toBeUndefined();
+	});
+
+	it("returns undefined when an errored turn is not the most recent item", () => {
+		// An errored turn followed by a later user message: retry only ever targets
+		// the latest turn, never a stale error buried above newer activity.
+		const state = run([...erroredTurn(), { type: "message_start", message: { role: "user", content: "moving on" } }]);
+		expect(retryableResponseId(state)).toBeUndefined();
+	});
+
+	it("returns undefined when a host error stamped the last turn (dead RPC child)", () => {
+		// A mid-turn RPC crash whose recovery gave up: host_error sets state.hostError
+		// AND closeActiveResponse stamps the active group's `error`, so the last item
+		// would otherwise qualify. Retrying a dead child only hits the disconnected
+		// guard, so no Retry control is offered — the reopen banner owns this path.
+		const state = run([
+			{ type: "message_start", message: { role: "user", content: "do the thing" } },
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "host_error", message: "dreb process exited (code 1, signal null)" },
+		]);
+		const group = onlyResponse(state);
+		expect(state.hostError).toBeTruthy();
+		expect(group.error).toBeTruthy();
+		expect(group.streaming).toBe(false);
+		expect(retryableResponseId(state)).toBeUndefined();
 	});
 });

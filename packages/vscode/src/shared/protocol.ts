@@ -60,11 +60,23 @@ export interface HostStatus {
 	error?: string;
 }
 
-/** A response to a blocking extension-UI request, mirroring RpcExtensionUIResponse. */
+/** A single answer to one question in an `ask` wizard, mirroring RpcAskAnswer.
+ * One per question, in the same order as the request's `questions[]`. */
+export interface AskUiAnswer {
+	/** Options the user selected (empty when only free text was typed, or skipped). */
+	selected: string[];
+	/** Free-text answer, when provided. */
+	customText?: string;
+	/** True when the user left this question unanswered. */
+	skipped?: boolean;
+}
+
+/** A response to a blocking extension-UI request, mirroring RpcExtensionUIResponse.
+ * The `ask` method answers with one {@link AskUiAnswer} per question. */
 export type UiResponse =
 	| { id: string; value: string }
 	| { id: string; confirmed: boolean }
-	| { id: string; selected: string[]; customText?: string }
+	| { id: string; answers: AskUiAnswer[] }
 	| { id: string; cancelled: true };
 
 /** One file pending change-review, shown in the webview indicator + SCM group. */
@@ -134,6 +146,20 @@ export interface SymbolContextDto {
  * reference, or a code symbol. Carried across the host↔webview boundary and
  * folded into the next prompt. */
 export type TaggedContextDto = SelectionContextDto | FileContextDto | SymbolContextDto;
+
+/** An image pasted into the composer, attached to the next message. Carried
+ * across the host↔webview boundary as base64 (structured-clone JSON) and mapped
+ * on the host to the agent's `ImageContent` before being sent over RPC. Unlike a
+ * {@link TaggedContextDto}, an image is NOT folded into the prompt text — it
+ * travels as a separate image content part so a vision-capable model can see it.
+ * This mirrors `ImageContent` from `@dreb/ai` minus the `"image"` type tag, kept
+ * here so `protocol.ts` stays free of any `@dreb` import. */
+export interface ImageAttachmentDto {
+	/** Base64-encoded image bytes (no data-URL prefix). */
+	data: string;
+	/** MIME type, e.g. "image/png" or "image/jpeg". */
+	mimeType: string;
+}
 
 /** Where a tagged context came from, which decides how the composer surfaces it.
  * `"picker"` (the native `@@` file/folder picker) inserts an inline `@name`
@@ -225,7 +251,10 @@ export type HostToWebview =
 /** Messages sent from the webview to the host. */
 export type WebviewToHost =
 	| { type: "ready" }
-	| { type: "submit"; text: string; attachments?: TaggedContextDto[] }
+	| { type: "submit"; text: string; attachments?: TaggedContextDto[]; images?: ImageAttachmentDto[] }
+	/** Resend the last submitted message (with its attached context) after a turn
+	 * failed / the model didn't respond — no retyping. */
+	| { type: "retry" }
 	| { type: "abort" }
 	| { type: "refresh-commands" }
 	| { type: "ui-response"; response: UiResponse }

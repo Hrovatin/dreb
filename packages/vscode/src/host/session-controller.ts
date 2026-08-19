@@ -25,6 +25,7 @@ import {
 } from "../shared/projection.js";
 import type {
 	HostStatus,
+	ImageAttachmentDto,
 	OpenSourceRef,
 	QueuedMessageDto,
 	ReviewFileDto,
@@ -125,6 +126,10 @@ export interface RpcClientLike {
 	sendExtensionUIResponse(response: unknown): void;
 	onEvent(listener: (event: any) => void): () => void;
 	onExit(listener: (info: any) => void): () => void;
+	/** List background subagents tracked by the RPC child's registry (running and
+	 * recently completed). Used to seed the live "background work" indicator when a
+	 * session (re)connects while agents are already running. */
+	listBackgroundAgents?(): Promise<Array<{ agentId: string; status: string }>>;
 	// Runtime status (TUI parity).
 	getState(): Promise<RpcSessionStateLike>;
 	getDailyCost(): Promise<number>;
@@ -279,6 +284,23 @@ function currentBranch(roots: SessionTreeNodeDto[], leafId: string | null): { ru
 	return { runTerminalEntryIds };
 }
 
+/** An `@dreb/ai` `ImageContent` part: the wire shape the agent expects for an
+ * inline image. Declared locally so this module stays free of a static
+ * `@dreb/ai` import (the RpcClient is loaded dynamically). */
+interface ImageContentPart {
+	type: "image";
+	data: string;
+	mimeType: string;
+}
+
+/** Map composer image attachments to the agent's `ImageContent` parts, or
+ * `undefined` when there are none (so `prompt`/`steer` receive no `images` arg
+ * for a text-only turn, exactly as before). */
+function toImageContent(images?: readonly ImageAttachmentDto[]): ImageContentPart[] | undefined {
+	if (!images || images.length === 0) return undefined;
+	return images.map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType }));
+}
+
 export class SessionController {
 	private readonly state: TranscriptState = createTranscriptState();
 	private readonly listeners = new Set<(update: ControllerUpdate) => void>();
@@ -339,6 +361,13 @@ export class SessionController {
 	private statusBusy = false;
 	private statusAgain = false;
 	private statusAgainIncludeDaily = false;
+	/** The last message the user actually sent to the model (raw composer text +
+	 * attachments, pre-fold), retained so a failed / unanswered turn can be resent
+	 * verbatim via {@link retry}. Set only for prompt sends — never for slash
+	 * builtins, which are not model turns and have nothing to "retry". Survives an
+	 * in-place RPC-child restart (the controller instance outlives it), so a retry
+	 * after auto-recovery targets the recovered child. */
+	private lastPrompt: { text: string; attachments?: TaggedContextDto[]; images?: ImageAttachmentDto[] } | undefined;
 
 	constructor(options: SessionControllerOptions) {
 		this.options = options;
@@ -481,6 +510,11 @@ export class SessionController {
 		this.emit({ kind: "review", review: this.reviewState });
 		await this.refreshCommands();
 		await this.refreshStatus(true);
+		// Seed the live "background work" indicator from the RPC child's registry so
+		// a session that (re)connects while background agents are already running
+		// shows the right state immediately, rather than waiting for the next
+		// background_agent_* event. Best-effort — never blocks a successful start.
+		await this.seedBackgroundAgents();
 		// When resuming a persisted session (`--session <path>`), the RPC child
 		// loads the saved conversation into its own memory but never re-broadcasts
 		// the historical events. The transcript is built exclusively from that live
@@ -508,6 +542,25 @@ export class SessionController {
 				);
 				this.emit({ kind: "resync" });
 			}
+		}
+	}
+
+	/** Prime {@link TranscriptState.backgroundAgentIds} from the RPC child's
+	 * background-agent registry. Runs the running agents back through
+	 * {@link handleEvent} as synthetic `background_agent_start` events so the seed
+	 * shares the live apply-and-notify path (and is idempotent — a live start event
+	 * that already arrived is deduped by `applyEvent`). Best-effort. */
+	private async seedBackgroundAgents(): Promise<void> {
+		if (!this.client?.listBackgroundAgents) return;
+		try {
+			const agents = await this.client.listBackgroundAgents();
+			for (const agent of agents) {
+				if (agent.status === "running" && agent.agentId) {
+					this.handleEvent({ type: "background_agent_start", agentId: agent.agentId });
+				}
+			}
+		} catch (err) {
+			this.logger(`seedBackgroundAgents failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
 
@@ -545,7 +598,7 @@ export class SessionController {
 	 * child crash) surfaces a notice instead of dispatching into a client that
 	 * isn't ready, and every awaited RPC call is wrapped so a rejection becomes
 	 * a visible notice rather than an unhandled promise rejection. */
-	async submit(text: string, attachments?: TaggedContextDto[]): Promise<void> {
+	async submit(text: string, attachments?: TaggedContextDto[], images?: ImageAttachmentDto[]): Promise<void> {
 		// Any composer submit is genuine user engagement — reset the inactivity
 		// cap before anything else (even a submit that races the spawn window or
 		// lands after a crash and is short-circuited below).
@@ -559,21 +612,29 @@ export class SessionController {
 			return;
 		}
 		const decision = routeInput(text, this.commands);
-		// An attachment-only submit (chips attached, no typed text) is deliberately
-		// allowed by the composer; with no attachments there is genuinely nothing
-		// to send, so short-circuit only then.
-		if (decision.kind === "empty" && (!attachments || attachments.length === 0)) return;
+		// An attachment-only or image-only submit (chips/images attached, no typed
+		// text) is deliberately allowed by the composer; with neither is there
+		// genuinely nothing to send, so short-circuit only then.
+		const hasAttachments = (attachments && attachments.length > 0) || (images && images.length > 0);
+		if (decision.kind === "empty" && !hasAttachments) return;
 		try {
 			switch (decision.kind) {
 				case "empty":
-					// Reached only with attachments present (see guard above): send the
-					// folded context so a chips-only submit isn't silently dropped.
-					await this.deliver(buildPromptWithContext(text, attachments));
+					// Reached only with attachments/images present (see guard above):
+					// send the folded context + images so a chips/images-only submit
+					// isn't silently dropped. Retain the raw inputs so a failed turn
+					// can be resent verbatim.
+					this.lastPrompt = { text, attachments, images };
+					await this.deliver(buildPromptWithContext(text, attachments), images);
 					return;
 				case "prompt":
 					// Fold any tagged editor selections into the prompt as located
-					// context (attachments only apply to prompts, not slash builtins).
-					await this.deliver(buildPromptWithContext(decision.message, attachments));
+					// context (attachments only apply to prompts, not slash builtins);
+					// pasted images ride along as separate image content parts.
+					// Retain the raw inputs so a failed turn can be resent verbatim; a
+					// retry re-routes the same text, reproducing the identical prompt.
+					this.lastPrompt = { text, attachments, images };
+					await this.deliver(buildPromptWithContext(decision.message, attachments), images);
 					return;
 				case "builtin":
 					await this.runBuiltin(decision.command, decision.arg);
@@ -587,20 +648,38 @@ export class SessionController {
 		}
 	}
 
-	/** Send composer text to the model. While the agent is working, `prompt()`
-	 * throws ("Agent is already processing…"), which would silently swallow the
-	 * message; route it through `steer()` instead so it's queued into the running
-	 * turn, and refresh the pending chips so the queued message is visible. When
-	 * idle, dispatch it as a normal prompt. */
-	private async deliver(message: string): Promise<void> {
+	/** Resend the last message the user sent to the model — used to recover a turn
+	 * that failed or went unanswered (provider unavailable, rate-limited, transient
+	 * error). Re-drives the retained payload through {@link submit}, inheriting all
+	 * of its guards (disconnected → notice, streaming → steer) and re-emitting user
+	 * engagement, and reproducing the identical folded prompt (same text + tagged
+	 * context + pasted images). No-ops with a notice when there is nothing to resend
+	 * (e.g. only slash builtins have been run). */
+	async retry(): Promise<void> {
+		const last = this.lastPrompt;
+		if (!last) {
+			this.emitNotice("Nothing to retry yet — send a message first.");
+			return;
+		}
+		await this.submit(last.text, last.attachments, last.images);
+	}
+
+	/** Send composer text (and any pasted images) to the model. While the agent is
+	 * working, `prompt()` throws ("Agent is already processing…"), which would
+	 * silently swallow the message; route it through `steer()` instead so it's
+	 * queued into the running turn, and refresh the pending chips so the queued
+	 * message is visible. When idle, dispatch it as a normal prompt. Images are
+	 * mapped to the agent's `ImageContent` shape (a `type: "image"` part). */
+	private async deliver(message: string, images?: ImageAttachmentDto[]): Promise<void> {
 		const client = this.client;
 		if (!client) return;
+		const content = toImageContent(images);
 		if (this.state.streaming) {
-			await client.steer(message);
+			await client.steer(message, content);
 			await this.refreshPending();
 			return;
 		}
-		await client.prompt(message);
+		await client.prompt(message, content);
 	}
 
 	/** Abort the current turn. Any messages the user queued while the agent was
@@ -901,6 +980,7 @@ export class SessionController {
 		this.state.items = [];
 		this.state.streaming = false;
 		this.state.uiRequests = [];
+		this.state.backgroundAgentIds = [];
 		this.state.statusText = undefined;
 		this.state.hostError = undefined;
 		this.state.nextResponseId = 1;

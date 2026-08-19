@@ -186,6 +186,7 @@ describe("connectWebview", () => {
 		const controller = await makeController(fake);
 		const submit = vi.spyOn(controller, "submit").mockResolvedValue();
 		const abort = vi.spyOn(controller, "abort").mockResolvedValue();
+		const retry = vi.spyOn(controller, "retry").mockResolvedValue();
 		const respondUi = vi.spyOn(controller, "respondUi").mockImplementation(() => {});
 		const refresh = vi.spyOn(controller, "refreshCommands");
 
@@ -193,11 +194,13 @@ describe("connectWebview", () => {
 		connectWebview(webview as any, controller);
 
 		send({ type: "submit", text: "hi there" });
+		send({ type: "retry" });
 		send({ type: "abort" });
 		send({ type: "ui-response", response: { id: "u1", confirmed: true } });
 		send({ type: "refresh-commands" });
 
-		expect(submit).toHaveBeenCalledWith("hi there", undefined);
+		expect(submit).toHaveBeenCalledWith("hi there", undefined, undefined);
+		expect(retry).toHaveBeenCalledTimes(1);
 		expect(abort).toHaveBeenCalledTimes(1);
 		expect(respondUi).toHaveBeenCalledWith({ id: "u1", confirmed: true });
 		expect(refresh).toHaveBeenCalled();
@@ -227,7 +230,19 @@ describe("connectWebview", () => {
 			{ kind: "selection" as const, path: "a.ts", startLine: 1, endLine: 2, language: "ts", text: "A" },
 		];
 		send({ type: "submit", text: "explain", attachments });
-		expect(submit).toHaveBeenCalledWith("explain", attachments);
+		expect(submit).toHaveBeenCalledWith("explain", attachments, undefined);
+	});
+
+	it("forwards pasted submit images to the controller", async () => {
+		const fake = new BridgeFakeClient();
+		const controller = await makeController(fake);
+		const submit = vi.spyOn(controller, "submit").mockResolvedValue();
+		const { webview, send } = makeWebview();
+		connectWebview(webview as any, controller);
+
+		const images = [{ data: "AQID", mimeType: "image/png" }];
+		send({ type: "submit", text: "look", images });
+		expect(submit).toHaveBeenCalledWith("look", undefined, images);
 	});
 
 	it("forwards a live tag-context update as a tag-context message", async () => {

@@ -22,6 +22,7 @@ import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
 import { createSessionInventory, deletePersistedSession, type SessionInventory } from "./session-inventory.js";
+import { SessionOrderStore } from "./session-order.js";
 import { SessionPool } from "./session-registry.js";
 import {
 	readSleepSetting,
@@ -30,7 +31,7 @@ import {
 	SleepController,
 } from "./session-view-lifecycle.js";
 import { SessionsViewProvider } from "./sessions-view.js";
-import { tagSelectionToChat } from "./tag-selection.js";
+import { type TagSelectionDeps, tagSelectionToChat } from "./tag-selection.js";
 import { createVscodeHostUi } from "./vscode-host-ui.js";
 import { createVscodeReviewUi } from "./vscode-review-ui.js";
 import { createVscodeSourceLinkUi } from "./vscode-source-link-ui.js";
@@ -81,6 +82,7 @@ const pool = new SessionPool<ChatSession>({
 let sessionsView: SessionsViewProvider | undefined;
 let inventory: SessionInventory;
 let flags: SessionFlagsStore;
+let order: SessionOrderStore;
 /** The activation context, kept so `reveal` can rebuild a panel for a
  * backgrounded session that outlived its original panel. */
 let extensionContext: vscode.ExtensionContext | undefined;
@@ -100,9 +102,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	extensionContext = context;
 	inventory = createSessionInventory();
 	flags = new SessionFlagsStore(context.globalState);
+	order = new SessionOrderStore(context.globalState);
 	sessionsView = new SessionsViewProvider(context.extensionUri, {
 		inventory,
 		flags,
+		order,
 		currentCwd: workspaceCwd,
 		liveSessions: () =>
 			pool.list().map(
@@ -127,30 +131,10 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand("dreb.sessions.newSession", () => void openNewSession(context)),
 		vscode.commands.registerCommand("dreb.sessions.refresh", () => sessionsView?.refresh()),
 		vscode.commands.registerCommand("dreb.tagSelectionToChat", () =>
-			tagSelectionToChat({
-				captureSelection: () => {
-					const editor = vscode.window.activeTextEditor;
-					if (!editor || editor.selection.isEmpty) return undefined;
-					const { selection, document } = editor;
-					return {
-						fsPath: document.uri.fsPath,
-						startLine: selection.start.line + 1,
-						endLine: selection.end.line + 1,
-						language: document.languageId,
-						text: document.getText(selection),
-					};
-				},
-				openTarget: async () => {
-					const session = await openActiveOrNew(context);
-					if (!session) return undefined;
-					return {
-						cwd: session.controller.cwd,
-						tagContext: (ctx) => session.controller.tagContext(ctx),
-						reveal: () => revealSession(session),
-					};
-				},
-				onNoSelection: () => vscode.window.showInformationMessage("dreb: select some code to add to the chat."),
-			}),
+			tagSelectionToChat(selectionTagDeps(() => openActiveOrNew(context))),
+		),
+		vscode.commands.registerCommand("dreb.tagSelectionToNewChat", () =>
+			tagSelectionToChat(selectionTagDeps(() => openNewSession(context))),
 		),
 		vscode.commands.registerCommand("dreb.review.openDiff", (arg?: unknown) => {
 			const resolved = resolveReviewTarget(arg);
@@ -253,6 +237,37 @@ async function openActiveOrNew(context: vscode.ExtensionContext): Promise<ChatSe
 		return active;
 	}
 	return openNewSession(context);
+}
+
+/** Build the injected deps for the "add selection to chat" commands. The `open`
+ * callback chooses the target session — active-or-new (`dreb.tagSelectionToChat`)
+ * vs. always a fresh one (`dreb.tagSelectionToNewChat`) — while capture, target
+ * shaping, and the empty-selection notice are identical for both entries. */
+function selectionTagDeps(open: () => Promise<ChatSession | undefined>): TagSelectionDeps {
+	return {
+		captureSelection: () => {
+			const editor = vscode.window.activeTextEditor;
+			if (!editor || editor.selection.isEmpty) return undefined;
+			const { selection, document } = editor;
+			return {
+				fsPath: document.uri.fsPath,
+				startLine: selection.start.line + 1,
+				endLine: selection.end.line + 1,
+				language: document.languageId,
+				text: document.getText(selection),
+			};
+		},
+		openTarget: async () => {
+			const session = await open();
+			if (!session) return undefined;
+			return {
+				cwd: session.controller.cwd,
+				tagContext: (ctx) => session.controller.tagContext(ctx),
+				reveal: () => revealSession(session),
+			};
+		},
+		onNoSelection: () => vscode.window.showInformationMessage("dreb: select some code to add to the chat."),
+	};
 }
 
 /** Build a fresh chat session: controller + native UIs, then attach a webview
@@ -404,6 +419,8 @@ function panelTitle(state: SessionRunState): string {
 			return "dreb ● running";
 		case "needs-input":
 			return "dreb ⚠ needs input";
+		case "background":
+			return "dreb ◐ working";
 		default:
 			return "dreb";
 	}
@@ -496,9 +513,16 @@ async function deleteSession(key: string): Promise<void> {
 		// Delete the transcript and drop its flags only on success. `activeSessionPath`
 		// is read *after* disposing the target above, so the guard only fires for a
 		// genuinely different session that is still active.
-		await deletePersistedSession(inventory, flags, path, pool.active?.controller.sessionPath, (message) =>
-			vscode.window.showErrorMessage(message),
+		const result = await deletePersistedSession(
+			inventory,
+			flags,
+			path,
+			pool.active?.controller.sessionPath,
+			(message) => vscode.window.showErrorMessage(message),
 		);
+		// Drop any persisted manual order rank too, so a re-created session at the
+		// same path doesn't inherit a stale position.
+		if (result.ok) await order.clear(path);
 	}
 	scheduleSidebarRefresh();
 }
