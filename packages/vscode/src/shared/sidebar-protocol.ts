@@ -22,6 +22,9 @@ export type SidebarToHost =
 	| { type: "pin"; key: string; pinned: boolean }
 	| { type: "archive"; key: string; archived: boolean }
 	| { type: "delete"; key: string }
+	/** Persist a manual drag order for one group. `orderedKeys` is the group's
+	 * rows in the exact top-to-bottom order the user arranged them. */
+	| { type: "reorder"; groupKey: string; orderedKeys: string[] }
 	/** Abort the session's current turn and end it (release its RPC child). The
 	 * only way to deliberately interrupt a working agent — closing a tab never
 	 * does. */

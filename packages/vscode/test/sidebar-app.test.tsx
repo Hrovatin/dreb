@@ -45,6 +45,7 @@ function row(key: string, title: string, state: SessionSummaryDto["state"] = "id
 		cwd: "/proj",
 		title,
 		modified: "2026-01-01T00:00:00.000Z",
+		created: "2026-01-01T00:00:00.000Z",
 		messageCount: 3,
 		state,
 		live: false,
@@ -165,6 +166,47 @@ describe("SidebarApp reconcile identity preservation (F2)", () => {
 		const detailsAfter = container.querySelectorAll<HTMLDetailsElement>(".dreb-side-group");
 		expect(detailsAfter[1]).toBe(projectDetails);
 		expect(detailsAfter[1].open).toBe(true);
+	});
+});
+
+describe("SidebarApp drag-to-reorder (issue 78)", () => {
+	it("renders a drag handle on each row", () => {
+		mountSidebar();
+		emit({
+			currentCwd: "/proj",
+			groups: [
+				group("current", "/proj", "This workspace", [row("/proj/a.jsonl", "Alpha"), row("/proj/b.jsonl", "Beta")]),
+			],
+		});
+		expect(container.querySelectorAll(".dreb-side-drag").length).toBe(2);
+	});
+
+	it("posts a reorder message with the new key order after a drag+drop", () => {
+		mountSidebar();
+		emit({
+			currentCwd: "/proj",
+			groups: [
+				group("current", "/proj", "This workspace", [row("/proj/a.jsonl", "Alpha"), row("/proj/b.jsonl", "Beta")]),
+			],
+		});
+
+		const rows = container.querySelectorAll<HTMLElement>(".dreb-side-row");
+		const handleA = rows[0].querySelector<HTMLElement>(".dreb-side-drag");
+		expect(handleA).not.toBeNull();
+
+		// Drag row A's handle, hover over row B, and drop. (jsdom lacks a real
+		// DragEvent/dataTransfer; the handlers guard for that, and a zero-size
+		// bounding box resolves the drop to "after" — moving A below B.)
+		handleA!.dispatchEvent(new Event("dragstart", { bubbles: true }));
+		rows[1].dispatchEvent(new Event("dragover", { bubbles: true }));
+		rows[1].dispatchEvent(new Event("drop", { bubbles: true }));
+
+		const reorder = hoisted.posted.find((m) => (m as { type?: string }).type === "reorder");
+		expect(reorder).toEqual({
+			type: "reorder",
+			groupKey: "current:/proj",
+			orderedKeys: ["/proj/b.jsonl", "/proj/a.jsonl"],
+		});
 	});
 });
 
