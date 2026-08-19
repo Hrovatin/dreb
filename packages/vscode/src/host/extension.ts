@@ -24,7 +24,7 @@ import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
 import { createSessionInventory, deletePersistedSession, type SessionInventory } from "./session-inventory.js";
 import { SessionOrderStore } from "./session-order.js";
-import { nextActiveKey, SessionPool } from "./session-registry.js";
+import { nextActiveKey, resolveActiveOrNew, SessionPool } from "./session-registry.js";
 import {
 	readSleepSetting,
 	revealOrReattach,
@@ -235,15 +235,19 @@ async function openNewSession(context: vscode.ExtensionContext): Promise<ChatSes
 	return openSession(context, `new:${randomUUID()}`);
 }
 
-/** Reveal the focused session, or start a new one — used by the chat command and
- * the "Add Selection to Chat" flow (which need *some* live target). */
+/** Reveal the last-active session, or start a new one — used by the chat command
+ * and the "Add Selection to Chat" flow (which need *some* live target). Delegates
+ * to the vscode-free `resolveActiveOrNew`, which reads `pool.lastActive` (not
+ * `pool.active`) so that tagging from the editor targets the chat the user was
+ * last in, rather than spawning a new one just because focus moved from the chat
+ * webview to the code editor. */
 async function openActiveOrNew(context: vscode.ExtensionContext): Promise<ChatSession | undefined> {
-	const active = pool.active;
-	if (active && !active.controller.isDisposed() && !active.controller.hasFailed()) {
-		revealSession(active);
-		return active;
-	}
-	return openNewSession(context);
+	return resolveActiveOrNew(pool, {
+		isDisposed: (s) => s.controller.isDisposed(),
+		hasFailed: (s) => s.controller.hasFailed(),
+		reveal: (s) => revealSession(s),
+		openNew: () => openNewSession(context),
+	});
 }
 
 /** Build the injected deps for the "add selection to chat" commands. The `open`
