@@ -126,6 +126,10 @@ export interface RpcClientLike {
 	sendExtensionUIResponse(response: unknown): void;
 	onEvent(listener: (event: any) => void): () => void;
 	onExit(listener: (info: any) => void): () => void;
+	/** List background subagents tracked by the RPC child's registry (running and
+	 * recently completed). Used to seed the live "background work" indicator when a
+	 * session (re)connects while agents are already running. */
+	listBackgroundAgents?(): Promise<Array<{ agentId: string; status: string }>>;
 	// Runtime status (TUI parity).
 	getState(): Promise<RpcSessionStateLike>;
 	getDailyCost(): Promise<number>;
@@ -497,6 +501,11 @@ export class SessionController {
 		this.emit({ kind: "review", review: this.reviewState });
 		await this.refreshCommands();
 		await this.refreshStatus(true);
+		// Seed the live "background work" indicator from the RPC child's registry so
+		// a session that (re)connects while background agents are already running
+		// shows the right state immediately, rather than waiting for the next
+		// background_agent_* event. Best-effort — never blocks a successful start.
+		await this.seedBackgroundAgents();
 		// When resuming a persisted session (`--session <path>`), the RPC child
 		// loads the saved conversation into its own memory but never re-broadcasts
 		// the historical events. The transcript is built exclusively from that live
@@ -524,6 +533,25 @@ export class SessionController {
 				);
 				this.emit({ kind: "resync" });
 			}
+		}
+	}
+
+	/** Prime {@link TranscriptState.backgroundAgentIds} from the RPC child's
+	 * background-agent registry. Runs the running agents back through
+	 * {@link handleEvent} as synthetic `background_agent_start` events so the seed
+	 * shares the live apply-and-notify path (and is idempotent — a live start event
+	 * that already arrived is deduped by `applyEvent`). Best-effort. */
+	private async seedBackgroundAgents(): Promise<void> {
+		if (!this.client?.listBackgroundAgents) return;
+		try {
+			const agents = await this.client.listBackgroundAgents();
+			for (const agent of agents) {
+				if (agent.status === "running" && agent.agentId) {
+					this.handleEvent({ type: "background_agent_start", agentId: agent.agentId });
+				}
+			}
+		} catch (err) {
+			this.logger(`seedBackgroundAgents failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
 
@@ -943,6 +971,7 @@ export class SessionController {
 		this.state.items = [];
 		this.state.streaming = false;
 		this.state.uiRequests = [];
+		this.state.backgroundAgentIds = [];
 		this.state.statusText = undefined;
 		this.state.hostError = undefined;
 		this.state.nextResponseId = 1;
