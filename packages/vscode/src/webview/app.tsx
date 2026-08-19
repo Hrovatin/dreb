@@ -4,6 +4,7 @@ import { type ComposerPrefillMode, mergeComposerPrefill } from "../shared/compos
 import { formatContextUsage, formatCost, formatModel, formatThinking } from "../shared/format.js";
 import { activeMention, isFullPickerTrigger, mentionReference, replaceMention } from "../shared/mention.js";
 import {
+	type AskQuestion,
 	activitySummary,
 	applyEvent,
 	type Checkpoint,
@@ -16,6 +17,7 @@ import {
 } from "../shared/projection.js";
 import type {
 	HostStatus,
+	ImageAttachmentDto,
 	OpenSourceRef,
 	QueuedMessageDto,
 	ReviewStateDto,
@@ -28,6 +30,7 @@ import type {
 import { taggedContextLabel, taggedContextTitle } from "../shared/tagged-context.js";
 import { buildGroundedRefs, linkifyAnswer } from "./code-links.js";
 import { clampComposerHeight } from "./composer-resize.js";
+import { isImageClipboardItem, parseImageDataUrl } from "./image-paste.js";
 import { renderMarkdown } from "./markdown.js";
 import { bindStickToBottom, createStickToBottom } from "./scrolling.js";
 import { onHostMessage, postToHost } from "./vscode-api.js";
@@ -326,8 +329,8 @@ export function App() {
 				mentionInsert={mentionInsert()}
 				mentionResults={mentionResults()}
 				onRemoveAttachment={(index) => setAttachments((current) => current.filter((_, i) => i !== index))}
-				onSubmit={(text) => {
-					postToHost({ type: "submit", text, attachments: attachments() });
+				onSubmit={(text, images) => {
+					postToHost({ type: "submit", text, attachments: attachments(), images });
 					setAttachments([]);
 				}}
 				onAbort={() => postToHost({ type: "abort" })}
@@ -525,7 +528,7 @@ function ToolCard(props: { tool: ToolActivity }) {
 	);
 }
 
-function UiRequestView(props: { request: UiRequest; onRespond: (response: UiResponse) => void }) {
+export function UiRequestView(props: { request: UiRequest; onRespond: (response: UiResponse) => void }) {
 	const request = props.request;
 	const cancel = () => props.onRespond({ id: request.id, cancelled: true });
 
@@ -576,7 +579,7 @@ function UiRequestView(props: { request: UiRequest; onRespond: (response: UiResp
 			</Show>
 
 			<Show when={request.method === "ask"}>
-				<AskResponse request={request} onRespond={props.onRespond} onCancel={cancel} />
+				<AskWizard request={request} onRespond={props.onRespond} onCancel={cancel} />
 			</Show>
 		</div>
 	);
@@ -622,67 +625,101 @@ function TextResponse(props: {
 	);
 }
 
-function AskResponse(props: { request: UiRequest; onRespond: (response: UiResponse) => void; onCancel: () => void }) {
-	const request = props.request;
-	const [selected, setSelected] = createSignal<string[]>([]);
-	const [customText, setCustomText] = createSignal("");
-	const allowFreeText = request.allowFreeText !== false;
+interface AskDraft {
+	selected: string[];
+	customText: string;
+}
 
-	const toggle = (option: string) => {
-		if (request.multiSelect) {
-			setSelected((prev) => (prev.includes(option) ? prev.filter((o) => o !== option) : [...prev, option]));
-		} else {
-			setSelected([option]);
-		}
+/**
+ * Render an `ask` request's `questions[]` as a multi-question wizard. Each question
+ * shows its (Markdown) prompt, optional per-question title, selectable options
+ * (radio for single-select, checkbox for multi-select), and a free-text field when
+ * the question allows it. Submit sends one {@link AskUiAnswer} per question in order
+ * (unanswered questions marked `skipped`); Cancel cancels the whole request. This
+ * mirrors the Dashboard's `AskWizard` so the RPC multi-question protocol renders
+ * with parity instead of the old single-flat-question widget.
+ */
+function AskWizard(props: { request: UiRequest; onRespond: (response: UiResponse) => void; onCancel: () => void }) {
+	const questions = (): AskQuestion[] => props.request.questions ?? [];
+	const [drafts, setDrafts] = createSignal<AskDraft[]>(questions().map(() => ({ selected: [], customText: "" })));
+
+	const setDraft = (index: number, update: (draft: AskDraft) => AskDraft) => {
+		setDrafts((prev) => prev.map((draft, i) => (i === index ? update(draft) : draft)));
+	};
+
+	const toggle = (index: number, option: string, multiSelect: boolean) => {
+		setDraft(index, (draft) => {
+			if (multiSelect) {
+				const selected = draft.selected.includes(option)
+					? draft.selected.filter((o) => o !== option)
+					: [...draft.selected, option];
+				return { ...draft, selected };
+			}
+			return { ...draft, selected: [option] };
+		});
 	};
 
 	const submit = () => {
-		const text = customText().trim();
-		props.onRespond({
-			id: request.id,
-			selected: selected(),
-			customText: text.length > 0 ? text : undefined,
+		const answers = drafts().map((draft) => {
+			const customText = draft.customText.trim() || undefined;
+			const answered = draft.selected.length > 0 || !!customText;
+			return answered ? { selected: draft.selected, customText } : { selected: [], skipped: true };
 		});
+		props.onRespond({ id: props.request.id, answers });
 	};
 
 	return (
 		<div class="dreb-uireq-actions column">
-			<Show when={request.question}>
-				<div class="dreb-uireq-message">{request.question}</div>
-			</Show>
-			<For each={request.options ?? []}>
-				{(option) => (
-					<label class="dreb-option">
-						<input
-							type={request.multiSelect ? "checkbox" : "radio"}
-							name={`ask-${request.id}`}
-							checked={selected().includes(option)}
-							onChange={() => toggle(option)}
-						/>
-						<span>{option}</span>
-					</label>
-				)}
+			<For each={questions()}>
+				{(question, index) => {
+					const allowFreeText = question.allowFreeText !== false;
+					const options = question.options ?? [];
+					const multiSelect = question.multiSelect === true;
+					return (
+						<div class="dreb-ask-question">
+							<Show when={question.title}>
+								<div class="dreb-ask-question-title">{question.title}</div>
+							</Show>
+							<div class="dreb-ask-question-body dreb-answer" innerHTML={renderMarkdown(question.question)} />
+							<For each={options}>
+								{(option) => (
+									<label class="dreb-option">
+										<input
+											type={multiSelect ? "checkbox" : "radio"}
+											name={`ask-${props.request.id}-${index()}`}
+											checked={drafts()[index()]?.selected.includes(option) ?? false}
+											onChange={() => toggle(index(), option, multiSelect)}
+										/>
+										<span>{option}</span>
+									</label>
+								)}
+							</For>
+							<Show when={allowFreeText}>
+								<Show
+									when={question.multiline}
+									fallback={
+										<input
+											type="text"
+											placeholder="Type your own answer…"
+											value={drafts()[index()]?.customText ?? ""}
+											onInput={(e) =>
+												setDraft(index(), (d) => ({ ...d, customText: e.currentTarget.value }))
+											}
+										/>
+									}
+								>
+									<textarea
+										rows={4}
+										placeholder="Type your own answer…"
+										value={drafts()[index()]?.customText ?? ""}
+										onInput={(e) => setDraft(index(), (d) => ({ ...d, customText: e.currentTarget.value }))}
+									/>
+								</Show>
+							</Show>
+						</div>
+					);
+				}}
 			</For>
-			<Show when={allowFreeText}>
-				<Show
-					when={request.multiline}
-					fallback={
-						<input
-							type="text"
-							placeholder="Type your own answer…"
-							value={customText()}
-							onInput={(e) => setCustomText(e.currentTarget.value)}
-						/>
-					}
-				>
-					<textarea
-						rows={4}
-						placeholder="Type your own answer…"
-						value={customText()}
-						onInput={(e) => setCustomText(e.currentTarget.value)}
-					/>
-				</Show>
-			</Show>
 			<div class="dreb-uireq-actions">
 				<button type="button" onClick={submit}>
 					Send
@@ -706,13 +743,17 @@ export function Composer(props: {
 	mentionInsert?: { label: string; nonce: number };
 	mentionResults: TaggedContextDto[];
 	onRemoveAttachment: (index: number) => void;
-	onSubmit: (text: string) => void;
+	onSubmit: (text: string, images: ImageAttachmentDto[]) => void;
 	onAbort: () => void;
 	onPickFile: () => void;
 	onSearchWorkspace: (query: string) => void;
 	onTagContext: (context: TaggedContextDto) => void;
 }) {
 	const [text, setText] = createSignal("");
+	// Images pasted into the composer, attached to the next message and shown as
+	// removable thumbnail chips. Unlike tagged-context attachments (which are
+	// folded into the prompt text), these travel as separate image content parts.
+	const [images, setImages] = createSignal<ImageAttachmentDto[]>([]);
 	// Caret position, tracked so the `@`-mention parser knows which token the user
 	// is editing (updated on input and on caret moves via keyboard/mouse).
 	const [caret, setCaret] = createSignal(0);
@@ -886,13 +927,38 @@ export function Composer(props: {
 
 	const submit = () => {
 		const value = text();
-		// Allow sending with only attachments (no typed text), but never a
-		// completely empty message.
-		if (value.trim().length === 0 && props.attachments.length === 0) return;
-		props.onSubmit(value);
+		const attached = images();
+		// Allow sending with only attachments or only pasted images (no typed
+		// text), but never a completely empty message.
+		if (value.trim().length === 0 && props.attachments.length === 0 && attached.length === 0) return;
+		props.onSubmit(value, attached);
 		setText("");
 		setCaret(0);
+		setImages([]);
 	};
+
+	/** Capture pasted images: read each image blob to base64 and attach it as a
+	 * removable chip. Only prevents the default paste when an image is actually
+	 * consumed, so pasting text/code is left completely untouched. */
+	const onPaste = (event: ClipboardEvent) => {
+		const items = event.clipboardData?.items;
+		if (!items) return;
+		const imageItems = [...items].filter((item) => isImageClipboardItem(item));
+		if (imageItems.length === 0) return;
+		event.preventDefault();
+		for (const item of imageItems) {
+			const file = item.getAsFile();
+			if (!file) continue;
+			const reader = new FileReader();
+			reader.onload = () => {
+				const parsed = typeof reader.result === "string" ? parseImageDataUrl(reader.result) : null;
+				if (parsed) setImages((current) => [...current, parsed]);
+			};
+			reader.readAsDataURL(file);
+		}
+	};
+
+	const removeImage = (index: number) => setImages((current) => current.filter((_, i) => i !== index));
 
 	const pick = (name: string) => setText(`/${name} `);
 
@@ -978,6 +1044,30 @@ export function Composer(props: {
 					</For>
 				</div>
 			</Show>
+			<Show when={images().length > 0}>
+				<div class="dreb-attachments dreb-image-attachments">
+					<For each={images()}>
+						{(image, index) => (
+							<span class="dreb-attachment dreb-image-attachment" title="Pasted image">
+								<img
+									class="dreb-image-thumb"
+									src={`data:${image.mimeType};base64,${image.data}`}
+									alt="Pasted attachment"
+								/>
+								<button
+									type="button"
+									class="dreb-attachment-remove"
+									title="Remove image"
+									aria-label="Remove image"
+									onClick={() => removeImage(index())}
+								>
+									×
+								</button>
+							</span>
+						)}
+					</For>
+				</div>
+			</Show>
 			<div class="dreb-composer-row">
 				<textarea
 					ref={inputEl}
@@ -990,6 +1080,7 @@ export function Composer(props: {
 					onKeyDown={onKeyDown}
 					onKeyUp={(e) => syncCaret(e.currentTarget)}
 					onClick={(e) => syncCaret(e.currentTarget)}
+					onPaste={onPaste}
 				/>
 				<Show
 					when={props.streaming}

@@ -396,6 +396,23 @@ body {
 	align-items: center;
 	gap: 6px;
 }
+/* One question block inside a multi-question ask wizard. */
+.dreb-ask-question {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding-bottom: 8px;
+}
+.dreb-ask-question + .dreb-ask-question {
+	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+	padding-top: 10px;
+}
+.dreb-ask-question-title {
+	font-weight: 600;
+}
+.dreb-ask-question-body {
+	word-break: break-word;
+}
 
 /* Composer ---------------------------------------------------------------- */
 .dreb-composer {
@@ -487,6 +504,19 @@ body {
 }
 .dreb-attachment-remove:hover {
 	color: var(--vscode-foreground);
+}
+
+/* Pasted-image chips: a small thumbnail preview with a remove button, reusing
+   the attachment-chip frame but sized for imagery. */
+.dreb-image-attachment {
+	padding: 2px 4px 2px 2px;
+}
+.dreb-image-thumb {
+	display: block;
+	width: 40px;
+	height: 40px;
+	object-fit: cover;
+	border-radius: 3px;
 }
 
 .dreb-input {

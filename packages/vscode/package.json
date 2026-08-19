@@ -57,6 +57,11 @@
 				"category": "dreb"
 			},
 			{
+				"command": "dreb.tagSelectionToNewChat",
+				"title": "Add Selection to New Chat",
+				"category": "dreb"
+			},
+			{
 				"command": "dreb.review.openDiff",
 				"title": "Open Diff",
 				"category": "dreb",
@@ -90,6 +95,12 @@
 				"command": "dreb.review.rejectHunkAtCursor",
 				"title": "Reject Hunk at Cursor",
 				"category": "dreb"
+			}
+		],
+		"submenus": [
+			{
+				"id": "dreb.editorContext",
+				"label": "dreb"
 			}
 		],
 		"menus": {
@@ -136,14 +147,20 @@
 			],
 			"editor/context": [
 				{
+					"submenu": "dreb.editorContext",
+					"group": "dreb@1"
+				}
+			],
+			"dreb.editorContext": [
+				{
 					"command": "dreb.tagSelectionToChat",
 					"when": "editorHasSelection",
-					"group": "dreb@1"
+					"group": "selection@1"
 				},
 				{
-					"command": "dreb.review.rejectHunkAtCursor",
-					"when": "editorTextFocus",
-					"group": "dreb@2"
+					"command": "dreb.tagSelectionToNewChat",
+					"when": "editorHasSelection",
+					"group": "selection@2"
 				}
 			]
 		},

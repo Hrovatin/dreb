@@ -58,6 +58,21 @@ describe("projection", () => {
 		});
 	});
 
+	it("separates narration text blocks split by a tool call, but not within one block", () => {
+		const state = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Let me look. " } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "First the config." } },
+			{ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: { path: "a.ts" } },
+			{ type: "tool_execution_end", toolCallId: "t1", result: "body", isError: false },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Now the answer." } },
+			{ type: "agent_end" },
+		]);
+		// Deltas within one block stay joined; a new block after the tool gets a blank line.
+		expect(onlyResponse(state).answer).toBe("Let me look. First the config.\n\nNow the answer.");
+	});
+
 	it("marks the run streaming, then collapses activity at agent_end", () => {
 		const state = createTranscriptState();
 		applyEvent(state, { type: "agent_start" });
@@ -89,30 +104,51 @@ describe("projection", () => {
 		expect(onlyResponse(nonStreaming).answer).toBe("whole answer");
 	});
 
-	it("tracks and clears blocking extension-UI requests", () => {
+	it("maps an ask request's questions[] into a structured multi-question wizard", () => {
 		const state = createTranscriptState();
 		applyEvent(state, {
 			type: "extension_ui_request",
 			id: "u1",
 			method: "ask",
-			title: "Pick",
-			question: "Which?",
-			options: ["a", "b"],
-			allowFreeText: false,
-			multiSelect: true,
+			title: "Choices",
+			questions: [
+				{ question: "Which?", title: "Pick one", options: ["a", "b"], allowFreeText: false, multiSelect: true },
+				{ question: "Free thoughts?", allowFreeText: true, multiline: true },
+			],
+			expiresAt: 123456,
 		});
 		expect(state.uiRequests).toHaveLength(1);
 		expect(state.uiRequests[0]).toMatchObject({
 			id: "u1",
 			method: "ask",
-			question: "Which?",
-			options: ["a", "b"],
-			allowFreeText: false,
-			multiSelect: true,
+			title: "Choices",
+			expiresAt: 123456,
+			questions: [
+				{ question: "Which?", title: "Pick one", options: ["a", "b"], allowFreeText: false, multiSelect: true },
+				{ question: "Free thoughts?", allowFreeText: true, multiline: true },
+			],
 		});
 
 		applyEvent(state, { type: "extension_ui_response_handled", id: "u1" });
 		expect(state.uiRequests).toHaveLength(0);
+	});
+
+	it("falls back to a single question for a legacy flat ask event shape", () => {
+		const state = createTranscriptState();
+		applyEvent(state, {
+			type: "extension_ui_request",
+			id: "u2",
+			method: "ask",
+			title: "Legacy",
+			question: "Old shape?",
+			options: ["x", "y"],
+			allowFreeText: false,
+		});
+		expect(state.uiRequests[0]).toMatchObject({
+			id: "u2",
+			method: "ask",
+			questions: [{ question: "Old shape?", options: ["x", "y"], allowFreeText: false }],
+		});
 	});
 
 	it("clears pending UI requests when a new run starts", () => {

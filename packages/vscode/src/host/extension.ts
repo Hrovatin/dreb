@@ -30,7 +30,7 @@ import {
 	SleepController,
 } from "./session-view-lifecycle.js";
 import { SessionsViewProvider } from "./sessions-view.js";
-import { tagSelectionToChat } from "./tag-selection.js";
+import { type TagSelectionDeps, tagSelectionToChat } from "./tag-selection.js";
 import { createVscodeHostUi } from "./vscode-host-ui.js";
 import { createVscodeReviewUi } from "./vscode-review-ui.js";
 import { createVscodeSourceLinkUi } from "./vscode-source-link-ui.js";
@@ -127,30 +127,10 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand("dreb.sessions.newSession", () => void openNewSession(context)),
 		vscode.commands.registerCommand("dreb.sessions.refresh", () => sessionsView?.refresh()),
 		vscode.commands.registerCommand("dreb.tagSelectionToChat", () =>
-			tagSelectionToChat({
-				captureSelection: () => {
-					const editor = vscode.window.activeTextEditor;
-					if (!editor || editor.selection.isEmpty) return undefined;
-					const { selection, document } = editor;
-					return {
-						fsPath: document.uri.fsPath,
-						startLine: selection.start.line + 1,
-						endLine: selection.end.line + 1,
-						language: document.languageId,
-						text: document.getText(selection),
-					};
-				},
-				openTarget: async () => {
-					const session = await openActiveOrNew(context);
-					if (!session) return undefined;
-					return {
-						cwd: session.controller.cwd,
-						tagContext: (ctx) => session.controller.tagContext(ctx),
-						reveal: () => revealSession(session),
-					};
-				},
-				onNoSelection: () => vscode.window.showInformationMessage("dreb: select some code to add to the chat."),
-			}),
+			tagSelectionToChat(selectionTagDeps(() => openActiveOrNew(context))),
+		),
+		vscode.commands.registerCommand("dreb.tagSelectionToNewChat", () =>
+			tagSelectionToChat(selectionTagDeps(() => openNewSession(context))),
 		),
 		vscode.commands.registerCommand("dreb.review.openDiff", (arg?: unknown) => {
 			const resolved = resolveReviewTarget(arg);
@@ -253,6 +233,37 @@ async function openActiveOrNew(context: vscode.ExtensionContext): Promise<ChatSe
 		return active;
 	}
 	return openNewSession(context);
+}
+
+/** Build the injected deps for the "add selection to chat" commands. The `open`
+ * callback chooses the target session — active-or-new (`dreb.tagSelectionToChat`)
+ * vs. always a fresh one (`dreb.tagSelectionToNewChat`) — while capture, target
+ * shaping, and the empty-selection notice are identical for both entries. */
+function selectionTagDeps(open: () => Promise<ChatSession | undefined>): TagSelectionDeps {
+	return {
+		captureSelection: () => {
+			const editor = vscode.window.activeTextEditor;
+			if (!editor || editor.selection.isEmpty) return undefined;
+			const { selection, document } = editor;
+			return {
+				fsPath: document.uri.fsPath,
+				startLine: selection.start.line + 1,
+				endLine: selection.end.line + 1,
+				language: document.languageId,
+				text: document.getText(selection),
+			};
+		},
+		openTarget: async () => {
+			const session = await open();
+			if (!session) return undefined;
+			return {
+				cwd: session.controller.cwd,
+				tagContext: (ctx) => session.controller.tagContext(ctx),
+				reveal: () => revealSession(session),
+			};
+		},
+		onNoSelection: () => vscode.window.showInformationMessage("dreb: select some code to add to the chat."),
+	};
 }
 
 /** Build a fresh chat session: controller + native UIs, then attach a webview
