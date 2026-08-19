@@ -85,6 +85,13 @@ const sendButton = (host: HTMLElement) =>
 		(b) => !b.classList.contains("stop"),
 	) as HTMLButtonElement;
 
+/** Simulate the user typing a draft into the composer (drives the onInput handler). */
+function typeDraft(host: HTMLElement, value: string) {
+	const ta = composer(host);
+	ta.value = value;
+	ta.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 describe("App — suggest_next wiring", () => {
 	it("renders the bar from a snapshot and accepting fills the empty composer (no clobber mode)", () => {
 		const host = mountWithSuggestion({ command: "/skill:mach6-push" });
@@ -95,6 +102,21 @@ describe("App — suggest_next wiring", () => {
 
 		// Accept must *fill* the composer (fill-if-empty), not submit.
 		expect(composer(host).value).toBe("/skill:mach6-push");
+		expect(postSpy).not.toHaveBeenCalledWith(expect.objectContaining({ type: "submit" }));
+	});
+
+	it("accepting into a non-empty composer preserves the user's draft (fill-if-empty, never clobber)", () => {
+		const host = mountWithSuggestion({ command: "/skill:mach6-push" });
+		// User has already typed a draft before accepting the suggestion.
+		typeDraft(host, "half-written message");
+		expect(composer(host).value).toBe("half-written message");
+
+		pill(host)?.click();
+
+		// The whole point of fill-if-empty: accepting must NOT overwrite the draft.
+		// With a non-empty composer this diverges from a `replace` mode, so a future
+		// regression that switched to `replace` would fail here.
+		expect(composer(host).value).toBe("half-written message");
 		expect(postSpy).not.toHaveBeenCalledWith(expect.objectContaining({ type: "submit" }));
 	});
 
