@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { SessionGroupDto, SessionListDto, SessionSummaryDto } from "../../shared/session-list.js";
 import { onHostMessage, postToHost } from "./vscode-api.js";
@@ -231,19 +231,22 @@ function SessionRow(props: { session: SessionSummaryDto; groupKind: SessionGroup
 
 function StatusIndicator(props: { state: SessionSummaryDto["state"] }) {
 	return (
-		<Show
-			when={props.state === "running"}
-			fallback={
-				<Show
-					when={props.state === "needs-input"}
-					fallback={<span class="dreb-state-idle" role="img" title="Idle" aria-label="Idle" />}
-				>
-					<span class="dreb-state-needs-input" role="img" title="Needs input" aria-label="Needs input" />
-				</Show>
-			}
-		>
-			<span class="dreb-state-running" role="img" title="Running" aria-label="Running" />
-		</Show>
+		<Switch fallback={<span class="dreb-state-idle" role="img" title="Idle" aria-label="Idle" />}>
+			<Match when={props.state === "running"}>
+				<span class="dreb-state-running" role="img" title="Running" aria-label="Running" />
+			</Match>
+			<Match when={props.state === "needs-input"}>
+				<span class="dreb-state-needs-input" role="img" title="Needs input" aria-label="Needs input" />
+			</Match>
+			<Match when={props.state === "background"}>
+				<span
+					class="dreb-state-background"
+					role="img"
+					title="Working in background"
+					aria-label="Working in background"
+				/>
+			</Match>
+		</Switch>
 	);
 }
 

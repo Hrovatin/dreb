@@ -212,4 +212,40 @@ describe("SidebarApp stop action (Phase 7)", () => {
 		});
 		expect(container.querySelector('[aria-label="Stop session"]')).toBeNull();
 	});
+
+	it("renders a distinct 'Working in background' indicator, separate from idle/running/needs-input", () => {
+		mountSidebar();
+		emit({
+			currentCwd: "/proj",
+			groups: [
+				group("current", "/proj", "This workspace", [
+					{ ...row("/proj/a.jsonl", "Working", "background"), live: true },
+					{ ...row("/proj/b.jsonl", "Idle", "idle"), live: false },
+				]),
+			],
+		});
+		// The background row gets its own indicator class + accessible label…
+		const bg = container.querySelector(".dreb-state-background");
+		expect(bg).not.toBeNull();
+		expect(bg?.getAttribute("aria-label")).toBe("Working in background");
+		// …and it is NOT confused with the idle/running/needs-input indicators.
+		expect(container.querySelectorAll(".dreb-state-background").length).toBe(1);
+		expect(container.querySelector(".dreb-state-running")).toBeNull();
+		expect(container.querySelector(".dreb-state-needs-input")).toBeNull();
+		// The idle row still renders its own hollow indicator.
+		expect(container.querySelector(".dreb-state-idle")).not.toBeNull();
+	});
+
+	it("shows Stop on a live background row (background work can be aborted)", () => {
+		mountSidebar();
+		emit({
+			currentCwd: "/proj",
+			groups: [
+				group("current", "/proj", "This workspace", [
+					{ ...row("/proj/a.jsonl", "Working", "background"), live: true },
+				]),
+			],
+		});
+		expect(container.querySelector('[aria-label="Stop session"]')).not.toBeNull();
+	});
 });
