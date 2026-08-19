@@ -56,14 +56,14 @@ export function SidebarApp() {
 				}
 			>
 				<div class="dreb-side-list">
-					<For each={list.groups}>{(group) => <GroupView group={group} />}</For>
+					<For each={list.groups}>{(group) => <GroupView group={group} activeKey={list.activeKey} />}</For>
 				</div>
 			</Show>
 		</div>
 	);
 }
 
-function GroupView(props: { group: SessionGroupDto }) {
+function GroupView(props: { group: SessionGroupDto; activeKey?: string }) {
 	const group = props.group;
 	return (
 		<details class="dreb-side-group" open={group.kind === "current"}>
@@ -72,13 +72,17 @@ function GroupView(props: { group: SessionGroupDto }) {
 				<span class="dreb-side-group-count">{group.sessions.length}</span>
 			</summary>
 			<div class="dreb-side-group-body">
-				<For each={group.sessions}>{(session) => <SessionRow session={session} groupKind={group.kind} />}</For>
+				<For each={group.sessions}>
+					{(session) => (
+						<SessionRow session={session} groupKind={group.kind} active={props.activeKey === session.key} />
+					)}
+				</For>
 			</div>
 		</details>
 	);
 }
 
-function SessionRow(props: { session: SessionSummaryDto; groupKind: SessionGroupDto["kind"] }) {
+function SessionRow(props: { session: SessionSummaryDto; groupKind: SessionGroupDto["kind"]; active?: boolean }) {
 	const [editing, setEditing] = createSignal(false);
 	const [draft, setDraft] = createSignal("");
 
@@ -123,7 +127,10 @@ function SessionRow(props: { session: SessionSummaryDto; groupKind: SessionGroup
 	};
 
 	return (
-		<div class="dreb-side-row" classList={{ "dreb-side-row-live": session().live }}>
+		<div
+			class="dreb-side-row"
+			classList={{ "dreb-side-row-live": session().live, "dreb-side-row-active": props.active }}
+		>
 			<Show
 				when={editing()}
 				fallback={

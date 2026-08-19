@@ -213,3 +213,47 @@ describe("SidebarApp stop action (Phase 7)", () => {
 		expect(container.querySelector('[aria-label="Stop session"]')).toBeNull();
 	});
 });
+
+describe("SidebarApp active-session highlight (issue 76)", () => {
+	const twoRows = (activeKey?: string): SessionListDto => ({
+		currentCwd: "/proj",
+		groups: [
+			group("current", "/proj", "This workspace", [row("/proj/a.jsonl", "Alpha"), row("/proj/b.jsonl", "Beta")]),
+		],
+		activeKey,
+	});
+
+	const activeKeys = () =>
+		[...container.querySelectorAll(".dreb-side-row-active")].map((el) =>
+			el.querySelector(".dreb-side-row-title")?.textContent?.trim(),
+		);
+
+	it("marks only the row whose key matches activeKey", () => {
+		mountSidebar();
+		emit(twoRows("/proj/b.jsonl"));
+		expect(container.querySelectorAll(".dreb-side-row-active").length).toBe(1);
+		expect(activeKeys()).toEqual(["Beta"]);
+	});
+
+	it("marks no row when activeKey is undefined", () => {
+		mountSidebar();
+		emit(twoRows(undefined));
+		expect(container.querySelectorAll(".dreb-side-row-active").length).toBe(0);
+	});
+
+	it("moves the highlight when the active session changes", () => {
+		mountSidebar();
+		emit(twoRows("/proj/a.jsonl"));
+		expect(activeKeys()).toEqual(["Alpha"]);
+		emit(twoRows("/proj/b.jsonl"));
+		expect(activeKeys()).toEqual(["Beta"]);
+	});
+
+	it("clears the highlight when focus leaves all dreb chat tabs", () => {
+		mountSidebar();
+		emit(twoRows("/proj/a.jsonl"));
+		expect(container.querySelectorAll(".dreb-side-row-active").length).toBe(1);
+		emit(twoRows(undefined));
+		expect(container.querySelectorAll(".dreb-side-row-active").length).toBe(0);
+	});
+});

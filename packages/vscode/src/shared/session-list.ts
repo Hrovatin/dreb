@@ -72,6 +72,11 @@ export interface SessionGroupDto {
 export interface SessionListDto {
 	currentCwd: string;
 	groups: SessionGroupDto[];
+	/** Row `key` of the session whose chat tab is currently focused, so the
+	 * sidebar can highlight "the session you're looking at". `undefined` when no
+	 * dreb chat tab is focused. Never affects row ordering (see the module doc's
+	 * determinism note). */
+	activeKey?: string;
 }
 
 /** A persisted session discovered on disk. */
@@ -101,6 +106,9 @@ export interface BuildSessionListInput {
 	disk: DiskSessionInput[];
 	live: LiveSessionInput[];
 	flags: (path: string | undefined) => SessionFlags;
+	/** Row `key` of the currently-focused chat tab, passed straight through to
+	 * {@link SessionListDto.activeKey}. Does not influence ordering or grouping. */
+	activeKey?: string;
 }
 
 /** Last path segment of a slash/back-slash separated path (falls back to the
@@ -220,5 +228,5 @@ export function buildSessionList(input: BuildSessionListInput): SessionListDto {
 		groups.push({ key: "archived:", kind: "archived", cwd: "", label: "Archived", sessions: sortRows(archived) });
 	}
 
-	return { currentCwd, groups };
+	return { currentCwd, groups, activeKey: input.activeKey };
 }

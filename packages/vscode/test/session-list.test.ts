@@ -243,4 +243,41 @@ describe("buildSessionList", () => {
 		});
 		expect(rebuilt.groups.map((g) => g.key)).toEqual(keys);
 	});
+
+	it("(g) passes activeKey straight through to the DTO", () => {
+		const list = buildSessionList({
+			currentCwd: "/proj",
+			disk: [disk({ path: "/proj/a.jsonl", name: "Alpha" })],
+			live: [],
+			flags: noFlags,
+			activeKey: "/proj/a.jsonl",
+		});
+		expect(list.activeKey).toBe("/proj/a.jsonl");
+	});
+
+	it("(h) leaves activeKey undefined when not supplied", () => {
+		const list = buildSessionList({
+			currentCwd: "/proj",
+			disk: [disk({ path: "/proj/a.jsonl", name: "Alpha" })],
+			live: [],
+			flags: noFlags,
+		});
+		expect(list.activeKey).toBeUndefined();
+	});
+
+	it("(i) activeKey never affects row ordering or grouping", () => {
+		const base = {
+			currentCwd: "/proj",
+			disk: [
+				disk({ path: "/proj/a.jsonl", name: "A", modified: "2026-01-02T00:00:00.000Z" }),
+				disk({ path: "/proj/b.jsonl", name: "B", modified: "2026-01-01T00:00:00.000Z" }),
+			],
+			live: [],
+			flags: noFlags,
+		};
+		const without = buildSessionList(base);
+		const withActive = buildSessionList({ ...base, activeKey: "/proj/b.jsonl" });
+		const order = (l: ReturnType<typeof buildSessionList>) => l.groups.flatMap((g) => g.sessions.map((s) => s.key));
+		expect(order(withActive)).toEqual(order(without));
+	});
 });

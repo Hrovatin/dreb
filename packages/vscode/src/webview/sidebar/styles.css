@@ -137,6 +137,16 @@ body {
 .dreb-side-row-live {
 	border-left-color: var(--vscode-charts-green, #2a2);
 }
+/* The session whose chat tab is currently focused — mirrors the editor tab so
+ * the user can map "the tab I'm on" to its sidebar row. */
+.dreb-side-row-active {
+	background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.24));
+	color: var(--vscode-list-activeSelectionForeground, inherit);
+}
+.dreb-side-row-active:hover,
+.dreb-side-row-active:focus-within {
+	background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.24));
+}
 
 .dreb-side-row-main {
 	flex: 1;

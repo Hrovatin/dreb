@@ -161,4 +161,16 @@ describe("SessionsViewModel", () => {
 		expect(posted.some((m) => m.type === "list")).toBe(false);
 		expect(logs.some((l) => l.includes("disk boom"))).toBe(true);
 	});
+
+	it("threads activeKey from the dep into the posted list", async () => {
+		let active: string | undefined = "/p/a.jsonl";
+		const { model, posted } = makeModel({ activeKey: () => active });
+		await model.handle({ type: "ready" });
+		expect(lastList(posted).activeKey).toBe("/p/a.jsonl");
+
+		// Reflects a change when focus moves to a different (or no) session.
+		active = undefined;
+		await model.handle({ type: "refresh" });
+		expect(lastList(posted).activeKey).toBeUndefined();
+	});
 });

@@ -332,6 +332,10 @@ export class SessionController {
 	private readonly options: SessionControllerOptions;
 	private client: RpcClientLike | undefined;
 	private sessionFile: string | undefined;
+	/** Explicit session name set via rename / `/name`, cached locally so the
+	 * editor tab title reflects it immediately (the RPC state read does not echo
+	 * the name back). Falls back to the first user message when unset. */
+	private sessionName: string | undefined;
 	private commands: SlashCommandDto[] = [...BUILTIN_COMMANDS];
 	private status: HostStatus;
 	private unsubEvent: (() => void) | undefined;
@@ -396,8 +400,25 @@ export class SessionController {
 		return deriveSessionStatus(this.state);
 	}
 
+	/** The session's display title for the editor tab: an explicit name set via
+	 * rename / `/name`, else the first user message, else `undefined` for a
+	 * brand-new session with no messages yet. Mirrors the sidebar's
+	 * `name || firstMessage` title resolution so tab and sidebar labels agree. */
+	get title(): string | undefined {
+		const name = this.sessionName?.trim();
+		if (name) return name;
+		for (const item of this.state.items) {
+			if (item.kind === "user") {
+				const text = item.text.trim();
+				if (text) return text;
+			}
+		}
+		return undefined;
+	}
+
 	/** Rename the live session (persisted via the set_session_name RPC). */
 	async rename(name: string): Promise<void> {
+		this.sessionName = name.trim();
 		await this.client?.setSessionName(name);
 	}
 
@@ -716,6 +737,7 @@ export class SessionController {
 			case "name": {
 				const name = arg ?? (await this.ui.inputBox({ prompt: "Session name", placeholder: "My session" }));
 				if (!name || name.trim().length === 0) return;
+				this.sessionName = name.trim();
 				await client.setSessionName(name.trim());
 				await this.refreshStatus(false);
 				this.emitNotice(`Renamed session to "${name.trim()}".`);
