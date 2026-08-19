@@ -516,8 +516,8 @@ export function applyEvent(state: TranscriptState, event: any): void {
 			// never persisted, so it's gone and the session is now idle. `canRetry`
 			// gates the one-click Retry (resends the retained last prompt).
 			const message = String(event.message ?? "");
-			const cause = typeof event.cause === "string" && event.cause.trim() ? event.cause.trim() : undefined;
-			const text = cause ? `${message} Cause: ${cause}.` : message;
+			const trimmedCause = typeof event.cause === "string" ? event.cause.trim() : "";
+			const text = trimmedCause ? `${message} Cause: ${trimmedCause}.` : message;
 			state.items.push({ kind: "recovery", text, canRetry: event.canRetry === true });
 			break;
 		}

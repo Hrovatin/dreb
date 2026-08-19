@@ -2555,6 +2555,8 @@ describe("SessionController — auto-restart on crash", () => {
 		const { controller, clients } = await setup();
 		const recoveries = collectRecoveries(controller);
 
+		// A reply is mid-stream when the child dies.
+		clients[0].emit({ type: "agent_start" });
 		clients[0].emitExit({
 			code: 1,
 			signal: null,
@@ -2566,7 +2568,7 @@ describe("SessionController — auto-restart on crash", () => {
 		expect(recoveries()).toHaveLength(1);
 		const r = recoveries()[0];
 		expect(r.message).toMatch(/recovered/i);
-		expect(r.message).toMatch(/not saved|idle/i);
+		expect(r.message).toMatch(/not saved/i); // interrupted mid-stream
 		expect(r.cause).toContain("Uncaught exception (fatal");
 	});
 
@@ -2582,23 +2584,49 @@ describe("SessionController — auto-restart on crash", () => {
 		expect(recoveries()[0].message).toMatch(/recovered/i);
 	});
 
-	it("offers Retry only when a prompt was retained before the crash", async () => {
+	it("offers Retry and a 'not saved' notice only when a reply was mid-stream at crash time", async () => {
 		const { controller, clients } = await setup();
 		const recoveries = collectRecoveries(controller);
 
-		// No prompt sent yet → canRetry false.
+		// Prompt sent and a reply streaming when the child dies → interrupted:
+		// 'not saved' wording + Retry (the retained prompt was never answered).
+		await controller.submit("hello");
+		clients[0].emit({ type: "agent_start" });
 		clients[0].emitExit({ code: 1, signal: null });
 		await vi.advanceTimersByTimeAsync(600);
-		expect(recoveries()[0].canRetry).toBe(false);
+		expect(recoveries()).toHaveLength(1);
+		expect(recoveries()[0].canRetry).toBe(true);
+		expect(recoveries()[0].message).toMatch(/not saved/i);
+	});
 
-		// Send a prompt on the recovered child (retained as the retry target), reset
-		// the budget with a stable run, then crash again → canRetry true.
+	it("does not claim loss or offer Retry when the crash is idle after a completed turn", async () => {
+		const { controller, clients } = await setup();
+		const recoveries = collectRecoveries(controller);
+
+		// A turn completes and is persisted, then the child dies while idle. The
+		// last reply is in the rebuilt transcript, so the notice must not claim it
+		// was lost, and Retry (which would resend an already-answered prompt) is
+		// suppressed.
 		await controller.submit("hello");
-		clients[1].emit({ type: "agent_end", messages: [] });
-		clients[1].emitExit({ code: 1, signal: null });
+		clients[0].emit({ type: "agent_start" });
+		clients[0].emit({ type: "agent_end", messages: [] });
+		clients[0].emitExit({ code: 1, signal: null });
 		await vi.advanceTimersByTimeAsync(600);
-		expect(recoveries()).toHaveLength(2);
-		expect(recoveries()[1].canRetry).toBe(true);
+		expect(recoveries()).toHaveLength(1);
+		expect(recoveries()[0].canRetry).toBe(false);
+		expect(recoveries()[0].message).not.toMatch(/not saved/i);
+		expect(recoveries()[0].message).toMatch(/recovered/i);
+	});
+
+	it("suppresses Retry when nothing was ever submitted before the crash", async () => {
+		const { controller, clients } = await setup();
+		const recoveries = collectRecoveries(controller);
+
+		clients[0].emit({ type: "agent_start" });
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		// Mid-stream (interrupted) but no retained prompt → Retry absent.
+		expect(recoveries()[0].canRetry).toBe(false);
 	});
 
 	it("does not emit a recovery notice on the initial clean start", async () => {

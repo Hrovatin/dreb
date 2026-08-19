@@ -288,11 +288,15 @@ const RESTART_BACKOFF_MS = 500;
  * a *later* isolated crash still gets a fresh recovery budget. */
 const RESTART_STABLE_MS = 10_000;
 const RECOVERING_NOTICE = "dreb stopped unexpectedly — recovering…";
-/** Shown once after a successful auto-recovery from an unexpected crash: the
- * transcript was rebuilt from disk but the in-flight reply was not saved, so the
- * session is now idle. */
-const RECOVERED_MESSAGE =
+/** Shown once after a successful auto-recovery when a reply was actively
+ * streaming at crash time: that in-flight reply was never persisted, so it is
+ * lost and the session is now idle. */
+const RECOVERED_MESSAGE_INTERRUPTED =
 	"Session recovered after an unexpected exit. The last reply was interrupted and not saved — the session is idle.";
+/** Shown once after a successful auto-recovery when no turn was in flight at
+ * crash time (the previous turn had already completed and was persisted, so it is
+ * present in the rebuilt transcript): nothing was lost. */
+const RECOVERED_MESSAGE_IDLE = "Session recovered after an unexpected exit. The session is idle.";
 
 function errorText(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
@@ -1455,6 +1459,11 @@ export class SessionController {
 	private handleExit(info: { code?: number | null; signal?: string | null; error?: Error; stderr?: string }): void {
 		if (this.disposed) return;
 		const message = formatExit(info);
+		// Capture whether a reply was actively streaming when the child died (before
+		// teardown), so the recovery notice can distinguish a genuinely-interrupted
+		// reply (lost) from an idle crash after a completed, persisted turn (nothing
+		// lost — and no misleading Retry of an already-answered prompt).
+		const wasStreaming = this.state.streaming === true;
 		// Surface the child's captured stderr (deliverable B) so a late crash's
 		// trigger is recorded for diagnosis instead of being discarded.
 		const stderr = info.stderr?.trim();
@@ -1466,7 +1475,7 @@ export class SessionController {
 		// Automated in-place recovery (deliverable C): auto-restart from the
 		// persisted transcript, bounded by a crash-loop budget. Carry a concise,
 		// user-facing cause so the post-recovery notice can explain what happened.
-		this.beginRecovery(message, extractCrashCause(info));
+		this.beginRecovery(message, extractCrashCause(info), wasStreaming);
 	}
 
 	/** Tear down the current client's subscriptions and drop the reference. The
@@ -1485,8 +1494,9 @@ export class SessionController {
 	/** Decide whether to auto-restart the crashed child (bounded) or give up with
 	 * a persistent banner. Called on an unexpected exit and on a failed restart.
 	 * `cause` is a concise, user-facing reason (from the child's exit info) carried
-	 * through to the post-recovery notice. */
-	private beginRecovery(reason: string, cause?: string): void {
+	 * through to the post-recovery notice. `interrupted` records whether a reply was
+	 * mid-stream at crash time, so the notice can be worded accurately. */
+	private beginRecovery(reason: string, cause?: string, interrupted = false): void {
 		if (this.disposed) return;
 		if (!this.withinRestartBudget()) {
 			this.giveUpRecovery(reason);
@@ -1501,7 +1511,7 @@ export class SessionController {
 		this.clearRestartTimer();
 		this.restartTimer = setTimeout(() => {
 			this.restartTimer = undefined;
-			void this.restart(reason, cause);
+			void this.restart(reason, cause, interrupted);
 		}, RESTART_BACKOFF_MS);
 		this.restartTimer.unref?.();
 	}
@@ -1509,7 +1519,7 @@ export class SessionController {
 	/** Auto-restart the RPC child in place, resuming from the live session file so
 	 * the persisted transcript is reloaded losslessly. All controller-lifetime
 	 * listeners and the connected webview bridge stay attached. */
-	private async restart(reason: string, cause?: string): Promise<void> {
+	private async restart(reason: string, cause?: string, interrupted = false): Promise<void> {
 		if (this.disposed) return;
 		// Resume from the live session file (falls back to the original resume
 		// path for a session that never wrote an entry before crashing).
@@ -1519,31 +1529,33 @@ export class SessionController {
 		} catch {
 			// start() already surfaced its own failure status; route the failed
 			// attempt back through the bounded policy (retry or give up).
-			this.beginRecovery(reason, cause);
+			this.beginRecovery(reason, cause, interrupted);
 			return;
 		}
-		// Connected again. Tell the user the session was rebuilt from disk but the
-		// in-flight reply was lost and it's now idle (with the cause when known),
-		// and offer a one-click Retry. Emitted here — after start()'s transcript
-		// rebuild (which clears items) — so the notice appends below the restored
-		// conversation. This is strictly the crash path; a clean initial open/reopen
-		// never goes through restart(), so those are unaffected.
-		this.emitRecovery(cause);
+		// Connected again. Tell the user the session was rebuilt from disk (with the
+		// cause when known). Emitted here — after start()'s transcript rebuild (which
+		// clears items) — so the notice appends below the restored conversation. This
+		// is strictly the crash path; a clean initial open/reopen never goes through
+		// restart(), so those are unaffected.
+		this.emitRecovery(cause, interrupted);
 		// Arm a stable-run reset so a child that survives long enough clears the
 		// crash budget and a *later* isolated crash still gets a fresh recovery
 		// allowance.
 		this.armStableRunReset();
 	}
 
-	/** Emit the persistent post-recovery notice. Includes the concise crash cause
-	 * when known and offers Retry only when a last prompt was retained (survives
-	 * the in-place restart), reusing the existing `retry()` path. */
-	private emitRecovery(cause?: string): void {
+	/** Emit the persistent post-recovery notice. When a reply was mid-stream at
+	 * crash time (`interrupted`), it says the last reply was lost and offers Retry
+	 * (only when a last prompt was retained, reusing the existing `retry()` path).
+	 * When the crash was idle (a completed turn already persisted), it says only
+	 * that the session recovered — no false "not saved" claim and no Retry that
+	 * would resend an already-answered prompt. */
+	private emitRecovery(cause?: string, interrupted = false): void {
 		this.handleEvent({
 			type: "host_recovery",
-			message: RECOVERED_MESSAGE,
+			message: interrupted ? RECOVERED_MESSAGE_INTERRUPTED : RECOVERED_MESSAGE_IDLE,
 			cause,
-			canRetry: this.lastPrompt != null,
+			canRetry: interrupted && this.lastPrompt != null,
 		});
 	}
 
