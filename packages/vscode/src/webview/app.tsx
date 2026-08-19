@@ -10,6 +10,7 @@ import {
 	type Checkpoint,
 	createTranscriptState,
 	type ResponseGroup,
+	retryableResponseId,
 	type ToolActivity,
 	type TranscriptState,
 	type UiRequest,
@@ -265,7 +266,14 @@ export function App() {
 								<pre class="dreb-system">{item.text}</pre>
 							) : (
 								<>
-									<ResponseView group={item} />
+									<ResponseView
+										group={item}
+										onRetry={
+											retryableResponseId(state) === item.id
+												? () => postToHost({ type: "retry" })
+												: undefined
+										}
+									/>
 									<Show when={checkpointByResponse().get(item.id)}>
 										{(checkpoint) => <CheckpointBar checkpoint={checkpoint()} />}
 									</Show>
@@ -334,7 +342,7 @@ export function App() {
 	);
 }
 
-export function ResponseView(props: { group: ResponseGroup }) {
+export function ResponseView(props: { group: ResponseGroup; onRetry?: () => void }) {
 	return (
 		<div class="dreb-response">
 			<Show when={props.group.activity.length > 0}>
@@ -353,7 +361,19 @@ export function ResponseView(props: { group: ResponseGroup }) {
 				/>
 			</Show>
 			<Show when={props.group.error}>
-				<div class="dreb-banner error">{props.group.error}</div>
+				<div class="dreb-banner error">
+					<span class="dreb-banner-text">{props.group.error}</span>
+					<Show when={props.onRetry}>
+						<button
+							type="button"
+							class="dreb-retry-btn"
+							title="Resend the last message"
+							onClick={() => props.onRetry?.()}
+						>
+							↻ Retry
+						</button>
+					</Show>
+				</div>
 			</Show>
 		</div>
 	);

@@ -252,6 +252,9 @@ export type HostToWebview =
 export type WebviewToHost =
 	| { type: "ready" }
 	| { type: "submit"; text: string; attachments?: TaggedContextDto[]; images?: ImageAttachmentDto[] }
+	/** Resend the last submitted message (with its attached context) after a turn
+	 * failed / the model didn't respond — no retyping. */
+	| { type: "retry" }
 	| { type: "abort" }
 	| { type: "refresh-commands" }
 	| { type: "ui-response"; response: UiResponse }

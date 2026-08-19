@@ -86,6 +86,12 @@ You don't have to wait for the agent to finish before typing your next instructi
 
 Pressing **Stop** aborts the current turn. Because an abort leaves any still-queued messages undelivered, the extension **clears the queue and restores that text back into the composer** — you decide whether to resend it, rather than losing it. If you'd already started typing a new message when you hit Stop, the restored text is **prepended before your draft** (queued messages first, then your in-progress text) so neither is lost — never overwriting what you were typing. The pending queue is host-authoritative (refreshed from the RPC child on run transitions and after each queued submit) so the chips survive a webview reload.
 
+## Retry a failed turn
+
+When a turn ends in a **provider error** (unavailable, rate-limited, or another transient failure), its error banner shows a **↻ Retry** button so you can resend the last message **without retyping** — the original text *and* its tagged context and pasted images are replayed verbatim. Retry re-drives the retained payload through the normal submit path, so it inherits every guard (a disconnected child surfaces a notice; a still-running turn is steered) and reproduces the identical folded prompt.
+
+The control is offered only on the **most recent** turn and only while it stays errored — a stale error buried above later activity, an in-flight turn, and a **fatal host error** (dead RPC child, which surfaces its own reopen banner) never show it. The eligibility test (`retryableResponseId`) and the controller's `retry()` (which retains the last prompt across an in-place RPC restart) are pure/host-side and unit-tested.
+
 ## Change review
 
 Because the agent runs out-of-process and writes edits straight to disk, the extension can't hold changes in an unsaved overlay. Instead it **snapshots a git baseline before each turn** and reviews the working tree against it (the non-interactive analogue of `git restore -p`):
