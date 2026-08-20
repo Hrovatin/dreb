@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HostUi, HostUiPickItem, WorkspaceSearchResult } from "../src/host/host-ui.js";
-import { type ControllerUpdate, type RpcClientLike, SessionController } from "../src/host/session-controller.js";
+import {
+	type ControllerUpdate,
+	extractCrashCause,
+	type RpcClientLike,
+	SessionController,
+} from "../src/host/session-controller.js";
 import type { SourceLinkUi } from "../src/host/source-link-ui.js";
 import type { OpenSourceRef, SessionTreeNodeDto } from "../src/shared/protocol.js";
 
@@ -351,6 +356,23 @@ function collectNotices(controller: SessionController): () => string[] {
 		}
 	});
 	return () => notices;
+}
+
+/** Collect `host_recovery` events (post-crash-recovery notices) from the update
+ * stream. Returns an accessor for the events captured so far. */
+function collectRecoveries(
+	controller: SessionController,
+): () => Array<{ message?: string; cause?: string; canRetry?: boolean }> {
+	const recoveries: Array<{ message?: string; cause?: string; canRetry?: boolean }> = [];
+	controller.onUpdate((u) => {
+		if (u.kind === "event") {
+			const event = u.event as { type?: string; message?: string; cause?: string; canRetry?: boolean };
+			if (event?.type === "host_recovery") {
+				recoveries.push({ message: event.message, cause: event.cause, canRetry: event.canRetry });
+			}
+		}
+	});
+	return () => recoveries;
 }
 
 describe("SessionController", () => {
@@ -2527,5 +2549,166 @@ describe("SessionController — auto-restart on crash", () => {
 
 		// Should eventually give up.
 		expect(controller.hasFailed()).toBe(true);
+	});
+
+	it("emits a recovery notice with the cause after a successful restart", async () => {
+		const { controller, clients } = await setup();
+		const recoveries = collectRecoveries(controller);
+
+		// A reply is mid-stream when the child dies.
+		clients[0].emit({ type: "agent_start" });
+		clients[0].emitExit({
+			code: 1,
+			signal: null,
+			stderr: "[rpc] Uncaught exception (fatal — exiting for supervised restart): boom",
+		});
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(clients).toHaveLength(2);
+		expect(recoveries()).toHaveLength(1);
+		const r = recoveries()[0];
+		expect(r.message).toMatch(/recovered/i);
+		expect(r.message).toMatch(/not saved/i); // interrupted mid-stream
+		expect(r.cause).toContain("Uncaught exception (fatal");
+	});
+
+	it("omits the cause when the exit info carries none", async () => {
+		const { controller, clients } = await setup();
+		const recoveries = collectRecoveries(controller);
+
+		clients[0].emitExit({}); // no code/signal/stderr/error
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(recoveries()).toHaveLength(1);
+		expect(recoveries()[0].cause).toBeUndefined();
+		expect(recoveries()[0].message).toMatch(/recovered/i);
+	});
+
+	it("offers Retry and a 'not saved' notice only when a reply was mid-stream at crash time", async () => {
+		const { controller, clients } = await setup();
+		const recoveries = collectRecoveries(controller);
+
+		// Prompt sent and a reply streaming when the child dies → interrupted:
+		// 'not saved' wording + Retry (the retained prompt was never answered).
+		await controller.submit("hello");
+		clients[0].emit({ type: "agent_start" });
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(recoveries()).toHaveLength(1);
+		expect(recoveries()[0].canRetry).toBe(true);
+		expect(recoveries()[0].message).toMatch(/not saved/i);
+	});
+
+	it("does not claim loss or offer Retry when the crash is idle after a completed turn", async () => {
+		const { controller, clients } = await setup();
+		const recoveries = collectRecoveries(controller);
+
+		// A turn completes and is persisted, then the child dies while idle. The
+		// last reply is in the rebuilt transcript, so the notice must not claim it
+		// was lost, and Retry (which would resend an already-answered prompt) is
+		// suppressed.
+		await controller.submit("hello");
+		clients[0].emit({ type: "agent_start" });
+		clients[0].emit({ type: "agent_end", messages: [] });
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(recoveries()).toHaveLength(1);
+		expect(recoveries()[0].canRetry).toBe(false);
+		expect(recoveries()[0].message).not.toMatch(/not saved/i);
+		expect(recoveries()[0].message).toMatch(/recovered/i);
+	});
+
+	it("suppresses Retry when nothing was ever submitted before the crash", async () => {
+		const { controller, clients } = await setup();
+		const recoveries = collectRecoveries(controller);
+
+		clients[0].emit({ type: "agent_start" });
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		// Mid-stream (interrupted) but no retained prompt → Retry absent.
+		expect(recoveries()[0].canRetry).toBe(false);
+	});
+
+	it("does not emit a recovery notice on the initial clean start", async () => {
+		const clients: FakeClient[] = [];
+		const factory = () => {
+			const c = new FakeClient();
+			c.state = { sessionFile: "/sessions/live.jsonl" };
+			clients.push(c);
+			return c;
+		};
+		const controller = new SessionController({
+			cwd: "/tmp/project",
+			cliPath: "/cli.js",
+			clientFactory: factory,
+			sessionPath: "/sessions/original.jsonl",
+		});
+		const recoveries = collectRecoveries(controller);
+		await controller.start();
+		expect(recoveries()).toHaveLength(0);
+	});
+
+	it("gives up after budget exhaustion without a recovery notice (fatal banner only)", async () => {
+		const { controller, clients } = await setup();
+		const recoveries = collectRecoveries(controller);
+
+		// 3 successful restarts (each emits a recovery notice)…
+		for (let i = 0; i < 3; i++) {
+			clients[i].emitExit({ code: 1, signal: null });
+			await vi.advanceTimersByTimeAsync(600);
+		}
+		// …then the 4th crash exhausts the budget and gives up (no notice).
+		clients[3].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(controller.hasFailed()).toBe(true);
+		expect(recoveries()).toHaveLength(3);
+		expect(controller.getStatus().error).toMatch(/recovery failed after repeated crashes/i);
+	});
+});
+
+describe("extractCrashCause", () => {
+	it("prefers a captured spawn error message", () => {
+		expect(extractCrashCause({ error: new Error("spawn node ENOENT") })).toBe("spawn node ENOENT");
+	});
+
+	it("maps the stdout-backpressure overflow signature to friendly text", () => {
+		const cause = extractCrashCause({
+			code: 1,
+			stderr: "Fatal: stdout write queue exceeded 16777216 bytes while the stream was backpressured.\n",
+		});
+		expect(cause).toBe("output overflow — the reply was too large for the connection buffer");
+	});
+
+	it("surfaces the uncaught-exception fatal line without the [rpc] prefix or stack", () => {
+		const cause = extractCrashCause({
+			code: 1,
+			stderr: "[rpc] Uncaught exception (fatal — exiting for supervised restart): boom\n    at foo (x.js:1:1)",
+		});
+		expect(cause).toBe("Uncaught exception (fatal — exiting for supervised restart): boom");
+	});
+
+	it("falls back to the first non-stack-frame stderr line", () => {
+		const cause = extractCrashCause({
+			code: 1,
+			stderr: "TypeError: x is not a function\n    at a (b.js:2:3)\n    at c (d.js:4:5)",
+		});
+		expect(cause).toBe("TypeError: x is not a function");
+	});
+
+	it("falls back to code/signal when there is no stderr", () => {
+		expect(extractCrashCause({ code: 1, signal: "SIGTERM" })).toBe("process exited (code 1, signal SIGTERM)");
+	});
+
+	it("returns undefined when nothing informative is available", () => {
+		expect(extractCrashCause({ code: null, signal: null })).toBeUndefined();
+		expect(extractCrashCause({})).toBeUndefined();
+	});
+
+	it("truncates an overlong cause to a single readable line", () => {
+		const cause = extractCrashCause({ error: new Error("E".repeat(500)) });
+		expect(cause).toBeDefined();
+		expect(cause?.length).toBeLessThanOrEqual(200);
+		expect(cause?.endsWith("…")).toBe(true);
 	});
 });

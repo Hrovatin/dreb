@@ -190,6 +190,37 @@ describe("projection", () => {
 		expect(system.kind === "system" && system.text).toContain("Session stats");
 	});
 
+	it("appends a host_recovery item with the cause folded into the text", () => {
+		const state = run([
+			{ type: "message_start", message: { role: "user", content: "?" } },
+			{
+				type: "host_recovery",
+				message: "Session recovered after an unexpected exit. The last reply was not saved — the session is idle.",
+				cause: "output overflow — the reply was too large for the connection buffer",
+				canRetry: true,
+			},
+		]);
+		expect(state.items.map((i) => i.kind)).toEqual(["user", "recovery"]);
+		const recovery = state.items[1];
+		expect(recovery.kind).toBe("recovery");
+		if (recovery.kind === "recovery") {
+			expect(recovery.text).toContain("Session recovered");
+			expect(recovery.text).toContain("Cause: output overflow");
+			expect(recovery.canRetry).toBe(true);
+		}
+	});
+
+	it("renders a host_recovery item without a cause and defaults canRetry to false", () => {
+		const state = run([{ type: "host_recovery", message: "Session recovered — the session is idle." }]);
+		const recovery = state.items[0];
+		expect(recovery.kind).toBe("recovery");
+		if (recovery.kind === "recovery") {
+			expect(recovery.text).toBe("Session recovered — the session is idle.");
+			expect(recovery.text).not.toContain("Cause:");
+			expect(recovery.canRetry).toBe(false);
+		}
+	});
+
 	it("groups sequential agent runs into distinct responses", () => {
 		const state = run([
 			{ type: "agent_start" },
