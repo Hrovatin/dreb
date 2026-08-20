@@ -15,3 +15,4 @@ feature/issue-1-architecture-section-push-comments
 feature/issue-6-mach6mini-skills
 feature/focused-system-prompt                      # PR #19 — more focused default system prompt
 feature/review-findings-user-impact                # PR #60 — AGENTS.md: require user-impact explanation in review findings
+feature/karin-rebuild-skill                        # karin-rebuild skill: documents this integration-branch rebuild process (skills/karin-rebuild)
