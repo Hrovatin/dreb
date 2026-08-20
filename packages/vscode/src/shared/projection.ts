@@ -59,7 +59,17 @@ export interface SystemItem {
 	text: string;
 }
 
-export type TranscriptItem = UserItem | ResponseGroup | SystemItem;
+/** Host-emitted notice shown after the RPC child crashed and was auto-recovered:
+ * the transcript was rebuilt but the in-flight reply was lost, so the session is
+ * idle. `canRetry` is true when the host retained a last prompt that can be
+ * resent via the existing `{ type: "retry" }` path. */
+export interface RecoveryItem {
+	kind: "recovery";
+	text: string;
+	canRetry: boolean;
+}
+
+export type TranscriptItem = UserItem | ResponseGroup | SystemItem | RecoveryItem;
 
 /** The agent's end-of-turn next-step suggestion (`suggest_next` tool). Mirrors
  * the TUI's ghost-text affordance: a single command the user most likely wants
@@ -497,6 +507,18 @@ export function applyEvent(state: TranscriptState, event: any): void {
 			// Synthetic event for host-side output that should persist in the
 			// transcript (e.g. `/session` stats), not a transient status line.
 			state.items.push({ kind: "system", text: String(event.text ?? "") });
+			break;
+		}
+		case "host_recovery": {
+			// Synthetic event emitted by the SessionController after a successful
+			// auto-recovery from an unexpected RPC child crash. Persistent transcript
+			// item: the conversation was rebuilt from disk but the in-flight reply was
+			// never persisted, so it's gone and the session is now idle. `canRetry`
+			// gates the one-click Retry (resends the retained last prompt).
+			const message = String(event.message ?? "");
+			const trimmedCause = typeof event.cause === "string" ? event.cause.trim() : "";
+			const text = trimmedCause ? `${message} Cause: ${trimmedCause}.` : message;
+			state.items.push({ kind: "recovery", text, canRetry: event.canRetry === true });
 			break;
 		}
 		default:

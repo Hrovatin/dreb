@@ -230,6 +230,54 @@ function formatExit(info: { code?: number | null; signal?: string | null; error?
 	return `dreb process exited (code ${info?.code ?? "null"}, signal ${info?.signal ?? "null"})`;
 }
 
+/** Max length of the concise crash cause surfaced to the user (keeps the recovery
+ * notice a single readable line, never a stack-trace dump). */
+const CRASH_CAUSE_MAX_LEN = 200;
+
+function truncateCause(text: string): string {
+	const trimmed = text.trim();
+	return trimmed.length > CRASH_CAUSE_MAX_LEN ? `${trimmed.slice(0, CRASH_CAUSE_MAX_LEN - 1)}…` : trimmed;
+}
+
+/**
+ * Derive a concise, human-readable crash cause from the child's exit info for the
+ * post-recovery notice. Prefers a captured spawn error, then known fatal stderr
+ * signatures, then the first meaningful (non-stack-frame) stderr line, then the
+ * exit code/signal. Returns `undefined` when nothing informative is available so
+ * the notice renders cleanly without a cause. Never emits multi-line output or
+ * raw stack traces.
+ */
+export function extractCrashCause(info: {
+	code?: number | null;
+	signal?: string | null;
+	error?: Error;
+	stderr?: string;
+}): string | undefined {
+	if (info.error?.message) return truncateCause(info.error.message);
+
+	const stderr = info.stderr?.trim();
+	if (stderr) {
+		const lines = stderr
+			.split("\n")
+			.map((l) => l.trim())
+			.filter(Boolean);
+		// Known fatal signatures → friendly, actionable phrasing.
+		if (lines.some((l) => l.includes("stdout write queue exceeded"))) {
+			return "output overflow — the reply was too large for the connection buffer";
+		}
+		const uncaught = lines.find((l) => l.includes("Uncaught exception (fatal"));
+		if (uncaught) return truncateCause(uncaught.replace(/^\[rpc\]\s*/, ""));
+		// Otherwise the first line that isn't a stack frame — usually the error message.
+		const meaningful = lines.find((l) => !/^at\s/.test(l));
+		if (meaningful) return truncateCause(meaningful);
+	}
+
+	if (info.code != null || info.signal) {
+		return `process exited (code ${info.code ?? "null"}${info.signal ? `, signal ${info.signal}` : ""})`;
+	}
+	return undefined;
+}
+
 /** Recovery policy tuning (deliverable C, issue 53). Bounded auto-restart so a
  * transient crash self-heals but a crash-loop (dead pipe / deterministic
  * startup failure) degrades to a banner instead of spinning forever. */
@@ -240,6 +288,15 @@ const RESTART_BACKOFF_MS = 500;
  * a *later* isolated crash still gets a fresh recovery budget. */
 const RESTART_STABLE_MS = 10_000;
 const RECOVERING_NOTICE = "dreb stopped unexpectedly — recovering…";
+/** Shown once after a successful auto-recovery when a reply was actively
+ * streaming at crash time: that in-flight reply was never persisted, so it is
+ * lost and the session is now idle. */
+const RECOVERED_MESSAGE_INTERRUPTED =
+	"Session recovered after an unexpected exit. The last reply was interrupted and not saved — the session is idle.";
+/** Shown once after a successful auto-recovery when no turn was in flight at
+ * crash time (the previous turn had already completed and was persisted, so it is
+ * present in the rebuilt transcript): nothing was lost. */
+const RECOVERED_MESSAGE_IDLE = "Session recovered after an unexpected exit. The session is idle.";
 
 function errorText(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
@@ -1402,6 +1459,11 @@ export class SessionController {
 	private handleExit(info: { code?: number | null; signal?: string | null; error?: Error; stderr?: string }): void {
 		if (this.disposed) return;
 		const message = formatExit(info);
+		// Capture whether a reply was actively streaming when the child died (before
+		// teardown), so the recovery notice can distinguish a genuinely-interrupted
+		// reply (lost) from an idle crash after a completed, persisted turn (nothing
+		// lost — and no misleading Retry of an already-answered prompt).
+		const wasStreaming = this.state.streaming === true;
 		// Surface the child's captured stderr (deliverable B) so a late crash's
 		// trigger is recorded for diagnosis instead of being discarded.
 		const stderr = info.stderr?.trim();
@@ -1411,8 +1473,9 @@ export class SessionController {
 		// a leftover handler can't fire against the old process.
 		this.teardownClient();
 		// Automated in-place recovery (deliverable C): auto-restart from the
-		// persisted transcript, bounded by a crash-loop budget.
-		this.beginRecovery(message);
+		// persisted transcript, bounded by a crash-loop budget. Carry a concise,
+		// user-facing cause so the post-recovery notice can explain what happened.
+		this.beginRecovery(message, extractCrashCause(info), wasStreaming);
 	}
 
 	/** Tear down the current client's subscriptions and drop the reference. The
@@ -1429,8 +1492,11 @@ export class SessionController {
 	}
 
 	/** Decide whether to auto-restart the crashed child (bounded) or give up with
-	 * a persistent banner. Called on an unexpected exit and on a failed restart. */
-	private beginRecovery(reason: string): void {
+	 * a persistent banner. Called on an unexpected exit and on a failed restart.
+	 * `cause` is a concise, user-facing reason (from the child's exit info) carried
+	 * through to the post-recovery notice. `interrupted` records whether a reply was
+	 * mid-stream at crash time, so the notice can be worded accurately. */
+	private beginRecovery(reason: string, cause?: string, interrupted = false): void {
 		if (this.disposed) return;
 		if (!this.withinRestartBudget()) {
 			this.giveUpRecovery(reason);
@@ -1445,7 +1511,7 @@ export class SessionController {
 		this.clearRestartTimer();
 		this.restartTimer = setTimeout(() => {
 			this.restartTimer = undefined;
-			void this.restart(reason);
+			void this.restart(reason, cause, interrupted);
 		}, RESTART_BACKOFF_MS);
 		this.restartTimer.unref?.();
 	}
@@ -1453,7 +1519,7 @@ export class SessionController {
 	/** Auto-restart the RPC child in place, resuming from the live session file so
 	 * the persisted transcript is reloaded losslessly. All controller-lifetime
 	 * listeners and the connected webview bridge stay attached. */
-	private async restart(reason: string): Promise<void> {
+	private async restart(reason: string, cause?: string, interrupted = false): Promise<void> {
 		if (this.disposed) return;
 		// Resume from the live session file (falls back to the original resume
 		// path for a session that never wrote an entry before crashing).
@@ -1463,13 +1529,34 @@ export class SessionController {
 		} catch {
 			// start() already surfaced its own failure status; route the failed
 			// attempt back through the bounded policy (retry or give up).
-			this.beginRecovery(reason);
+			this.beginRecovery(reason, cause, interrupted);
 			return;
 		}
-		// Connected again. Arm a stable-run reset so a child that survives long
-		// enough clears the crash budget and a *later* isolated crash still gets a
-		// fresh recovery allowance.
+		// Connected again. Tell the user the session was rebuilt from disk (with the
+		// cause when known). Emitted here — after start()'s transcript rebuild (which
+		// clears items) — so the notice appends below the restored conversation. This
+		// is strictly the crash path; a clean initial open/reopen never goes through
+		// restart(), so those are unaffected.
+		this.emitRecovery(cause, interrupted);
+		// Arm a stable-run reset so a child that survives long enough clears the
+		// crash budget and a *later* isolated crash still gets a fresh recovery
+		// allowance.
 		this.armStableRunReset();
+	}
+
+	/** Emit the persistent post-recovery notice. When a reply was mid-stream at
+	 * crash time (`interrupted`), it says the last reply was lost and offers Retry
+	 * (only when a last prompt was retained, reusing the existing `retry()` path).
+	 * When the crash was idle (a completed turn already persisted), it says only
+	 * that the session recovered — no false "not saved" claim and no Retry that
+	 * would resend an already-answered prompt. */
+	private emitRecovery(cause?: string, interrupted = false): void {
+		this.handleEvent({
+			type: "host_recovery",
+			message: interrupted ? RECOVERED_MESSAGE_INTERRUPTED : RECOVERED_MESSAGE_IDLE,
+			cause,
+			canRetry: interrupted && this.lastPrompt != null,
+		});
 	}
 
 	/** Terminal recovery state: repeated crashes within the window. Surface a

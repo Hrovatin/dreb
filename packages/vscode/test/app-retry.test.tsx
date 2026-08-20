@@ -19,7 +19,7 @@ vi.mock("../src/webview/vscode-api.js", () => ({
 	postToHost: () => {},
 }));
 
-import { ResponseView } from "../src/webview/app.js";
+import { ResponseView, RetryBanner } from "../src/webview/app.js";
 
 const erroredGroup = (): ResponseGroup => ({
 	kind: "response",
@@ -71,6 +71,43 @@ describe("ResponseView retry control", () => {
 		const clean: ResponseGroup = { ...erroredGroup(), error: undefined, answer: "all done" };
 		const host = mount(clean, () => {});
 		expect(host.querySelector(".dreb-banner.error")).toBeNull();
+		expect(host.querySelector("button.dreb-retry-btn")).toBeNull();
+	});
+});
+
+/**
+ * `RetryBanner` is the shared primitive rendered by the crash-recovery transcript
+ * item (`item.kind === "recovery"`) and the response error group. These tests pin
+ * the recovery notice's glue directly: the message text renders, and the Retry
+ * button appears (and fires) only when `onRetry` is supplied — which the app wires
+ * to `item.canRetry`. A wrong `Show` guard, class rename, or missing handler would
+ * fail here, so a broken/missing recovery notice can't ship silently.
+ */
+describe("RetryBanner (crash-recovery notice)", () => {
+	function mountBanner(text: string, onRetry?: () => void): HTMLElement {
+		const host = document.createElement("div");
+		document.body.appendChild(host);
+		dispose = render(() => <RetryBanner text={text} onRetry={onRetry} />, host);
+		return host;
+	}
+
+	it("renders the recovery text and a Retry button when retryable", () => {
+		const host = mountBanner("Session recovered — last reply not saved. Cause: output overflow.", () => {});
+		expect(host.querySelector(".dreb-banner.error")?.textContent).toContain("Session recovered");
+		expect(host.querySelector(".dreb-banner.error")?.textContent).toContain("Cause: output overflow");
+		expect(host.querySelector("button.dreb-retry-btn")).not.toBeNull();
+	});
+
+	it("calls onRetry when the Retry button is clicked", () => {
+		const onRetry = vi.fn();
+		const host = mountBanner("Session recovered.", onRetry);
+		(host.querySelector("button.dreb-retry-btn") as HTMLButtonElement).click();
+		expect(onRetry).toHaveBeenCalledTimes(1);
+	});
+
+	it("renders the text but no Retry button when not retryable", () => {
+		const host = mountBanner("Session recovered after an unexpected exit. The session is idle.");
+		expect(host.querySelector(".dreb-banner.error")?.textContent).toContain("session is idle");
 		expect(host.querySelector("button.dreb-retry-btn")).toBeNull();
 	});
 });
