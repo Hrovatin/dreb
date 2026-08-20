@@ -135,6 +135,8 @@ const UI_DESCRIPTIONS: Record<string, string> = {
 	telegram:
 		"Telegram (mobile messaging app — the user is on their phone so messages may be shorter or have typos, but this doesn't reflect less thought or intent. The user sees tool names and arguments but not tool output/results, so summarize key findings or changes when relevant)",
 	rpc: "RPC (programmatic interface — another application is consuming your output)",
+	vscode:
+		"VS Code extension (a chat panel inside the VS Code editor — the user is coding alongside you in the same workspace)",
 	cli: "CLI (non-interactive command line — output will be printed and the process exits)",
 	agent: "Subagent (running as a child agent — focus on the task, report results concisely)",
 };
