@@ -104,6 +104,8 @@ export type RpcCommand =
 
 	// Messages
 	| { id?: string; type: "get_messages" }
+	// Recover a host-buffered assistant reply that a crashed child never persisted
+	| { id?: string; type: "recover_inflight_reply"; text: string }
 
 	// Command discovery (resource commands plus client-handled built-ins)
 	| { id?: string; type: "get_commands" }
@@ -413,6 +415,13 @@ export type RpcResponse =
 
 	// Messages
 	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }
+	| {
+			id?: string;
+			type: "response";
+			command: "recover_inflight_reply";
+			success: true;
+			data: { recovered: boolean };
+	  }
 
 	// Commands
 	| {

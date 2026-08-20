@@ -1607,6 +1607,59 @@ export class AgentSession {
 		return this.agent.state.messages;
 	}
 
+	/**
+	 * Re-persist an assistant reply that was streamed to a host (e.g. the VSCode
+	 * extension) but never persisted because the previous RPC child died before
+	 * `message_end` (crash, SIGKILL, backpressure exit). Called on the freshly
+	 * restarted child with the text the host retained.
+	 *
+	 * The reply is appended through the normal session-manager path (so the child
+	 * owns id/parentId/leaf bookkeeping and the `.jsonl` format) and marked
+	 * `aborted` since the turn was interrupted. The in-memory agent context is
+	 * then re-synced from the session so `get messages` (and thus the host's
+	 * transcript rebuild) reflects the recovered reply immediately, and a
+	 * subsequent user turn threads from it.
+	 *
+	 * Returns whether an entry was actually appended. Empty/whitespace-only text
+	 * (a genuinely empty interrupted turn) is a no-op so no blank/ghost reply is
+	 * created; a recovery attempted while a turn is streaming is also skipped so a
+	 * live reply can't be shadowed by a stale one.
+	 */
+	recoverInflightReply(text: string): boolean {
+		if (this.isStreaming) return false;
+		if (!text || text.trim().length === 0) return false;
+
+		const model = this.model;
+		// Real usage is unknowable — the process that generated the reply died before
+		// reporting it. Estimate output tokens from the text length so the pre-send
+		// compaction check (which includes aborted messages) doesn't treat the
+		// recovered reply as free. Cost stays zero rather than fabricating a dollar
+		// figure, and session/context stats exclude aborted turns entirely.
+		const estimatedOutputTokens = Math.ceil(text.length / 4);
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: model?.api ?? "unknown",
+			provider: model?.provider ?? "unknown",
+			model: model?.id ?? "unknown",
+			usage: {
+				input: 0,
+				output: estimatedOutputTokens,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: estimatedOutputTokens,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "aborted",
+			timestamp: Date.now(),
+		};
+		this.sessionManager.appendMessage(message);
+		// Re-sync in-memory context from the session so the recovered reply is
+		// visible to get_messages / the host rebuild and threads the next turn.
+		this.agent.replaceMessages(this.sessionManager.buildSessionContext().messages);
+		return true;
+	}
+
 	/** Current steering mode */
 	get steeringMode(): "all" | "one-at-a-time" {
 		return this.agent.getSteeringMode();
@@ -4252,6 +4305,11 @@ export class AgentSession {
 		for (const message of state.messages) {
 			if (message.role === "assistant") {
 				const assistantMsg = message as AssistantMessage;
+				// Skip aborted turns (matching getContextUsage / the performance
+				// tracker). Their usage is either unreported or, for a crash-recovered
+				// reply, a best-effort estimate with zero cost — counting it would
+				// inflate the reported token total against an unchanged cost.
+				if (assistantMsg.stopReason === "aborted") continue;
 				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
 				totalInput += assistantMsg.usage.input;
 				totalOutput += assistantMsg.usage.output;

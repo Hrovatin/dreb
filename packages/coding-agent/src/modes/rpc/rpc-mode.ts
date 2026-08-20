@@ -1314,6 +1314,19 @@ export function getTreeForRpc(sessionManager: Pick<SessionManager, "getTree" | "
 	return { roots: toRpcTreeNodes(sessionManager.getTree()), leafId: sessionManager.getLeafId() };
 }
 
+/**
+ * Persist an assistant reply that a previous RPC child streamed to the host but
+ * died before it could reach `message_end` (crash, SIGKILL, backpressure exit).
+ *
+ * The host retains every streamed delta and, after auto-restart, hands the text
+ * back here so the fresh child re-persists it and re-syncs its context (see
+ * {@link AgentSession.recoverInflightReply}). Returns whether an entry was
+ * actually appended (empty/whitespace text is a no-op).
+ */
+export function recoverInflightReplyForRpc(session: Pick<AgentSession, "recoverInflightReply">, text: string): boolean {
+	return session.recoverInflightReply(text);
+}
+
 /** Navigate the active session tree, returning only the stable RPC result fields. */
 export async function navigateTreeForRpc(
 	session: Pick<AgentSession, "navigateTree">,
@@ -2227,6 +2240,11 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 
 			case "get_messages": {
 				return success(id, "get_messages", { messages: session.messages });
+			}
+
+			case "recover_inflight_reply": {
+				const recovered = recoverInflightReplyForRpc(session, command.text);
+				return success(id, "recover_inflight_reply", { recovered });
 			}
 
 			// =================================================================

@@ -698,6 +698,17 @@ export class RpcClient {
 	}
 
 	/**
+	 * Re-persist an assistant reply that a previous (crashed) child streamed to
+	 * the host but died before persisting. The fresh child appends it via the
+	 * normal session-manager path, marked interrupted/aborted. Returns whether an
+	 * entry was actually appended (empty/whitespace text is a no-op).
+	 */
+	async recoverInflightReply(text: string): Promise<boolean> {
+		const response = await this.send({ type: "recover_inflight_reply", text });
+		return this.getData<{ recovered: boolean }>(response).recovered;
+	}
+
+	/**
 	 * Get discoverable commands, including built-ins that require client-side handling.
 	 */
 	async getCommands(): Promise<RpcSlashCommand[]> {

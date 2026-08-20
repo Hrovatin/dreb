@@ -140,4 +140,48 @@ describe("AgentSession.getSessionStats", () => {
 			session.dispose();
 		}
 	});
+
+	it("excludes aborted turns from token and cost totals even when they carry usage", () => {
+		// getSessionStats intentionally skips stopReason "aborted" messages (matching
+		// getContextUsage and the performance tracker). A crash-recovered reply is
+		// stored as aborted with an estimated, zero-cost usage; counting it would
+		// inflate token totals against an unchanged cost. This pins that exclusion so
+		// a future change can't start leaking aborted usage into /session totals.
+		const { session, sessionManager } = createSession();
+
+		try {
+			sessionManager.appendMessage(createUserMessage("hello", 1));
+			sessionManager.appendMessage(createAssistantMessage("counted reply", 200, 2));
+			// An aborted turn carrying real, non-zero usage AND cost.
+			const abortedUsage: Usage = {
+				input: 500,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 600,
+				cost: { input: 0.4, output: 0.2, cacheRead: 0, cacheWrite: 0, total: 0.6 },
+			};
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "interrupted reply" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: abortedUsage,
+				stopReason: "aborted",
+				timestamp: 3,
+			});
+			syncAgentMessages(session, sessionManager);
+
+			const stats = session.getSessionStats();
+			// Only the completed turn's 200 input tokens count; the aborted turn's
+			// 600 tokens and $0.6 cost are excluded.
+			expect(stats.tokens.input).toBe(200);
+			expect(stats.tokens.output).toBe(0);
+			expect(stats.tokens.total).toBe(200);
+			expect(stats.cost).toBe(0);
+		} finally {
+			session.dispose();
+		}
+	});
 });
