@@ -94,6 +94,8 @@ When a turn ends in a **provider error** (unavailable, rate-limited, or another 
 
 The control is offered only on the **most recent** turn and only while it stays errored — a stale error buried above later activity, an in-flight turn, and a **fatal host error** (dead RPC child, which surfaces its own reopen banner) never show it. The eligibility test (`retryableResponseId`) and the controller's `retry()` (which retains the last prompt across an in-place RPC restart) are pure/host-side and unit-tested.
 
+After the extension **auto-recovers** a crashed session in place (restarting from the persisted transcript — see *Reopen always re-activates* below), it appends a one-time **recovery notice** so the crash isn't silent. The notice reflects what was actually in flight at crash time: if a reply was **actively streaming** when the child died, it says the last reply was interrupted and not saved, and offers the same **↻ Retry** (when a last prompt was retained) to resend without retyping; if the crash happened while the session was **idle** (the previous turn had already completed and was persisted, so it's present in the rebuilt transcript), it says only that the session recovered — no misleading "not saved" claim and no Retry that would resend an already-answered prompt. The in-flight signal, message selection, and Retry gating are host-side and unit-tested.
+
 ## Change review
 
 Because the agent runs out-of-process and writes edits straight to disk, the extension can't hold changes in an unsaved overlay. Instead it **snapshots a git baseline before each turn** and reviews the working tree against it (the non-interactive analogue of `git restore -p`):
