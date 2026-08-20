@@ -539,6 +539,11 @@ function workspaceCwd(): string {
 
 function buildArgs(config: vscode.WorkspaceConfiguration): string[] {
 	const args: string[] = [];
+	// Identify this consumer as the VSCode extension so the RPC child projects
+	// (bounds) the message_update event stream. Without it the child receives the
+	// full O(n^2) cumulative stream and a long reply overruns the 16 MiB stdout
+	// queue, killing the child mid-reply before the reply is persisted (issue 84).
+	args.push("--ui", "vscode");
 	const provider = config.get<string>("provider")?.trim();
 	const model = config.get<string>("model")?.trim();
 	if (provider) args.push("--provider", provider);

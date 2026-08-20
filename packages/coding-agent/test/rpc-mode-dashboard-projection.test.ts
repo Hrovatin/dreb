@@ -75,8 +75,11 @@ function serializedMessageUpdateBytes(capture: RpcCapture): number {
 }
 
 /** Run one streaming turn of the given text size and return the capture. */
-async function streamTextOfSize(size: number): Promise<{ capture: RpcCapture; harness: Harness }> {
-	const harness = createHarness({ responses: ["x".repeat(size)], uiType: "dashboard" });
+async function streamTextOfSize(
+	size: number,
+	uiType = "dashboard",
+): Promise<{ capture: RpcCapture; harness: Harness }> {
+	const harness = createHarness({ responses: ["x".repeat(size)], uiType });
 	const capture = await startRpcMode(harness);
 	await harness.session.prompt("hi");
 	return { capture, harness };
@@ -184,8 +187,8 @@ describe("runRpcMode dashboard event projection (issue 448)", () => {
 		}
 	});
 
-	it("leaves the generic RPC protocol untouched when uiType is not dashboard", async () => {
-		const harness = createHarness({ responses: ["x".repeat(4_000)] });
+	it("leaves the generic RPC protocol untouched when uiType is not a projected consumer", async () => {
+		const harness = createHarness({ responses: ["x".repeat(4_000)], uiType: "rpc" });
 		const capture = await startRpcMode(harness);
 		try {
 			await harness.session.prompt("hi");
@@ -198,6 +201,49 @@ describe("runRpcMode dashboard event projection (issue 448)", () => {
 				const streamEvent = frame.assistantMessageEvent as Record<string, unknown>;
 				expect(streamEvent.partial).toBeDefined();
 			}
+		} finally {
+			capture.detach();
+			harness.cleanup();
+		}
+	});
+
+	// Issue 84: the VSCode extension launches --mode rpc --ui vscode. Its reducer
+	// reads only the assistantMessageEvent delta fields, so it must receive the
+	// same bounded stream as the dashboard; otherwise a long reply overruns the
+	// child's 16 MiB stdout queue and kills it mid-reply before message_end.
+	it("projects cumulative fields out of message_update frames for uiType vscode (issue 84)", async () => {
+		const { capture, harness } = await streamTextOfSize(8_000, "vscode");
+		try {
+			const updates = messageUpdateFrames(capture);
+			expect(updates.length).toBeGreaterThan(1_500);
+
+			for (const frame of updates) {
+				expect(frame.message).toBeUndefined();
+				const streamEvent = frame.assistantMessageEvent as Record<string, unknown>;
+				expect(streamEvent.partial).toBeUndefined();
+			}
+
+			// Deltas survive and reconstruct the full text.
+			const reconstructed = updates
+				.map((f) => f.assistantMessageEvent as Record<string, unknown>)
+				.filter((e) => e.type === "text_delta")
+				.map((e) => e.delta as string)
+				.join("");
+			expect(reconstructed).toHaveLength(8_000);
+
+			// Every delta frame stays small and bounded — no growth with position.
+			const deltaLines = capture.lines.filter((l) => l.includes('"message_update"') && l.includes('"text_delta"'));
+			for (const line of deltaLines) {
+				expect(line.length).toBeLessThan(512);
+			}
+
+			// The authoritative final message still arrives complete on message_end.
+			const messageEnd = capture.frames.find(
+				(f) => f.type === "message_end" && (f.message as { role?: string })?.role === "assistant",
+			);
+			expect(messageEnd).toBeDefined();
+			const endMessage = messageEnd?.message as { content?: Array<{ text?: string }> };
+			expect(endMessage.content?.[0]?.text).toHaveLength(8_000);
 		} finally {
 			capture.detach();
 			harness.cleanup();

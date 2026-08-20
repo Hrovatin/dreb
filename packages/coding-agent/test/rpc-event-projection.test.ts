@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { projectDashboardRpcEvent } from "../src/modes/rpc/rpc-event-projection.js";
+import { projectDashboardRpcEvent, shouldProjectRpcEvents } from "../src/modes/rpc/rpc-event-projection.js";
 
 function growingAssistantMessage(textLength: number) {
 	return {
@@ -143,5 +143,22 @@ describe("projectDashboardRpcEvent", () => {
 			const projected = projectDashboardRpcEvent(makeMessageUpdate(size));
 			expect(JSON.stringify(projected).length).toBeLessThan(300);
 		}
+	});
+});
+
+describe("shouldProjectRpcEvents", () => {
+	it("projects for consumers that only read delta fields", () => {
+		// Dashboard (issue 448) and VSCode (issue 84) rebuild the transcript from
+		// delta fields + message_end, so they get the bounded stream.
+		expect(shouldProjectRpcEvents("dashboard")).toBe(true);
+		expect(shouldProjectRpcEvents("vscode")).toBe(true);
+	});
+
+	it("leaves generic and unknown RPC consumers unprojected", () => {
+		// Generic RPC consumers may rely on the cumulative fields — never strip.
+		expect(shouldProjectRpcEvents("rpc")).toBe(false);
+		expect(shouldProjectRpcEvents("tui")).toBe(false);
+		expect(shouldProjectRpcEvents("cli")).toBe(false);
+		expect(shouldProjectRpcEvents(undefined)).toBe(false);
 	});
 });

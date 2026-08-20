@@ -59,7 +59,7 @@ import {
 import { type Theme, theme } from "../interactive/theme/theme.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
 import { installRpcCrashGuards } from "./rpc-crash-guard.js";
-import { projectDashboardRpcEvent } from "./rpc-event-projection.js";
+import { projectDashboardRpcEvent, shouldProjectRpcEvents } from "./rpc-event-projection.js";
 import type {
 	RpcAgentTypeInfo,
 	RpcBackgroundAgentInfo,
@@ -1831,14 +1831,18 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 				})
 			: undefined;
 
-	// Dashboard-launched runtimes (--ui dashboard) get message_update events
-	// projected before serialization: the cumulative `message` and
-	// `assistantMessageEvent.partial` fields are quadratic in response length on
-	// the JSONL pipe, and no dashboard consumer reads them (deltas, message_end,
-	// and get_dashboard_snapshot responses carry the authoritative data). Generic
-	// RPC consumers keep the full protocol unchanged. Only the event stream is
-	// projected — command responses (output() calls below) always stay complete.
-	const projectEvents = session.uiType === "dashboard";
+	// Runtimes whose consumers rebuild the transcript from delta fields plus
+	// message_end (dashboard via --ui dashboard, VSCode via --ui vscode) get
+	// message_update events projected before serialization: the cumulative
+	// `message` and `assistantMessageEvent.partial` fields are quadratic in
+	// response length on the JSONL pipe, and those consumers never read them
+	// (deltas, message_end, and get_dashboard_snapshot responses carry the
+	// authoritative data). For VSCode this bounding is what stops a long reply
+	// from overrunning the 16 MiB stdout queue and killing the child mid-reply
+	// (issue 84). Generic RPC consumers (uiType "rpc") keep the full protocol
+	// unchanged. Only the event stream is projected — command responses
+	// (output() calls below) always stay complete.
+	const projectEvents = shouldProjectRpcEvents(session.uiType);
 
 	// Output all agent events as JSON
 	session.subscribe((event) => {
