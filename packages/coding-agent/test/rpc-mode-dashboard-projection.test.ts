@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as outputGuard from "../src/core/output-guard.js";
 import * as jsonl from "../src/modes/rpc/jsonl.js";
+import * as projection from "../src/modes/rpc/rpc-event-projection.js";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.js";
 import { createHarness, type Harness } from "./test-harness.js";
 
@@ -75,8 +76,11 @@ function serializedMessageUpdateBytes(capture: RpcCapture): number {
 }
 
 /** Run one streaming turn of the given text size and return the capture. */
-async function streamTextOfSize(size: number): Promise<{ capture: RpcCapture; harness: Harness }> {
-	const harness = createHarness({ responses: ["x".repeat(size)], uiType: "dashboard" });
+async function streamTextOfSize(
+	size: number,
+	uiType = "dashboard",
+): Promise<{ capture: RpcCapture; harness: Harness }> {
+	const harness = createHarness({ responses: ["x".repeat(size)], uiType });
 	const capture = await startRpcMode(harness);
 	await harness.session.prompt("hi");
 	return { capture, harness };
@@ -184,8 +188,8 @@ describe("runRpcMode dashboard event projection (issue 448)", () => {
 		}
 	});
 
-	it("leaves the generic RPC protocol untouched when uiType is not dashboard", async () => {
-		const harness = createHarness({ responses: ["x".repeat(4_000)] });
+	it("leaves the generic RPC protocol untouched when uiType is not a projected consumer", async () => {
+		const harness = createHarness({ responses: ["x".repeat(4_000)], uiType: "rpc" });
 		const capture = await startRpcMode(harness);
 		try {
 			await harness.session.prompt("hi");
@@ -199,6 +203,92 @@ describe("runRpcMode dashboard event projection (issue 448)", () => {
 				expect(streamEvent.partial).toBeDefined();
 			}
 		} finally {
+			capture.detach();
+			harness.cleanup();
+		}
+	});
+
+	// Issue 84: the VSCode extension launches --mode rpc --ui vscode. Its reducer
+	// reads only the assistantMessageEvent delta fields, so it must receive the
+	// same bounded stream as the dashboard; otherwise a long reply overruns the
+	// child's 16 MiB stdout queue and kills it mid-reply before message_end.
+	it("projects cumulative fields out of message_update frames for uiType vscode (issue 84)", async () => {
+		const { capture, harness } = await streamTextOfSize(8_000, "vscode");
+		try {
+			const updates = messageUpdateFrames(capture);
+			expect(updates.length).toBeGreaterThan(1_500);
+
+			for (const frame of updates) {
+				expect(frame.message).toBeUndefined();
+				const streamEvent = frame.assistantMessageEvent as Record<string, unknown>;
+				expect(streamEvent.partial).toBeUndefined();
+			}
+
+			// Deltas survive and reconstruct the full text.
+			const reconstructed = updates
+				.map((f) => f.assistantMessageEvent as Record<string, unknown>)
+				.filter((e) => e.type === "text_delta")
+				.map((e) => e.delta as string)
+				.join("");
+			expect(reconstructed).toHaveLength(8_000);
+
+			// Every delta frame stays small and bounded — no growth with position.
+			const deltaLines = capture.lines.filter((l) => l.includes('"message_update"') && l.includes('"text_delta"'));
+			for (const line of deltaLines) {
+				expect(line.length).toBeLessThan(512);
+			}
+
+			// The authoritative final message still arrives complete on message_end.
+			const messageEnd = capture.frames.find(
+				(f) => f.type === "message_end" && (f.message as { role?: string })?.role === "assistant",
+			);
+			expect(messageEnd).toBeDefined();
+			const endMessage = messageEnd?.message as { content?: Array<{ text?: string }> };
+			expect(endMessage.content?.[0]?.text).toHaveLength(8_000);
+		} finally {
+			capture.detach();
+			harness.cleanup();
+		}
+	});
+
+	// Issue 84 hardening: the oversized-frame guard is the canary that would make
+	// a FUTURE quadratic-growth regression observable. Prove runRpcMode actually
+	// runs it on the live projected path (on the projected frame + its serialized
+	// line), and never on the generic-rpc path — a wiring mistake here would
+	// silently disable that safety net.
+	it("runs warnIfProjectedFrameOversized on the projected frame for a projected consumer", async () => {
+		const spy = vi.spyOn(projection, "warnIfProjectedFrameOversized");
+		const { capture, harness } = await streamTextOfSize(4_000, "vscode");
+		try {
+			const updates = messageUpdateFrames(capture);
+			// Called once per emitted message_update frame.
+			const guardedUpdates = spy.mock.calls.filter(
+				([event]) => (event as Record<string, unknown>).type === "message_update",
+			);
+			expect(guardedUpdates.length).toBe(updates.length);
+			for (const [event, serialized] of guardedUpdates) {
+				// It sees the PROJECTED frame (cumulative field stripped)...
+				expect((event as Record<string, unknown>).message).toBeUndefined();
+				// ...and the serialized line matches what is actually written, so the
+				// size check reflects the real wire bytes with no re-serialization.
+				expect(serialized).toBe(jsonl.serializeJsonLine(event));
+			}
+		} finally {
+			spy.mockRestore();
+			capture.detach();
+			harness.cleanup();
+		}
+	});
+
+	it("does not run warnIfProjectedFrameOversized for a generic RPC consumer", async () => {
+		const spy = vi.spyOn(projection, "warnIfProjectedFrameOversized");
+		const harness = createHarness({ responses: ["x".repeat(4_000)], uiType: "rpc" });
+		const capture = await startRpcMode(harness);
+		try {
+			await harness.session.prompt("hi");
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
+			spy.mockRestore();
 			capture.detach();
 			harness.cleanup();
 		}
