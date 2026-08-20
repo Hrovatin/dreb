@@ -161,6 +161,10 @@ export interface RpcClientLike {
 	 * navigate/fork, and populated on resume). Used to rebuild the transcript with
 	 * complete content — answers, thinking, and tool calls — rather than previews. */
 	getMessages(): Promise<unknown[]>;
+	/** Re-persist an assistant reply the previous (crashed) child streamed but
+	 * never persisted. Returns whether an entry was appended. Optional so fakes
+	 * and older clients without the method degrade gracefully (no recovery). */
+	recoverInFlightReply?(text: string): Promise<boolean>;
 }
 
 export type RpcClientFactory = (options: {
@@ -360,6 +364,16 @@ function toImageContent(images?: readonly ImageAttachmentDto[]): ImageContentPar
 
 export class SessionController {
 	private readonly state: TranscriptState = createTranscriptState();
+	/** Text of the assistant reply currently streaming, accumulated from the live
+	 * event deltas. Reset when an assistant turn starts, and cleared on
+	 * `message_end` (the child has persisted it by then). If the child dies while
+	 * this is non-empty, the reply was streamed to the host but never persisted —
+	 * `handleExit` snapshots it into {@link pendingRecovery} for re-persistence. */
+	private inFlightReply = "";
+	/** Snapshot of an in-flight reply captured at an unexpected child exit, to be
+	 * re-persisted through the restarted child. `undefined` when there is nothing
+	 * to recover (a clean turn, or an empty interrupted turn). */
+	private pendingRecovery: string | undefined;
 	private readonly listeners = new Set<(update: ControllerUpdate) => void>();
 	/** User-input listeners (Phase 9): fired whenever the user actively drives
 	 * the session (a composer submit or an answer to a blocking UI request), so
@@ -1430,6 +1444,7 @@ export class SessionController {
 
 	private handleEvent(event: unknown): void {
 		applyEvent(this.state, event);
+		this.trackInFlightReply(event);
 		this.emit({ kind: "event", event });
 		const type = (event as { type?: unknown })?.type;
 		// Snapshot a baseline before the first turn of a review cycle (changes
@@ -1456,8 +1471,53 @@ export class SessionController {
 		}
 	}
 
+	/** Accumulate the streaming assistant reply from the live event stream so it
+	 * can be recovered if the child dies before persisting it. Mirrors the subset
+	 * of the projection's `message_update` handling that produces answer text.
+	 *
+	 * - assistant `message_start` opens a fresh turn -> reset the buffer.
+	 * - `text_delta` / `text_end` accumulate the answer text.
+	 * - assistant `message_end` means the child persisted the reply -> clear the
+	 *   buffer so a completed turn has nothing to recover (no duplicate persist). */
+	private trackInFlightReply(event: unknown): void {
+		const e = event as {
+			type?: string;
+			message?: { role?: string };
+			assistantMessageEvent?: { type?: string; delta?: string; content?: string };
+		};
+		switch (e?.type) {
+			case "message_start":
+				if (e.message?.role === "assistant") this.inFlightReply = "";
+				break;
+			case "message_update": {
+				const stream = e.assistantMessageEvent;
+				if (!stream) break;
+				if (stream.type === "text_delta") {
+					this.inFlightReply += stream.delta ?? "";
+				} else if (stream.type === "text_end") {
+					// A non-streaming provider emits only text_end with the full block.
+					if (this.inFlightReply.length === 0 && typeof stream.content === "string") {
+						this.inFlightReply = stream.content;
+					}
+				}
+				break;
+			}
+			case "message_end":
+				if (e.message?.role === "assistant") this.inFlightReply = "";
+				break;
+			default:
+				break;
+		}
+	}
+
 	private handleExit(info: { code?: number | null; signal?: string | null; error?: Error; stderr?: string }): void {
 		if (this.disposed) return;
+		// Snapshot any streamed-but-unpersisted reply before recovery so the child's
+		// death doesn't lose the reply the user already saw. A clean turn (cleared
+		// on message_end) or an empty interrupted turn leaves nothing to recover.
+		const inFlight = this.inFlightReply.trim();
+		this.pendingRecovery = inFlight.length > 0 ? this.inFlightReply : undefined;
+		this.inFlightReply = "";
 		const message = formatExit(info);
 		// Capture whether a reply was actively streaming when the child died (before
 		// teardown), so the recovery notice can distinguish a genuinely-interrupted
@@ -1532,11 +1592,20 @@ export class SessionController {
 			this.beginRecovery(reason, cause, interrupted);
 			return;
 		}
+		// The fresh child has loaded the persisted session and rendered the
+		// transcript — but a reply that the previous child streamed yet never
+		// persisted is absent. Re-persist it through the live child (which owns the
+		// session-file format/leaf bookkeeping), then rebuild so it renders in
+		// place. Guarded so it only runs on the crash path and only once per lost
+		// reply (cleared below regardless of outcome, so a later crash can't
+		// double-append it). Runs before the recovery notice so the notice appends
+		// below the restored (and re-persisted) conversation.
+		await this.recoverPendingReply();
 		// Connected again. Tell the user the session was rebuilt from disk (with the
 		// cause when known). Emitted here — after start()'s transcript rebuild (which
-		// clears items) — so the notice appends below the restored conversation. This
-		// is strictly the crash path; a clean initial open/reopen never goes through
-		// restart(), so those are unaffected.
+		// clears items) and the in-flight recovery above — so the notice appends
+		// below the restored conversation. This is strictly the crash path; a clean
+		// initial open/reopen never goes through restart(), so those are unaffected.
 		this.emitRecovery(cause, interrupted);
 		// Arm a stable-run reset so a child that survives long enough clears the
 		// crash budget and a *later* isolated crash still gets a fresh recovery
@@ -1557,6 +1626,25 @@ export class SessionController {
 			cause,
 			canRetry: interrupted && this.lastPrompt != null,
 		});
+	}
+
+	/** Re-persist a reply the crashed child streamed but never saved, through the
+	 * freshly restarted child, then rebuild the transcript so it renders in place.
+	 * Best-effort: any failure is logged and swallowed (the reply is already gone
+	 * from disk; a failed recovery must not abort the restart). The snapshot is
+	 * always cleared so a subsequent crash cannot append the same reply twice. */
+	private async recoverPendingReply(): Promise<void> {
+		const text = this.pendingRecovery;
+		this.pendingRecovery = undefined;
+		if (text === undefined) return;
+		const client = this.client;
+		if (!client?.recoverInFlightReply) return;
+		try {
+			const recovered = await client.recoverInFlightReply(text);
+			if (recovered) await this.rebuildTranscript();
+		} catch (err) {
+			this.logger(`in-flight reply recovery failed: ${errorText(err)}`);
+		}
 	}
 
 	/** Terminal recovery state: repeated crashes within the window. Surface a

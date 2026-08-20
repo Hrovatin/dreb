@@ -295,6 +295,14 @@ class FakeClient implements RpcClientLike {
 	emit(event: unknown): void {
 		this.eventListener?.(event);
 	}
+	recoverCalls: string[] = [];
+	/** When true, `recoverInFlightReply` reports it appended an entry (drives a
+	 * transcript rebuild); when false it reports a no-op. */
+	recoverResult = true;
+	async recoverInFlightReply(text: string): Promise<boolean> {
+		this.recoverCalls.push(text);
+		return this.recoverResult;
+	}
 	emitExit(info: unknown): void {
 		this.exitListener?.(info);
 	}
@@ -2664,6 +2672,71 @@ describe("SessionController — auto-restart on crash", () => {
 		expect(controller.hasFailed()).toBe(true);
 		expect(recoveries()).toHaveLength(3);
 		expect(controller.getStatus().error).toMatch(/recovery failed after repeated crashes/i);
+	});
+
+	// ---------------------------------------------------------------------
+	// In-flight reply recovery (issue 85): a reply the child streamed but died
+	// before persisting is re-persisted through the restarted child.
+	// ---------------------------------------------------------------------
+
+	/** Drive an assistant turn's streamed deltas onto a client. When
+	 * `finalize` is true, also emit the assistant `message_end` (the child
+	 * persisted the reply), so nothing should be recovered. */
+	function streamReply(client: FakeClient, text: string, finalize: boolean): void {
+		client.emit({ type: "message_start", message: { role: "assistant" } });
+		client.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
+		if (finalize) client.emit({ type: "message_end", message: { role: "assistant" } });
+	}
+
+	it("re-persists an in-flight reply after an unexpected crash, then rebuilds", async () => {
+		const { clients } = await setup();
+		// The user saw a full reply stream, but the child dies before message_end.
+		streamReply(clients[0], "the answer the user already saw", false);
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(clients).toHaveLength(2);
+		// Recovery ran exactly once with the streamed text, through the new child.
+		expect(clients[1].recoverCalls).toEqual(["the answer the user already saw"]);
+		// A recovered reply drives a transcript rebuild so it renders in place.
+		expect(clients[1].getMessagesCalls).toBeGreaterThan(0);
+	});
+
+	it("does not recover a reply the child already persisted (message_end seen)", async () => {
+		const { clients } = await setup();
+		// A normal completed turn: message_end fired, so the reply is on disk.
+		streamReply(clients[0], "a completed reply", true);
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(clients).toHaveLength(2);
+		expect(clients[1].recoverCalls).toEqual([]);
+	});
+
+	it("does not recover an empty interrupted turn (no ghost reply)", async () => {
+		const { clients } = await setup();
+		// An assistant turn started but produced no text before the crash.
+		clients[0].emit({ type: "message_start", message: { role: "assistant" } });
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(clients).toHaveLength(2);
+		expect(clients[1].recoverCalls).toEqual([]);
+	});
+
+	it("recovers a lost reply only once across repeated crashes", async () => {
+		const { clients } = await setup();
+		streamReply(clients[0], "lost reply", false);
+		// Crash 1: recovers.
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients[1].recoverCalls).toEqual(["lost reply"]);
+
+		// Crash 2 (no new reply streamed): must not re-append the same reply.
+		clients[1].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients).toHaveLength(3);
+		expect(clients[2].recoverCalls).toEqual([]);
 	});
 });
 
