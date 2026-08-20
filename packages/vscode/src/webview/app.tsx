@@ -441,6 +441,14 @@ export function ResponseView(props: { group: ResponseGroup; onRetry?: () => void
 					innerHTML={linkifyAnswer(renderMarkdown(props.group.answer), buildGroundedRefs(props.group.activity))}
 				/>
 			</Show>
+			<Show when={props.group.aborted}>
+				<div
+					class="dreb-aborted"
+					title="This turn was interrupted (cancelled, or recovered after a crash) — the reply may be incomplete"
+				>
+					Interrupted
+				</div>
+			</Show>
 			<Show when={props.group.error}>
 				<RetryBanner text={props.group.error ?? ""} onRetry={props.onRetry} />
 			</Show>

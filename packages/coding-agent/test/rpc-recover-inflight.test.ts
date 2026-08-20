@@ -77,4 +77,26 @@ describe("recoverInflightReplyForRpc / AgentSession.recoverInflightReply", () =>
 		expect(recoverInflightReplyForRpc(session, text)).toBe(true);
 		expect(persistedAssistants(sessionManager)[0].content).toEqual([{ type: "text", text }]);
 	});
+
+	it("records the session's model and a best-effort usage estimate on the recovered message", () => {
+		const { session, sessionManager } = newSession();
+		const text = "a recovered reply of some length";
+
+		expect(recoverInflightReplyForRpc(session, text)).toBe(true);
+
+		const msg = persistedAssistants(sessionManager)[0] as unknown as {
+			provider?: string;
+			model?: string;
+			usage?: { output: number; totalTokens: number; cost: { total: number } };
+		};
+		// The session's configured model, not "unknown" — so downstream same-model
+		// logic (e.g. compaction checks) treats the recovered reply correctly.
+		expect(msg.provider).toBe(session.model?.provider);
+		expect(msg.model).toBe(session.model?.id);
+		// Usage is estimated from text length so context/compaction accounting doesn't
+		// treat the recovered reply as free; cost is not fabricated.
+		expect(msg.usage?.output).toBeGreaterThan(0);
+		expect(msg.usage?.totalTokens).toBe(msg.usage?.output);
+		expect(msg.usage?.cost.total).toBe(0);
+	});
 });

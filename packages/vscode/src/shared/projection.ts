@@ -46,6 +46,11 @@ export interface ResponseGroup {
 	collapsed: boolean;
 	/** Provider failure text, if this run ended in an error. */
 	error?: string;
+	/** True when the run's last assistant message ended interrupted
+	 * (`stopReason: "aborted"`) — user-cancelled or recovered after a child crash.
+	 * Rendered as a subtle marker so a truncated answer isn't mistaken for a
+	 * complete one. */
+	aborted?: boolean;
 }
 
 export interface UserItem {
@@ -154,10 +159,22 @@ export interface TranscriptState {
 	suggestion?: SuggestionState;
 	/** Monotonic id source for response groups. */
 	nextResponseId: number;
+	/** Internal streaming bookkeeping: true once a `text_delta` arrived for the
+	 * current text block, so `text_end` knows the block's content is already
+	 * reflected in the answer. Non-streaming providers emit only `text_end` per
+	 * block, so a false value means the block content still needs adopting. */
+	sawTextDeltaInBlock: boolean;
 }
 
 export function createTranscriptState(): TranscriptState {
-	return { items: [], streaming: false, uiRequests: [], backgroundAgentIds: [], nextResponseId: 1 };
+	return {
+		items: [],
+		streaming: false,
+		uiRequests: [],
+		backgroundAgentIds: [],
+		nextResponseId: 1,
+		sawTextDeltaInBlock: false,
+	};
 }
 
 /** Flatten message content (string or content-part array) to plain text. */
@@ -357,6 +374,7 @@ export function applyEvent(state: TranscriptState, event: any): void {
 				// the previous turn is now stale.
 				state.suggestion = undefined;
 			} else if (message?.role === "assistant") {
+				state.sawTextDeltaInBlock = false;
 				activeResponse(state, true);
 			}
 			break;
@@ -368,12 +386,19 @@ export function applyEvent(state: TranscriptState, event: any): void {
 			if (!group) break;
 			switch (stream.type) {
 				case "text_delta":
+					state.sawTextDeltaInBlock = true;
 					appendAnswerText(group, stream.delta ?? "");
 					break;
 				case "text_end":
-					// text_end carries the authoritative block content; if no deltas
-					// were seen (e.g. a non-streaming provider), adopt it.
-					if (typeof stream.content === "string" && group.answer.length === 0) group.answer = stream.content;
+					// text_end carries the authoritative block content; streaming
+					// providers already delivered it via deltas, but a non-streaming
+					// provider emits only text_end per block. Adopt whenever no delta
+					// was seen for this block — not just when the answer is empty —
+					// so later blocks of a multi-block non-streaming reply aren't
+					// silently dropped.
+					if (typeof stream.content === "string" && !state.sawTextDeltaInBlock)
+						appendAnswerText(group, stream.content);
+					state.sawTextDeltaInBlock = false;
 					break;
 				case "thinking_start":
 					group.activity.push({ kind: "thinking", text: "" });
@@ -402,6 +427,13 @@ export function applyEvent(state: TranscriptState, event: any): void {
 				if (error) {
 					const group = activeResponse(state, true);
 					if (group) group.error = error;
+				}
+				// Mark interrupted turns so a truncated answer isn't mistaken for a
+				// complete one (mirrors the fold path, so a rebuilt transcript renders
+				// identically to the live one).
+				if (message.role === "assistant" && message.stopReason === "aborted") {
+					const group = activeResponse(state, true);
+					if (group) group.aborted = true;
 				}
 			}
 			break;
@@ -629,6 +661,7 @@ export function foldMessagesIntoState(state: TranscriptState, messages: readonly
 	state.statusText = undefined;
 	state.hostError = undefined;
 	state.nextResponseId = 1;
+	state.sawTextDeltaInBlock = false;
 
 	// The open response group for the current run, or undefined between runs (i.e.
 	// right after a user turn, before the next assistant message reopens one).
@@ -664,6 +697,10 @@ export function foldMessagesIntoState(state: TranscriptState, messages: readonly
 						: "Unknown error";
 				active.error = active.error ?? text;
 			}
+			// Interrupted turns (user-cancelled, or recovered after a child crash)
+			// keep their persisted marker so the rebuilt transcript renders the same
+			// "interrupted" cue the live projection shows.
+			if (message.stopReason === "aborted") active.aborted = true;
 		} else if (role === "toolResult") {
 			// Attach the result to its pending tool item in the open run's activity.
 			const tool = group ? findTool(group, String(message.toolCallId)) : undefined;

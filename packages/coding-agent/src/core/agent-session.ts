@@ -1630,6 +1630,12 @@ export class AgentSession {
 		if (!text || text.trim().length === 0) return false;
 
 		const model = this.model;
+		// Real usage is unknowable — the process that generated the reply died before
+		// reporting it. Estimate output tokens from the text length so context-size and
+		// compaction accounting (which read the last assistant message's usage) stay
+		// roughly correct instead of treating the recovered reply as free. Cost stays
+		// zero rather than fabricating a dollar figure.
+		const estimatedOutputTokens = Math.ceil(text.length / 4);
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text }],
@@ -1638,10 +1644,10 @@ export class AgentSession {
 			model: model?.id ?? "unknown",
 			usage: {
 				input: 0,
-				output: 0,
+				output: estimatedOutputTokens,
 				cacheRead: 0,
 				cacheWrite: 0,
-				totalTokens: 0,
+				totalTokens: estimatedOutputTokens,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "aborted",

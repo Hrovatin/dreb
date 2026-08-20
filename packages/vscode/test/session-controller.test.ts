@@ -296,11 +296,15 @@ class FakeClient implements RpcClientLike {
 		this.eventListener?.(event);
 	}
 	recoverCalls: string[] = [];
-	/** When true, `recoverInFlightReply` reports it appended an entry (drives a
+	/** When true, `recoverInflightReply` reports it appended an entry (drives a
 	 * transcript rebuild); when false it reports a no-op. */
 	recoverResult = true;
-	async recoverInFlightReply(text: string): Promise<boolean> {
+	/** When set, `recoverInflightReply` rejects with this error (drives the
+	 * swallow-log-and-rearm path in the controller). */
+	recoverError: Error | undefined;
+	async recoverInflightReply(text: string): Promise<boolean> {
 		this.recoverCalls.push(text);
+		if (this.recoverError) throw this.recoverError;
 		return this.recoverResult;
 	}
 	emitExit(info: unknown): void {
@@ -2416,11 +2420,12 @@ describe("SessionController — auto-restart on crash", () => {
 	 * start() call, tracking them for inspection. The first client is started
 	 * immediately (like the real extension does) so the controller is "connected"
 	 * before a test drives an exit. */
-	async function setup(opts: { sessionPath?: string } = {}) {
+	async function setup(opts: { sessionPath?: string; configure?: (client: FakeClient, index: number) => void } = {}) {
 		const clients: FakeClient[] = [];
 		const factory = () => {
 			const c = new FakeClient();
 			c.state = { sessionFile: "/sessions/live.jsonl" };
+			opts.configure?.(c, clients.length);
 			clients.push(c);
 			return c;
 		};
@@ -2737,6 +2742,158 @@ describe("SessionController — auto-restart on crash", () => {
 		await vi.advanceTimersByTimeAsync(600);
 		expect(clients).toHaveLength(3);
 		expect(clients[2].recoverCalls).toEqual([]);
+	});
+
+	it("recovers only the second, unfinished reply of a multi-message turn", async () => {
+		const { clients } = await setup();
+		// First assistant message of the run completes (persisted by the child).
+		streamReply(clients[0], "first answer", true);
+		// A second assistant message in the same run starts streaming but never finishes.
+		clients[0].emit({ type: "message_start", message: { role: "assistant" } });
+		clients[0].emit({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", delta: "second answer" },
+		});
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(clients).toHaveLength(2);
+		// Only the truly-lost last message is recovered — the persisted first message
+		// must not be duplicated.
+		expect(clients[1].recoverCalls).toEqual(["second answer"]);
+	});
+
+	it("recovers a non-streaming text_end block (no deltas)", async () => {
+		const { clients } = await setup();
+		clients[0].emit({ type: "message_start", message: { role: "assistant" } });
+		clients[0].emit({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_end", content: "full block at once" },
+		});
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(clients[1].recoverCalls).toEqual(["full block at once"]);
+	});
+
+	it("recovers every block of a multi-block non-streaming reply", async () => {
+		const { clients } = await setup();
+		clients[0].emit({ type: "message_start", message: { role: "assistant" } });
+		clients[0].emit({ type: "message_update", assistantMessageEvent: { type: "text_end", content: "block one" } });
+		clients[0].emit({ type: "message_update", assistantMessageEvent: { type: "text_end", content: "block two" } });
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		// Both blocks must survive — the old first-block-only adoption dropped "block two".
+		expect(clients[1].recoverCalls).toEqual(["block oneblock two"]);
+	});
+
+	it("recovers a post-tool segment without a leading separator", async () => {
+		const { clients } = await setup();
+		// Persisted first segment, then tool activity, then a second segment that
+		// never reached message_end.
+		streamReply(clients[0], "let me check", true);
+		clients[0].emit({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash" });
+		clients[0].emit({ type: "message_start", message: { role: "assistant" } });
+		clients[0].emit({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", delta: "here is the result" },
+		});
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		// The projection renders the segments separated by a blank line; the recovered
+		// suffix is only the lost segment, without a stray leading blank line.
+		expect(clients[1].recoverCalls).toEqual(["here is the result"]);
+	});
+
+	it("does not rebuild the transcript when recovery is a no-op (recoverResult false)", async () => {
+		const { clients } = await setup({
+			configure: (c, i) => {
+				if (i === 1) c.recoverResult = false;
+			},
+		});
+		streamReply(clients[0], "refused reply", false);
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(clients).toHaveLength(2);
+		expect(clients[1].recoverCalls).toEqual(["refused reply"]);
+		// The restart's own resume rebuilt once; a no-op recovery must not rebuild again.
+		expect(clients[1].getMessagesCalls).toBe(1);
+	});
+
+	it("retries a failed recovery once on the next crash instead of dropping the reply", async () => {
+		const { clients, logs } = await setup({
+			configure: (c, i) => {
+				if (i === 1) c.recoverError = new Error("child died mid-recovery");
+			},
+		});
+		streamReply(clients[0], "precious reply", false);
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		// First recovery attempt failed: logged and swallowed; the restart still completed.
+		expect(clients).toHaveLength(2);
+		expect(clients[1].recoverCalls).toEqual(["precious reply"]);
+		expect(logs.some((l) => l.includes("in-flight reply recovery failed"))).toBe(true);
+
+		// The child crashes again with no new text streamed: the snapshot is still armed,
+		// so the next restart retries it — and this time it succeeds.
+		clients[1].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients).toHaveLength(3);
+		expect(clients[2].recoverCalls).toEqual(["precious reply"]);
+	});
+
+	it("gives up after one failed recovery retry (bounded, no loop, no third attempt)", async () => {
+		const { clients } = await setup({
+			configure: (c, i) => {
+				if (i >= 1) c.recoverError = new Error("always fails");
+			},
+		});
+		streamReply(clients[0], "doomed reply", false);
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients[1].recoverCalls).toEqual(["doomed reply"]);
+
+		// Second crash: the single allowed retry runs and also fails -> snapshot dropped.
+		clients[1].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients).toHaveLength(3);
+		expect(clients[2].recoverCalls).toEqual(["doomed reply"]);
+
+		// Third crash: nothing left to recover — no further attempts.
+		clients[2].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients).toHaveLength(4);
+		expect(clients[3].recoverCalls).toEqual([]);
+	});
+
+	it("never touches recovery or extra rebuilds during ordinary no-crash turns", async () => {
+		const { clients } = await setup();
+		const rebuildsAfterStart = clients[0].getMessagesCalls;
+
+		// Two ordinary completed turns, no crash anywhere.
+		streamReply(clients[0], "turn one", true);
+		clients[0].emit({ type: "agent_end" });
+		streamReply(clients[0], "turn two", true);
+		clients[0].emit({ type: "agent_end" });
+
+		expect(clients).toHaveLength(1);
+		expect(clients[0].recoverCalls).toEqual([]);
+		expect(clients[0].getMessagesCalls).toBe(rebuildsAfterStart);
+	});
+
+	it("real RpcClient satisfies the RpcClientLike recovery contract", async () => {
+		// Regression guard for the casing drift that made recovery a silent no-op in
+		// production (the interface declared `recoverInFlightReply`, the real client
+		// implements `recoverInflightReply`, and the optional member let structural
+		// typing stay silent). The member is now required, so a rename fails `tsgo`;
+		// this runtime assertion covers transpile-only runners (vitest/esbuild).
+		const { RpcClient } = await import("@dreb/coding-agent/rpc");
+		const real: RpcClientLike = new RpcClient({ cliPath: "/cli.js", cwd: "/tmp" });
+		expect(typeof real.recoverInflightReply).toBe("function");
 	});
 });
 

@@ -258,6 +258,12 @@ body {
 	flex: 1 1 auto;
 	min-width: 0;
 }
+.dreb-aborted {
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.85em;
+	font-style: italic;
+	margin-top: 4px;
+}
 .dreb-retry-btn {
 	flex: 0 0 auto;
 	font: inherit;
