@@ -2889,11 +2889,16 @@ describe("SessionController — auto-restart on crash", () => {
 		// Regression guard for the casing drift that made recovery a silent no-op in
 		// production (the interface declared `recoverInFlightReply`, the real client
 		// implements `recoverInflightReply`, and the optional member let structural
-		// typing stay silent). The member is now required, so a rename fails `tsgo`;
-		// this runtime assertion covers transpile-only runners (vitest/esbuild).
+		// typing stay silent). The member is now required, so a rename fails `tsgo`.
+		// The runtime assertion below covers transpile-only runners (vitest/esbuild)
+		// on BOTH sides: `methodName` is constrained to `keyof RpcClientLike`, so
+		// renaming the interface member (without updating this literal) fails `tsgo`,
+		// and looking that same name up on the concrete client catches a client-side
+		// rename at runtime even where types are erased.
 		const { RpcClient } = await import("@dreb/coding-agent/rpc");
 		const real: RpcClientLike = new RpcClient({ cliPath: "/cli.js", cwd: "/tmp" });
-		expect(typeof real.recoverInflightReply).toBe("function");
+		const methodName: keyof RpcClientLike = "recoverInflightReply";
+		expect(typeof (real as unknown as Record<string, unknown>)[methodName]).toBe("function");
 	});
 });
 

@@ -1631,10 +1631,10 @@ export class AgentSession {
 
 		const model = this.model;
 		// Real usage is unknowable — the process that generated the reply died before
-		// reporting it. Estimate output tokens from the text length so context-size and
-		// compaction accounting (which read the last assistant message's usage) stay
-		// roughly correct instead of treating the recovered reply as free. Cost stays
-		// zero rather than fabricating a dollar figure.
+		// reporting it. Estimate output tokens from the text length so the pre-send
+		// compaction check (which includes aborted messages) doesn't treat the
+		// recovered reply as free. Cost stays zero rather than fabricating a dollar
+		// figure, and session/context stats exclude aborted turns entirely.
 		const estimatedOutputTokens = Math.ceil(text.length / 4);
 		const message: AssistantMessage = {
 			role: "assistant",
@@ -4305,6 +4305,11 @@ export class AgentSession {
 		for (const message of state.messages) {
 			if (message.role === "assistant") {
 				const assistantMsg = message as AssistantMessage;
+				// Skip aborted turns (matching getContextUsage / the performance
+				// tracker). Their usage is either unreported or, for a crash-recovered
+				// reply, a best-effort estimate with zero cost — counting it would
+				// inflate the reported token total against an unchanged cost.
+				if (assistantMsg.stopReason === "aborted") continue;
 				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
 				totalInput += assistantMsg.usage.input;
 				totalOutput += assistantMsg.usage.output;

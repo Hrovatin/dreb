@@ -87,16 +87,28 @@ describe("recoverInflightReplyForRpc / AgentSession.recoverInflightReply", () =>
 		const msg = persistedAssistants(sessionManager)[0] as unknown as {
 			provider?: string;
 			model?: string;
-			usage?: { output: number; totalTokens: number; cost: { total: number } };
+			usage?: { input: number; output: number; totalTokens: number; cost: { total: number } };
 		};
 		// The session's configured model, not "unknown" — so downstream same-model
 		// logic (e.g. compaction checks) treats the recovered reply correctly.
 		expect(msg.provider).toBe(session.model?.provider);
 		expect(msg.model).toBe(session.model?.id);
-		// Usage is estimated from text length so context/compaction accounting doesn't
-		// treat the recovered reply as free; cost is not fabricated.
-		expect(msg.usage?.output).toBeGreaterThan(0);
-		expect(msg.usage?.totalTokens).toBe(msg.usage?.output);
+		// Usage is estimated from text length (ceil(length / 4)) so the pre-send
+		// compaction check doesn't treat the recovered reply as free; input is zero
+		// and cost is not fabricated. Pin the exact formula so a divisor/rounding
+		// regression is caught, not just any positive number.
+		const expectedOutput = Math.ceil(text.length / 4);
+		expect(msg.usage?.output).toBe(expectedOutput);
+		expect(msg.usage?.totalTokens).toBe(expectedOutput);
+		expect(msg.usage?.input).toBe(0);
 		expect(msg.usage?.cost.total).toBe(0);
+
+		// The estimate must NOT leak into session token totals (it has zero cost, so
+		// counting it would inflate tokens against an unchanged cost). getSessionStats
+		// excludes aborted turns entirely.
+		const stats = session.getSessionStats();
+		expect(stats.tokens.output).toBe(0);
+		expect(stats.tokens.total).toBe(0);
+		expect(stats.cost).toBe(0);
 	});
 });
