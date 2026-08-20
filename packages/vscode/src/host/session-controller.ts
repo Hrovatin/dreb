@@ -305,6 +305,12 @@ const RECOVERED_MESSAGE_INTERRUPTED =
  * crash time (the previous turn had already completed and was persisted, so it is
  * present in the rebuilt transcript): nothing was lost. */
 const RECOVERED_MESSAGE_IDLE = "Session recovered after an unexpected exit. The session is idle.";
+/** Shown once after a successful auto-recovery when a reply was mid-stream at
+ * crash time and was re-persisted (issue 85): the interrupted reply is back in
+ * the transcript, so there is no loss to report and no Retry to offer (that would
+ * resend an already-answered prompt). */
+const RECOVERED_MESSAGE_RESTORED =
+	"Session recovered after an unexpected exit. The interrupted reply was restored — the session is idle.";
 
 function errorText(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
@@ -1615,14 +1621,15 @@ export class SessionController {
 		// place. Guarded so it only runs on the crash path; the snapshot is cleared
 		// on a definitive answer and retried at most once on failure (see below).
 		// Runs before the recovery notice so the notice appends below the restored
-		// (and re-persisted) conversation.
-		await this.recoverPendingReply();
+		// (and re-persisted) conversation. The result decides whether the notice
+		// reports a restored reply (no "not saved", no Retry) or a lost one.
+		const recovered = await this.recoverPendingReply();
 		// Connected again. Tell the user the session was rebuilt from disk (with the
 		// cause when known). Emitted here — after start()'s transcript rebuild (which
 		// clears items) and the in-flight recovery above — so the notice appends
 		// below the restored conversation. This is strictly the crash path; a clean
 		// initial open/reopen never goes through restart(), so those are unaffected.
-		this.emitRecovery(cause, interrupted);
+		this.emitRecovery(cause, interrupted, recovered);
 		// Arm a stable-run reset so a child that survives long enough clears the
 		// crash budget and a *later* isolated crash still gets a fresh recovery
 		// allowance.
@@ -1630,17 +1637,24 @@ export class SessionController {
 	}
 
 	/** Emit the persistent post-recovery notice. When a reply was mid-stream at
-	 * crash time (`interrupted`), it says the last reply was lost and offers Retry
-	 * (only when a last prompt was retained, reusing the existing `retry()` path).
-	 * When the crash was idle (a completed turn already persisted), it says only
-	 * that the session recovered — no false "not saved" claim and no Retry that
-	 * would resend an already-answered prompt. */
-	private emitRecovery(cause?: string, interrupted = false): void {
+	 * crash time (`interrupted`) but was re-persisted (`recovered`), it says the
+	 * interrupted reply was restored — no false "not saved" claim and no Retry (the
+	 * prompt was already answered and the reply is back). When it was mid-stream but
+	 * NOT recovered, it says the last reply was lost and offers Retry (only when a
+	 * last prompt was retained, reusing the existing `retry()` path). When the crash
+	 * was idle (a completed turn already persisted), it says only that the session
+	 * recovered. */
+	private emitRecovery(cause?: string, interrupted = false, recovered = false): void {
+		const message = recovered
+			? RECOVERED_MESSAGE_RESTORED
+			: interrupted
+				? RECOVERED_MESSAGE_INTERRUPTED
+				: RECOVERED_MESSAGE_IDLE;
 		this.handleEvent({
 			type: "host_recovery",
-			message: interrupted ? RECOVERED_MESSAGE_INTERRUPTED : RECOVERED_MESSAGE_IDLE,
+			message,
 			cause,
-			canRetry: interrupted && this.lastPrompt != null,
+			canRetry: interrupted && !recovered && this.lastPrompt != null,
 		});
 	}
 
@@ -1653,9 +1667,9 @@ export class SessionController {
 	 * permanently drop the reply — bounded so a response lost *after* the child
 	 * appended can't double-append more than once, and a stale snapshot can't
 	 * resurface many restarts later. */
-	private async recoverPendingReply(): Promise<void> {
+	private async recoverPendingReply(): Promise<boolean> {
 		const pending = this.pendingRecovery;
-		if (!pending) return;
+		if (!pending) return false;
 		const client = this.client;
 		if (!client || typeof client.recoverInflightReply !== "function") {
 			// Loud, never silent: a client without the recovery method must not drop
@@ -1664,7 +1678,7 @@ export class SessionController {
 			// no-op in production while every fake passed.)
 			this.logger("in-flight reply recovery unavailable: client does not implement recoverInflightReply");
 			this.rearmPendingRecovery(pending);
-			return;
+			return false;
 		}
 		let recovered: boolean;
 		try {
@@ -1674,7 +1688,7 @@ export class SessionController {
 			// for one bounded retry on the next restart.
 			this.logger(`in-flight reply recovery failed: ${errorText(err)}`);
 			this.rearmPendingRecovery(pending);
-			return;
+			return false;
 		}
 		// The append succeeded (or was a no-op): the reply is now durably on disk, so
 		// the snapshot must be cleared and never re-armed. A failure in the *following*
@@ -1690,6 +1704,7 @@ export class SessionController {
 				this.logger(`transcript rebuild after in-flight recovery failed: ${errorText(err)}`);
 			}
 		}
+		return recovered;
 	}
 
 	/** Re-arm a failed recovery snapshot for one retry on the next restart, and mark

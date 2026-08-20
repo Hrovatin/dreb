@@ -2954,6 +2954,26 @@ describe("SessionController — auto-restart on crash", () => {
 		const methodName: keyof RpcClientLike = "recoverInflightReply";
 		expect(typeof (real as unknown as Record<string, unknown>)[methodName]).toBe("function");
 	});
+
+	it("reports the reply as restored (not lost) and suppresses Retry when recovery succeeds", async () => {
+		const { controller, clients } = await setup();
+		const recoveries = collectRecoveries(controller);
+
+		// A prompt was answered and the reply streamed, but the child died before
+		// persisting it. Recovery re-persists it, so the notice must say it was
+		// restored — not "not saved" — and must not offer Retry (that would resend
+		// an already-answered prompt).
+		await controller.submit("hello");
+		streamReply(clients[0], "the recovered answer", false);
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(clients[1].recoverCalls).toEqual(["the recovered answer"]);
+		expect(recoveries()).toHaveLength(1);
+		expect(recoveries()[0].message).toMatch(/restored/i);
+		expect(recoveries()[0].message).not.toMatch(/not saved/i);
+		expect(recoveries()[0].canRetry).toBe(false);
+	});
 });
 
 describe("extractCrashCause", () => {
