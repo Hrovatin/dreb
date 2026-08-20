@@ -31,13 +31,32 @@
  */
 
 /**
+ * The canonical `uiType` string the VSCode extension must pass (`--ui vscode`)
+ * to opt into projection. Exported so the VSCode host and any test can reference
+ * the single source of truth instead of re-typing the literal — a mismatch is
+ * then a caught drift, not a silent revert to the O(n^2) stream (issue 84).
+ */
+export const VSCODE_UI_TYPE = "vscode";
+
+/** The dashboard `uiType` that has always opted into projection (issue 448). */
+export const DASHBOARD_UI_TYPE = "dashboard";
+
+/**
  * uiTypes whose consumers rebuild the transcript from delta fields + message_end
  * and therefore never read the cumulative `message`/`partial` fields. Their RPC
  * event stream is projected (bounded) before serialization. Generic RPC
  * consumers (`"rpc"`) are intentionally excluded so their protocol is unchanged.
  */
+export const PROJECTED_UI_TYPES: ReadonlySet<string> = new Set([DASHBOARD_UI_TYPE, VSCODE_UI_TYPE]);
+
+/**
+ * Whether the given `uiType` consumer should receive the bounded (projected)
+ * event stream. Input is trimmed so a stray surrounding space in a `--ui` value
+ * cannot silently fall through to the unprojected O(n^2) stream and reintroduce
+ * the mid-reply crash (issue 84).
+ */
 export function shouldProjectRpcEvents(uiType: string | undefined): boolean {
-	return uiType === "dashboard" || uiType === "vscode";
+	return uiType !== undefined && PROJECTED_UI_TYPES.has(uiType.trim());
 }
 
 function omit(event: Record<string, unknown>, ...keys: string[]): Record<string, unknown> {
@@ -48,6 +67,44 @@ function omit(event: Record<string, unknown>, ...keys: string[]): Record<string,
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A projected `message_update` frame carries only delta-sized data, so it should
+ * stay small regardless of reply length. This ceiling is deliberately generous
+ * (far above any legitimate single delta or tool-arg chunk) so it never fires on
+ * normal traffic — it only trips if a future protocol change smuggles a
+ * cumulative, reply-length-scaled field past projection (issue 84).
+ */
+export const PROJECTED_FRAME_WARN_BYTES = 256 * 1024; // 256 KiB
+
+let warnedOversizedFrame = false;
+
+/** Reset the one-shot oversized-frame warning latch (tests only). */
+export function resetProjectedFrameWarning(): void {
+	warnedOversizedFrame = false;
+}
+
+/**
+ * Emit a one-time stderr warning if a projected `message_update` frame is larger
+ * than {@link PROJECTED_FRAME_WARN_BYTES}. Never writes to stdout (that carries
+ * the JSONL protocol). Non-`message_update` events are ignored. See the call
+ * site in `runRpcMode` for why this defense-in-depth guard exists.
+ */
+export function warnIfProjectedFrameOversized(event: Record<string, unknown>): void {
+	if (warnedOversizedFrame || event.type !== "message_update") return;
+	let bytes: number;
+	try {
+		bytes = Buffer.byteLength(JSON.stringify(event), "utf8");
+	} catch {
+		return; // Unserializable frame: leave it to the serializer's own handling.
+	}
+	if (bytes <= PROJECTED_FRAME_WARN_BYTES) return;
+	warnedOversizedFrame = true;
+	console.error(
+		`[rpc-projection] projected message_update frame is ${bytes} bytes (> ${PROJECTED_FRAME_WARN_BYTES}); ` +
+			"a cumulative field may be escaping projection and could reintroduce the quadratic stream (issue 84).",
+	);
 }
 
 /**

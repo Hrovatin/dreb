@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { projectDashboardRpcEvent, shouldProjectRpcEvents } from "../src/modes/rpc/rpc-event-projection.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+	PROJECTED_FRAME_WARN_BYTES,
+	projectDashboardRpcEvent,
+	resetProjectedFrameWarning,
+	shouldProjectRpcEvents,
+	warnIfProjectedFrameOversized,
+} from "../src/modes/rpc/rpc-event-projection.js";
 
 function growingAssistantMessage(textLength: number) {
 	return {
@@ -160,5 +166,59 @@ describe("shouldProjectRpcEvents", () => {
 		expect(shouldProjectRpcEvents("tui")).toBe(false);
 		expect(shouldProjectRpcEvents("cli")).toBe(false);
 		expect(shouldProjectRpcEvents(undefined)).toBe(false);
+	});
+
+	it("tolerates surrounding whitespace so a stray-space --ui value still projects", () => {
+		// A trailing space in a --ui value must not silently fall through to the
+		// unprojected O(n^2) stream (issue 84).
+		expect(shouldProjectRpcEvents(" vscode ")).toBe(true);
+		expect(shouldProjectRpcEvents("dashboard ")).toBe(true);
+	});
+});
+
+describe("warnIfProjectedFrameOversized", () => {
+	function messageUpdate(textLength: number): Record<string, unknown> {
+		return {
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", delta: "x".repeat(textLength) },
+		};
+	}
+
+	it("stays silent for normal delta-sized frames", () => {
+		resetProjectedFrameWarning();
+		const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			warnIfProjectedFrameOversized(messageUpdate(100));
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("warns once (to stderr) when a projected frame exceeds the ceiling", () => {
+		resetProjectedFrameWarning();
+		const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			warnIfProjectedFrameOversized(messageUpdate(PROJECTED_FRAME_WARN_BYTES + 1_000));
+			warnIfProjectedFrameOversized(messageUpdate(PROJECTED_FRAME_WARN_BYTES + 1_000));
+			expect(spy).toHaveBeenCalledTimes(1);
+			expect(String(spy.mock.calls[0]?.[0])).toContain("issue 84");
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("ignores non-message_update events", () => {
+		resetProjectedFrameWarning();
+		const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			warnIfProjectedFrameOversized({
+				type: "message_end",
+				message: { text: "x".repeat(PROJECTED_FRAME_WARN_BYTES + 1_000) },
+			});
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
+			spy.mockRestore();
+		}
 	});
 });

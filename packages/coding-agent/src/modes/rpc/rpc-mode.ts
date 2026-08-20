@@ -59,7 +59,11 @@ import {
 import { type Theme, theme } from "../interactive/theme/theme.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
 import { installRpcCrashGuards } from "./rpc-crash-guard.js";
-import { projectDashboardRpcEvent, shouldProjectRpcEvents } from "./rpc-event-projection.js";
+import {
+	projectDashboardRpcEvent,
+	shouldProjectRpcEvents,
+	warnIfProjectedFrameOversized,
+} from "./rpc-event-projection.js";
 import type {
 	RpcAgentTypeInfo,
 	RpcBackgroundAgentInfo,
@@ -1857,7 +1861,20 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 				tabTitleGenerator.onMessageEnd(event.message);
 			}
 		}
-		output(projectEvents ? projectDashboardRpcEvent(event as unknown as Record<string, unknown>) : event);
+		if (projectEvents) {
+			const projected = projectDashboardRpcEvent(event as unknown as Record<string, unknown>);
+			// Defense-in-depth (issue 84): projection strips a hardcoded set of
+			// cumulative fields. If a future protocol change adds a new cumulative
+			// field to message_update, projection would miss it and per-frame size
+			// would start growing with reply length again — silently reintroducing
+			// the quadratic stream that overruns the 16 MiB stdout queue. A single
+			// stderr warning (never stdout — that would corrupt the JSONL pipe)
+			// makes that regression observable instead of a silent crash.
+			warnIfProjectedFrameOversized(projected);
+			output(projected);
+		} else {
+			output(event);
+		}
 	});
 
 	// Handle a single command

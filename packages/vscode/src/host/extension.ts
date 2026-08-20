@@ -18,6 +18,7 @@ import { relative, sep } from "node:path";
 import * as vscode from "vscode";
 import type { LiveSessionInput } from "../shared/session-list.js";
 import { formatTabTitle } from "../shared/tab-title.js";
+import { buildArgs } from "./build-args.js";
 import { resolveCliPath } from "./cli-path.js";
 import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
@@ -535,20 +536,6 @@ async function deleteSession(key: string): Promise<void> {
 
 function workspaceCwd(): string {
 	return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? homedir();
-}
-
-function buildArgs(config: vscode.WorkspaceConfiguration): string[] {
-	const args: string[] = [];
-	// Identify this consumer as the VSCode extension so the RPC child projects
-	// (bounds) the message_update event stream. Without it the child receives the
-	// full O(n^2) cumulative stream and a long reply overruns the 16 MiB stdout
-	// queue, killing the child mid-reply before the reply is persisted (issue 84).
-	args.push("--ui", "vscode");
-	const provider = config.get<string>("provider")?.trim();
-	const model = config.get<string>("model")?.trim();
-	if (provider) args.push("--provider", provider);
-	if (model) args.push("--model", model);
-	return args;
 }
 
 function makeNonce(): string {
