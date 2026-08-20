@@ -104,6 +104,43 @@ describe("projection", () => {
 		expect(onlyResponse(nonStreaming).answer).toBe("whole answer");
 	});
 
+	it("adopts every block of a multi-block non-streaming reply, and never double-appends streamed blocks", () => {
+		// A non-streaming provider emits only text_end per block; all blocks must land,
+		// not just the first.
+		const multiBlock = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_end", content: "first block" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_end", content: "second block" } },
+			{ type: "agent_end" },
+		]);
+		expect(onlyResponse(multiBlock).answer).toBe("first blocksecond block");
+
+		// A streaming provider sends deltas AND text_end with the same content — the
+		// text_end adoption must not duplicate it.
+		const streamed = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "streamed" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_end", content: "streamed" } },
+			{ type: "agent_end" },
+		]);
+		expect(onlyResponse(streamed).answer).toBe("streamed");
+	});
+
+	it("marks a run aborted on an assistant message_end with stopReason aborted", () => {
+		const state = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "partial ans" } },
+			{ type: "message_end", message: { role: "assistant", stopReason: "aborted" } },
+			{ type: "agent_end" },
+		]);
+		const group = onlyResponse(state);
+		expect(group.aborted).toBe(true);
+		expect(group.error).toBeUndefined();
+	});
+
 	it("maps an ask request's questions[] into a structured multi-question wizard", () => {
 		const state = createTranscriptState();
 		applyEvent(state, {
@@ -341,6 +378,20 @@ describe("projection", () => {
 });
 
 describe("foldMessagesIntoState (Phase 6 full-content rebuild)", () => {
+	it("marks a rebuilt group aborted when the persisted assistant message was interrupted", () => {
+		const state = createTranscriptState();
+		foldMessagesIntoState(state, [
+			{ role: "user", content: "question" },
+			// A recovered reply is persisted with stopReason "aborted" — the rebuilt
+			// transcript must carry the marker so the UI can show it was interrupted.
+			{ role: "assistant", content: [{ type: "text", text: "recovered reply" }], stopReason: "aborted" },
+		]);
+		const group = onlyResponse(state);
+		expect(group.answer).toBe("recovered reply");
+		expect(group.aborted).toBe(true);
+		expect(group.error).toBeUndefined();
+	});
+
 	it("rebuilds plain user/assistant turns in place with full answers (stable reference)", () => {
 		const state = createTranscriptState();
 		state.items.push({ kind: "user", text: "stale" });

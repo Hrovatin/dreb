@@ -19,6 +19,12 @@ class MiniClient implements RpcClientLike {
 	private ev: ((e: any) => void) | undefined;
 	async start(): Promise<void> {}
 	async stop(): Promise<void> {}
+	// Recovery is a required member of RpcClientLike (kept in lockstep with the real
+	// RpcClient so a fake can never drift from production wiring); these tests never
+	// crash the fake child, so a no-op stub suffices.
+	async recoverInflightReply(): Promise<boolean> {
+		return false;
+	}
 	async prompt(): Promise<void> {}
 	async abort(): Promise<void> {}
 	async steer(): Promise<void> {}
