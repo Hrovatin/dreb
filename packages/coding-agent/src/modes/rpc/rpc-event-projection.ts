@@ -86,19 +86,17 @@ export function resetProjectedFrameWarning(): void {
 }
 
 /**
- * Emit a one-time stderr warning if a projected `message_update` frame is larger
- * than {@link PROJECTED_FRAME_WARN_BYTES}. Never writes to stdout (that carries
- * the JSONL protocol). Non-`message_update` events are ignored. See the call
- * site in `runRpcMode` for why this defense-in-depth guard exists.
+ * Emit a one-time stderr warning if a projected `message_update` frame's
+ * already-serialized JSONL line exceeds {@link PROJECTED_FRAME_WARN_BYTES}.
+ * Takes the serialized line (produced once by the caller for the actual write)
+ * so this check adds no extra serialization on the streaming hot path. Never
+ * writes to stdout (that carries the JSONL protocol). Non-`message_update`
+ * events are ignored. See the call site in `runRpcMode` for why this
+ * defense-in-depth guard exists.
  */
-export function warnIfProjectedFrameOversized(event: Record<string, unknown>): void {
+export function warnIfProjectedFrameOversized(event: Record<string, unknown>, serialized: string): void {
 	if (warnedOversizedFrame || event.type !== "message_update") return;
-	let bytes: number;
-	try {
-		bytes = Buffer.byteLength(JSON.stringify(event), "utf8");
-	} catch {
-		return; // Unserializable frame: leave it to the serializer's own handling.
-	}
+	const bytes = Buffer.byteLength(serialized, "utf8");
 	if (bytes <= PROJECTED_FRAME_WARN_BYTES) return;
 	warnedOversizedFrame = true;
 	console.error(

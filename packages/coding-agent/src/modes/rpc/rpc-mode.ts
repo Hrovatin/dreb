@@ -1863,6 +1863,10 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 		}
 		if (projectEvents) {
 			const projected = projectDashboardRpcEvent(event as unknown as Record<string, unknown>);
+			// Serialize once and reuse the line for both the size check and the
+			// actual write, so the defense-in-depth guard adds no extra
+			// serialization on the streaming hot path.
+			const line = serializeJsonLine(projected);
 			// Defense-in-depth (issue 84): projection strips a hardcoded set of
 			// cumulative fields. If a future protocol change adds a new cumulative
 			// field to message_update, projection would miss it and per-frame size
@@ -1870,8 +1874,8 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 			// the quadratic stream that overruns the 16 MiB stdout queue. A single
 			// stderr warning (never stdout — that would corrupt the JSONL pipe)
 			// makes that regression observable instead of a silent crash.
-			warnIfProjectedFrameOversized(projected);
-			output(projected);
+			warnIfProjectedFrameOversized(projected, line);
+			writeRawStdout(line);
 		} else {
 			output(event);
 		}

@@ -184,23 +184,57 @@ describe("warnIfProjectedFrameOversized", () => {
 		};
 	}
 
+	/** Serialize an event the way runRpcMode does before calling the guard. */
+	function line(event: Record<string, unknown>): string {
+		return JSON.stringify(event);
+	}
+
 	it("stays silent for normal delta-sized frames", () => {
 		resetProjectedFrameWarning();
 		const spy = vi.spyOn(console, "error").mockImplementation(() => {});
 		try {
-			warnIfProjectedFrameOversized(messageUpdate(100));
+			const event = messageUpdate(100);
+			warnIfProjectedFrameOversized(event, line(event));
 			expect(spy).not.toHaveBeenCalled();
 		} finally {
 			spy.mockRestore();
 		}
 	});
 
-	it("warns once (to stderr) when a projected frame exceeds the ceiling", () => {
+	it("stays silent exactly at the threshold and warns one byte over it", () => {
+		// Land the serialized length exactly on the ceiling, then one byte past it,
+		// to pin the `<=` boundary (guards against an off-by-one operator flip).
+		const base = line(messageUpdate(0)).length;
+		const atLimit = messageUpdate(PROJECTED_FRAME_WARN_BYTES - base);
+		expect(line(atLimit).length).toBe(PROJECTED_FRAME_WARN_BYTES);
+
+		resetProjectedFrameWarning();
+		let spy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			warnIfProjectedFrameOversized(atLimit, line(atLimit));
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
+			spy.mockRestore();
+		}
+
+		const overLimit = messageUpdate(PROJECTED_FRAME_WARN_BYTES - base + 1);
+		expect(line(overLimit).length).toBe(PROJECTED_FRAME_WARN_BYTES + 1);
+		resetProjectedFrameWarning();
+		spy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			warnIfProjectedFrameOversized(overLimit, line(overLimit));
+			expect(spy).toHaveBeenCalledTimes(1);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("warns once (to stderr) and stays latched across many oversized frames", () => {
 		resetProjectedFrameWarning();
 		const spy = vi.spyOn(console, "error").mockImplementation(() => {});
 		try {
-			warnIfProjectedFrameOversized(messageUpdate(PROJECTED_FRAME_WARN_BYTES + 1_000));
-			warnIfProjectedFrameOversized(messageUpdate(PROJECTED_FRAME_WARN_BYTES + 1_000));
+			const event = messageUpdate(PROJECTED_FRAME_WARN_BYTES + 1_000);
+			for (let i = 0; i < 6; i++) warnIfProjectedFrameOversized(event, line(event));
 			expect(spy).toHaveBeenCalledTimes(1);
 			expect(String(spy.mock.calls[0]?.[0])).toContain("issue 84");
 		} finally {
@@ -212,10 +246,11 @@ describe("warnIfProjectedFrameOversized", () => {
 		resetProjectedFrameWarning();
 		const spy = vi.spyOn(console, "error").mockImplementation(() => {});
 		try {
-			warnIfProjectedFrameOversized({
+			const event = {
 				type: "message_end",
 				message: { text: "x".repeat(PROJECTED_FRAME_WARN_BYTES + 1_000) },
-			});
+			};
+			warnIfProjectedFrameOversized(event, line(event));
 			expect(spy).not.toHaveBeenCalled();
 		} finally {
 			spy.mockRestore();

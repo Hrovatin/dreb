@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as outputGuard from "../src/core/output-guard.js";
 import * as jsonl from "../src/modes/rpc/jsonl.js";
+import * as projection from "../src/modes/rpc/rpc-event-projection.js";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.js";
 import { createHarness, type Harness } from "./test-harness.js";
 
@@ -245,6 +246,49 @@ describe("runRpcMode dashboard event projection (issue 448)", () => {
 			const endMessage = messageEnd?.message as { content?: Array<{ text?: string }> };
 			expect(endMessage.content?.[0]?.text).toHaveLength(8_000);
 		} finally {
+			capture.detach();
+			harness.cleanup();
+		}
+	});
+
+	// Issue 84 hardening: the oversized-frame guard is the canary that would make
+	// a FUTURE quadratic-growth regression observable. Prove runRpcMode actually
+	// runs it on the live projected path (on the projected frame + its serialized
+	// line), and never on the generic-rpc path — a wiring mistake here would
+	// silently disable that safety net.
+	it("runs warnIfProjectedFrameOversized on the projected frame for a projected consumer", async () => {
+		const spy = vi.spyOn(projection, "warnIfProjectedFrameOversized");
+		const { capture, harness } = await streamTextOfSize(4_000, "vscode");
+		try {
+			const updates = messageUpdateFrames(capture);
+			// Called once per emitted message_update frame.
+			const guardedUpdates = spy.mock.calls.filter(
+				([event]) => (event as Record<string, unknown>).type === "message_update",
+			);
+			expect(guardedUpdates.length).toBe(updates.length);
+			for (const [event, serialized] of guardedUpdates) {
+				// It sees the PROJECTED frame (cumulative field stripped)...
+				expect((event as Record<string, unknown>).message).toBeUndefined();
+				// ...and the serialized line matches what is actually written, so the
+				// size check reflects the real wire bytes with no re-serialization.
+				expect(serialized).toBe(jsonl.serializeJsonLine(event));
+			}
+		} finally {
+			spy.mockRestore();
+			capture.detach();
+			harness.cleanup();
+		}
+	});
+
+	it("does not run warnIfProjectedFrameOversized for a generic RPC consumer", async () => {
+		const spy = vi.spyOn(projection, "warnIfProjectedFrameOversized");
+		const harness = createHarness({ responses: ["x".repeat(4_000)], uiType: "rpc" });
+		const capture = await startRpcMode(harness);
+		try {
+			await harness.session.prompt("hi");
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
+			spy.mockRestore();
 			capture.detach();
 			harness.cleanup();
 		}
