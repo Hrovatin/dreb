@@ -73,6 +73,25 @@ describe("ResponseView retry control", () => {
 		expect(host.querySelector(".dreb-banner.error")).toBeNull();
 		expect(host.querySelector("button.dreb-retry-btn")).toBeNull();
 	});
+
+	it("renders the Interrupted marker when the group is aborted", () => {
+		const aborted: ResponseGroup = {
+			...erroredGroup(),
+			error: undefined,
+			answer: "partial reply",
+			aborted: true,
+		};
+		const host = mount(aborted);
+		const marker = host.querySelector(".dreb-aborted");
+		expect(marker).not.toBeNull();
+		expect(marker?.textContent).toContain("Interrupted");
+	});
+
+	it("renders no Interrupted marker for a non-aborted turn", () => {
+		const clean: ResponseGroup = { ...erroredGroup(), error: undefined, answer: "all done" };
+		const host = mount(clean);
+		expect(host.querySelector(".dreb-aborted")).toBeNull();
+	});
 });
 
 /**
