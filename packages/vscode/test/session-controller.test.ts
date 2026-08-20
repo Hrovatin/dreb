@@ -2885,6 +2885,60 @@ describe("SessionController — auto-restart on crash", () => {
 		expect(clients[0].getMessagesCalls).toBe(rebuildsAfterStart);
 	});
 
+	it("does not re-append a recovered reply when the post-recovery rebuild fails", async () => {
+		// Recovery durably appends the reply, then the follow-up transcript rebuild
+		// throws (a transient RPC failure right after the append). The reply is
+		// already on disk, so the snapshot must NOT be re-armed — otherwise the next
+		// restart would append the same reply a second time (a double-persist that
+		// violates criterion 4, "no double-recovery across repeated crashes").
+		const { clients, logs } = await setup({
+			configure: (c, i) => {
+				if (i === 1) c.rebuildError = new Error("getMessages died right after append");
+			},
+		});
+		streamReply(clients[0], "recovered once", false);
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		// The append happened exactly once, through the restarted child.
+		expect(clients[1].recoverCalls).toEqual(["recovered once"]);
+		// The rebuild-after-recovery failure is logged, not folded into a re-arm.
+		expect(logs.some((l) => l.includes("transcript rebuild after in-flight recovery failed"))).toBe(true);
+
+		// Second crash, no new text streamed: the snapshot was cleared once the append
+		// succeeded, so nothing is re-appended — no duplicate on disk.
+		clients[1].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		expect(clients).toHaveLength(3);
+		expect(clients[2].recoverCalls).toEqual([]);
+	});
+
+	it("combines a still-pending retry with newly streamed text on a later crash", async () => {
+		// A recovery fails once (snapshot stays armed). Before the next crash the
+		// restarted child streams *additional* unpersisted text. The following crash
+		// must recover both the previously-lost text and the new text together, in
+		// order — nothing dropped, nothing duplicated.
+		const { clients } = await setup({
+			configure: (c, i) => {
+				if (i === 1) c.recoverError = new Error("child died mid-recovery");
+			},
+		});
+		streamReply(clients[0], "first part", false);
+		clients[0].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+		// First recovery failed and was re-armed for retry.
+		expect(clients[1].recoverCalls).toEqual(["first part"]);
+
+		// The restarted child streams more text, then crashes before persisting it.
+		streamReply(clients[1], "second part", false);
+		clients[1].emitExit({ code: 1, signal: null });
+		await vi.advanceTimersByTimeAsync(600);
+
+		// The next child recovers the combined text once.
+		expect(clients).toHaveLength(3);
+		expect(clients[2].recoverCalls).toEqual(["first partsecond part"]);
+	});
+
 	it("real RpcClient satisfies the RpcClientLike recovery contract", async () => {
 		// Regression guard for the casing drift that made recovery a silent no-op in
 		// production (the interface declared `recoverInFlightReply`, the real client

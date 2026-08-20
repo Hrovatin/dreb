@@ -1666,13 +1666,29 @@ export class SessionController {
 			this.rearmPendingRecovery(pending);
 			return;
 		}
+		let recovered: boolean;
 		try {
-			const recovered = await client.recoverInflightReply(pending.text);
-			this.pendingRecovery = undefined;
-			if (recovered) await this.rebuildTranscript();
+			recovered = await client.recoverInflightReply(pending.text);
 		} catch (err) {
+			// The append itself failed — the reply is not durably persisted, so re-arm
+			// for one bounded retry on the next restart.
 			this.logger(`in-flight reply recovery failed: ${errorText(err)}`);
 			this.rearmPendingRecovery(pending);
+			return;
+		}
+		// The append succeeded (or was a no-op): the reply is now durably on disk, so
+		// the snapshot must be cleared and never re-armed. A failure in the *following*
+		// transcript rebuild must NOT re-arm — doing so would re-append the same reply
+		// on the next restart, a double-persist that violates "no double-recovery
+		// across repeated crashes". The recovered reply will render on the next
+		// natural reconnect/rebuild regardless.
+		this.pendingRecovery = undefined;
+		if (recovered) {
+			try {
+				await this.rebuildTranscript();
+			} catch (err) {
+				this.logger(`transcript rebuild after in-flight recovery failed: ${errorText(err)}`);
+			}
 		}
 	}
 
