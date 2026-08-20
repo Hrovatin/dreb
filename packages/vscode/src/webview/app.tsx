@@ -265,6 +265,11 @@ export function App() {
 								<div class="dreb-user">{item.text}</div>
 							) : item.kind === "system" ? (
 								<pre class="dreb-system">{item.text}</pre>
+							) : item.kind === "recovery" ? (
+								<RetryBanner
+									text={item.text}
+									onRetry={item.canRetry ? () => postToHost({ type: "retry" }) : undefined}
+								/>
 							) : (
 								<>
 									<ResponseView
@@ -437,19 +442,29 @@ export function ResponseView(props: { group: ResponseGroup; onRetry?: () => void
 				/>
 			</Show>
 			<Show when={props.group.error}>
-				<div class="dreb-banner error">
-					<span class="dreb-banner-text">{props.group.error}</span>
-					<Show when={props.onRetry}>
-						<button
-							type="button"
-							class="dreb-retry-btn"
-							title="Resend the last message"
-							onClick={() => props.onRetry?.()}
-						>
-							↻ Retry
-						</button>
-					</Show>
-				</div>
+				<RetryBanner text={props.group.error ?? ""} onRetry={props.onRetry} />
+			</Show>
+		</div>
+	);
+}
+
+/** Error/notice banner with an optional one-click Retry, reused by the response
+ * error group and the crash-recovery item. Retry is shown only when `onRetry` is
+ * provided; the callback's origin (host retry vs. `postToHost`) is the caller's
+ * concern. */
+export function RetryBanner(props: { text: string; onRetry?: () => void }) {
+	return (
+		<div class="dreb-banner error">
+			<span class="dreb-banner-text">{props.text}</span>
+			<Show when={props.onRetry}>
+				<button
+					type="button"
+					class="dreb-retry-btn"
+					title="Resend the last message"
+					onClick={() => props.onRetry?.()}
+				>
+					↻ Retry
+				</button>
 			</Show>
 		</div>
 	);
