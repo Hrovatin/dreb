@@ -2,7 +2,6 @@
 name: mach6-implement
 description: "Implement a plan from a PR, or fix review findings / CI failures. Usage: mach6-implement 42 [finding-numbers] or mach6-implement 42 ci"
 argument-hint: "<pr-number> [finding-numbers | ci]"
-requires-write: true
 ---
 
 # mach6-implement — Implement Plans, Fix Findings, or Fix CI
@@ -43,10 +42,30 @@ Extract:
 If only a PR number is given → **implement mode**.
 If finding numbers or `ci` → **fix mode**.
 
-## Step 2: Checkout
+## Step 2: Checkout via worktree
+
+Instead of switching branches in the current directory, use a git worktree. This keeps the user's working tree untouched.
 
 ```bash
-gh pr checkout <pr-number>
+# Get the PR's branch name and linked issue number
+PR_BRANCH=$(gh pr view <pr-number> --json headRefName --jq '.headRefName')
+# Extract issue number from PR body (look for "Closes #N" or similar)
+REPO_NAME=$(basename "$(git rev-parse --show-toplevel)")
+
+# Check if a worktree already exists for this branch
+git worktree list
+# If a worktree exists for the PR branch, reuse it.
+# If not, create one:
+git worktree add "../${REPO_NAME}-worktrees/issue-<N>" "$PR_BRANCH"
+```
+
+Switch the agent's working directory to the worktree using the `chdir` tool:
+```
+chdir { path: "<worktree-path>" }
+```
+
+Then pull latest changes:
+```bash
 git pull
 ```
 

@@ -227,31 +227,6 @@ describe("skills", () => {
 			expect(skills[0].disableModelInvocation).toBe(false);
 		});
 
-		it("should parse requires-write frontmatter field", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
-				dir: join(fixturesDir, "requires-write"),
-				source: "test",
-			});
-
-			expect(skills).toHaveLength(1);
-			expect(skills[0].name).toBe("requires-write");
-			expect(skills[0].requiresWrite).toBe(true);
-			// Should not warn about unknown field
-			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("unknown frontmatter field"))).toBe(
-				false,
-			);
-		});
-
-		it("should leave requiresWrite falsy when not specified", () => {
-			const { skills } = loadSkillsFromDir({
-				dir: join(fixturesDir, "valid-skill"),
-				source: "test",
-			});
-
-			expect(skills).toHaveLength(1);
-			expect(skills[0].requiresWrite).toBeFalsy();
-		});
-
 		it("should parse all frontmatter fields", () => {
 			const { skills, diagnostics } = loadSkillsFromDir({
 				dir: join(fixturesDir, "full-frontmatter"),
