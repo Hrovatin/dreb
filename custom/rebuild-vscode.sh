@@ -42,6 +42,13 @@
 # already correctly rebased onto #458, so its skill docs are the canonical
 # "#458 + worktree" result).
 #
+# NOTE: reconciliation is applied UNCONDITIONALLY after the rebase completes,
+# not only on merge conflict. A file both sides touched can auto-merge WITHOUT
+# a conflict, silently letting BASE's copy win and dropping worktree-cleaned's
+# canonical version (this is how the mach6-plan worktree instructions went
+# missing once). The post-rebase force-reconcile + verify block guarantees the
+# RECONCILE_FILES always match RECONCILE_FROM, or the script fails loudly.
+#
 # Corruption-safety (aebrer/dreb#461): uses only `rebase` (+ `checkout -- file`
 # to stage resolutions). `git rebase` never runs the test-running pre-commit
 # hook, so the GIT_* env-leak corruption bug cannot fire.
@@ -120,6 +127,46 @@ else
 		GIT_EDITOR=true git rebase --continue || true
 	done
 fi
+
+# ---------------------------------------------------------------------------
+# Force-reconcile the known collision files UNCONDITIONALLY.
+#
+# The conflict loop above only fires the RECONCILE override for files that
+# actually produced a merge conflict during the rebase. A file both sides
+# touched can three-way-merge WITHOUT a conflict, in which case BASE's copy
+# silently wins and worktree-cleaned's canonical "#458 + worktree" version is
+# lost with no error (this is exactly how the mach6-plan worktree instructions
+# went missing). So after the rebase completes, explicitly overwrite each
+# RECONCILE_FILES entry with RECONCILE_FROM's copy and commit any drift.
+# ---------------------------------------------------------------------------
+reconcile_changed=""
+for rf in "${RECONCILE_FILES[@]}"; do
+	git cat-file -e "$RECONCILE_FROM:$rf" 2>/dev/null || continue
+	if ! diff -q <(git show "$RECONCILE_FROM:$rf") "$rf" >/dev/null 2>&1; then
+		git checkout "$RECONCILE_FROM" -- "$rf"
+		reconcile_changed="$reconcile_changed $rf"
+	fi
+done
+if [ -n "${reconcile_changed// /}" ]; then
+	git add -- $reconcile_changed
+	# Corruption-safety (aebrer/dreb#461): the GIT_* env-leak bug fires when the
+	# test-running pre-commit hook executes. --no-verify SKIPS that hook, so this
+	# commit cannot trigger the bug. (This is the one non-merge commit the script
+	# makes; it is safe precisely because the hook is bypassed.)
+	git commit --no-verify -m "chore: reconcile skill docs to $RECONCILE_FROM canonical copies" >/dev/null
+	echo "   force-reconciled to $RECONCILE_FROM:$reconcile_changed"
+fi
+
+# Verify: fail loudly if any RECONCILE_FILES entry still diverges from
+# RECONCILE_FROM. Turns silent content-loss into a hard error next time.
+for rf in "${RECONCILE_FILES[@]}"; do
+	git cat-file -e "$RECONCILE_FROM:$rf" 2>/dev/null || continue
+	if ! diff -q <(git show "$RECONCILE_FROM:$rf") "$rf" >/dev/null 2>&1; then
+		echo "ERROR: $rf does not match $RECONCILE_FROM after reconciliation" >&2
+		echo "       Resolve in $BUILD_WT and re-run." >&2
+		exit 3
+	fi
+done
 
 git branch -f vscode vscode-rebuild
 git branch -D vscode-rebuild >/dev/null 2>&1 || true
