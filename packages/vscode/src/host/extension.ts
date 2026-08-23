@@ -13,6 +13,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { relative, sep } from "node:path";
 import * as vscode from "vscode";
@@ -20,6 +21,7 @@ import type { LiveSessionInput } from "../shared/session-list.js";
 import { formatTabTitle } from "../shared/tab-title.js";
 import { buildArgs } from "./build-args.js";
 import { resolveCliPath } from "./cli-path.js";
+import { resolveNodePath } from "./node-path.js";
 import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
@@ -292,12 +294,14 @@ function selectionTagDeps(open: () => Promise<ChatSession | undefined>): TagSele
 function createSession(context: vscode.ExtensionContext, key: string, sessionPath?: string): ChatSession {
 	const config = vscode.workspace.getConfiguration("dreb");
 	const cwd = workspaceCwd();
-	const cli = resolveCliPath({ configuredPath: config.get<string>("cliPath") });
+	const { cli, node } = resolveRuntime(config);
 
 	const reviewUi = createVscodeReviewUi(cwd);
 	const controller = new SessionController({
 		cwd,
 		cliPath: cli.ok ? cli.path : "",
+		nodePath: node.nodePath,
+		env: node.env,
 		args: buildArgs(config),
 		sessionPath,
 		ui: createVscodeHostUi(),
@@ -480,7 +484,7 @@ async function renameSession(key: string, name: string): Promise<void> {
 	const all = await inventory.listAll();
 	const cwd = all.find((s) => s.path === path)?.cwd ?? workspaceCwd();
 	const config = vscode.workspace.getConfiguration("dreb");
-	const cli = resolveCliPath({ configuredPath: config.get<string>("cliPath") });
+	const { cli, node } = resolveRuntime(config);
 	if (!cli.ok) {
 		vscode.window.showErrorMessage(`dreb: cannot rename — ${cli.error}`);
 		return;
@@ -488,6 +492,8 @@ async function renameSession(key: string, name: string): Promise<void> {
 	const controller = new SessionController({
 		cwd,
 		cliPath: cli.path,
+		nodePath: node.nodePath,
+		env: node.env,
 		args: buildArgs(config),
 		sessionPath: path,
 		logger: (line) => console.warn(`[dreb] ${line}`),
@@ -536,6 +542,45 @@ async function deleteSession(key: string): Promise<void> {
 
 function workspaceCwd(): string {
 	return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? homedir();
+}
+
+/** Cached real (symlink-resolved) directory of this extension's install. */
+let extensionRealDirCache: string | undefined;
+
+/**
+ * This extension's own directory with symlinks resolved. A repo-local install
+ * symlinks `packages/vscode` into `~/.vscode/extensions`, so `extensionUri.fsPath`
+ * is the symlink; `realpath` yields the actual monorepo path, which repo-relative
+ * CLI resolution needs to reach the sibling `packages/coding-agent`.
+ */
+function extensionDirReal(): string | undefined {
+	if (extensionRealDirCache) return extensionRealDirCache;
+	const raw = extensionContext?.extensionUri.fsPath;
+	if (!raw) return undefined;
+	try {
+		extensionRealDirCache = realpathSync(raw);
+	} catch {
+		extensionRealDirCache = raw;
+	}
+	return extensionRealDirCache;
+}
+
+/**
+ * Resolve the runtime a session needs: the CLI entry point (repo-relative by
+ * default) and the Node executable to spawn it with (a discovered Node >=22 or
+ * the editor's own runtime). Centralized so every controller call site stays in
+ * sync.
+ */
+function resolveRuntime(config: vscode.WorkspaceConfiguration): {
+	cli: ReturnType<typeof resolveCliPath>;
+	node: ReturnType<typeof resolveNodePath>;
+} {
+	const cli = resolveCliPath({
+		configuredPath: config.get<string>("cliPath"),
+		extensionDir: extensionDirReal(),
+	});
+	const node = resolveNodePath({ configuredPath: config.get<string>("nodePath") });
+	return { cli, node };
 }
 
 function makeNonce(): string {

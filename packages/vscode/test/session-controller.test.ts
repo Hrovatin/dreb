@@ -1661,6 +1661,46 @@ describe("SessionController", () => {
 		expect(capturedArgs).not.toContain("--session");
 	});
 
+	it("forwards nodePath and env to the client factory", async () => {
+		const fake = new FakeClient();
+		let captured: { nodePath?: string; env?: Record<string, string> } | undefined;
+		const controller = new SessionController({
+			cwd: "/tmp/project",
+			cliPath: "/cli.js",
+			nodePath: "/opt/node22/bin/node",
+			env: { ELECTRON_RUN_AS_NODE: "1" },
+			clientFactory: (opts) => {
+				captured = { nodePath: opts.nodePath, env: opts.env };
+				return fake;
+			},
+		});
+
+		await controller.start();
+
+		expect(captured).toEqual({
+			nodePath: "/opt/node22/bin/node",
+			env: { ELECTRON_RUN_AS_NODE: "1" },
+		});
+	});
+
+	it("omits nodePath and env from the factory options when unset", async () => {
+		const fake = new FakeClient();
+		let captured: { nodePath?: string; env?: Record<string, string> } | undefined;
+		const controller = new SessionController({
+			cwd: "/tmp/project",
+			cliPath: "/cli.js",
+			clientFactory: (opts) => {
+				captured = { nodePath: opts.nodePath, env: opts.env };
+				return fake;
+			},
+		});
+
+		await controller.start();
+
+		expect(captured?.nodePath).toBeUndefined();
+		expect(captured?.env).toBeUndefined();
+	});
+
 	it("rename() forwards the name to the client's setSessionName", async () => {
 		const fake = new FakeClient();
 		const controller = makeController(fake);
