@@ -17,6 +17,7 @@ import {
 	extensionsDir,
 	installPlan,
 	isDirectRun,
+	isSymlink,
 	linkName,
 	parseArgs,
 	removeExisting,
@@ -305,5 +306,44 @@ describe("isDirectRun (entrypoint guard — finding 1)", () => {
 
 	it("is false when there is no argv[1]", () => {
 		expect(isDirectRun("file:///whatever.mjs", undefined)).toBe(false);
+	});
+});
+
+describe("isSymlink (uninstall guard for dangling links — finding 1)", () => {
+	let dir: string;
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "dreb-symlink-"));
+	});
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("detects a symlink whose target still exists", () => {
+		const target = join(dir, "target");
+		const link = join(dir, "link");
+		writeFileSync(target, "");
+		symlinkSync(target, link);
+		expect(isSymlink(link)).toBe(true);
+	});
+
+	it("detects a DANGLING symlink where existsSync would report false", () => {
+		// Reproduces the uninstall scenario: the dreb repo (the link target) is
+		// moved/deleted, so the extension link dangles. existsSync follows the
+		// link and returns false; isSymlink (lstat-based) still returns true, so
+		// uninstall proceeds to remove it instead of silently no-op'ing.
+		const target = join(dir, "gone");
+		const link = join(dir, "link");
+		writeFileSync(target, "");
+		symlinkSync(target, link);
+		rmSync(target); // target now gone → link dangles
+		expect(existsSync(link)).toBe(false);
+		expect(isSymlink(link)).toBe(true);
+		// removeExisting cleans a dangling link (this is what the guard now reaches).
+		removeExisting(link, () => {});
+		expect(isSymlink(link)).toBe(false);
+	});
+
+	it("returns false for a non-existent path", () => {
+		expect(isSymlink(join(dir, "nope"))).toBe(false);
 	});
 });

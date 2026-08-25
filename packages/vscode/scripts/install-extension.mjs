@@ -72,7 +72,10 @@ export function removeExisting(linkPath, log = console.log) {
 	rmSync(linkPath, { recursive: true, force: true });
 }
 
-function isSymlink(p) {
+/** True when `p` is a symlink (broken or not). Uses `lstat`, so — unlike
+ * `existsSync` — it does not follow the link and correctly detects a dangling
+ * symlink whose target no longer exists. */
+export function isSymlink(p) {
 	try {
 		return lstatSync(p).isSymbolicLink();
 	} catch {

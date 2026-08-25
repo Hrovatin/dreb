@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { extensionsDir, installPlan, isDirectRun, parseArgs, removeExisting } from "./install-extension.mjs";
+import { extensionsDir, installPlan, isDirectRun, isSymlink, parseArgs, removeExisting } from "./install-extension.mjs";
 
 function main() {
 	const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,7 +23,11 @@ function main() {
 	const extDir = extensionsDir({ insiders: args.insiders, override: args.dir });
 	const { linkPath } = installPlan({ extDir, pkg, target: pkgRoot });
 
-	if (!existsSync(linkPath)) {
+	// Check the link's own existence with `isSymlink` (lstat-based), not
+	// `existsSync`, which follows the symlink: after the user moves or deletes
+	// their dreb repo the link is dangling, and `existsSync` would report it as
+	// gone — silently leaving the broken extension entry behind.
+	if (!isSymlink(linkPath) && !existsSync(linkPath)) {
 		console.log(`Nothing to remove: ${linkPath} does not exist.`);
 		return;
 	}

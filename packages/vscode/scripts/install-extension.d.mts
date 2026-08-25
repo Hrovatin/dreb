@@ -12,6 +12,8 @@ export function parseArgs(argv: string[]): { insiders: boolean; dir: string | un
 
 export function removeExisting(linkPath: string, log?: (msg: string) => void): void;
 
+export function isSymlink(p: string): boolean;
+
 export function safeReadlink(p: string): string | undefined;
 
 export function isDirectRun(importMetaUrl: string, argv1?: string): boolean;
