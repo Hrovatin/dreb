@@ -50,6 +50,12 @@ function lastSpawnOptions(): Record<string, unknown> {
 	return calls[calls.length - 1][2] as Record<string, unknown>;
 }
 
+/** Executable (first argument) passed to spawn(). */
+function lastSpawnCommand(): string {
+	const calls = vi.mocked(spawn).mock.calls;
+	return calls[calls.length - 1][0] as string;
+}
+
 beforeEach(() => {
 	vi.mocked(spawn).mockReset();
 });
@@ -208,5 +214,51 @@ describe("RpcClient spawn failure handling", () => {
 		expect(seen).toHaveLength(1);
 		expect((seen[0] as any).stderr).toBe("Fatal: something broke\n");
 		expect((seen[0] as any).code).toBe(1);
+	});
+});
+
+describe("RpcClient nodePath / env forwarding", () => {
+	test("defaults the executable to 'node' when nodePath is unset", async () => {
+		const child = makeFakeChild();
+		vi.mocked(spawn).mockReturnValue(child);
+
+		const client = new RpcClient({ cliPath: "dist/cli.js" });
+		await client.start();
+
+		expect(lastSpawnCommand()).toBe("node");
+
+		await client.stop();
+	});
+
+	test("spawns with the provided nodePath executable", async () => {
+		const child = makeFakeChild();
+		vi.mocked(spawn).mockReturnValue(child);
+
+		const client = new RpcClient({ cliPath: "dist/cli.js", nodePath: "/opt/node22/bin/node" });
+		await client.start();
+
+		expect(lastSpawnCommand()).toBe("/opt/node22/bin/node");
+
+		await client.stop();
+	});
+
+	test("merges injected env (e.g. ELECTRON_RUN_AS_NODE) over process.env", async () => {
+		const child = makeFakeChild();
+		vi.mocked(spawn).mockReturnValue(child);
+
+		const client = new RpcClient({
+			cliPath: "dist/cli.js",
+			nodePath: "/path/to/code",
+			env: { ELECTRON_RUN_AS_NODE: "1" },
+		});
+		await client.start();
+
+		const opts = lastSpawnOptions();
+		const env = opts.env as Record<string, string>;
+		expect(env.ELECTRON_RUN_AS_NODE).toBe("1");
+		// Existing process env is still present (merged, not replaced).
+		expect(env.PATH).toBe(process.env.PATH);
+
+		await client.stop();
 	});
 });

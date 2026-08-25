@@ -55,6 +55,14 @@ type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
 export interface RpcClientOptions {
 	/** Path to the CLI entry point (default: searches for dist/cli.js) */
 	cliPath?: string;
+	/**
+	 * Absolute path to the Node.js executable used to spawn the CLI child.
+	 * Defaults to `"node"` (resolved via `PATH`). Callers that cannot rely on
+	 * `PATH` — e.g. a GUI-launched editor whose extension host has no shell
+	 * `PATH` — pass a discovered absolute Node path (or the editor's own
+	 * runtime), so the spawn does not fail with `ENOENT`.
+	 */
+	nodePath?: string;
 	/** Working directory for the agent */
 	cwd?: string;
 	/** Environment variables */
@@ -176,7 +184,7 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		this.process = spawn("node", [cliPath, ...args], {
+		this.process = spawn(this.options.nodePath ?? "node", [cliPath, ...args], {
 			cwd: this.options.cwd,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],

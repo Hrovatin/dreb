@@ -118,7 +118,7 @@ The same agent runtime powers multiple surfaces:
 - **SDK** — import `@dreb/coding-agent` and create agent sessions directly in TypeScript.
 - **Telegram** — `@dreb/telegram` runs dreb as a bot with sessions, model controls, file upload/download, live tool status, and visible results for user-facing tools.
 - **Web dashboard** — `dreb dashboard` serves a browser UI (fleet overview of all sessions, full chat with steering, subagent observability, host file browser, dreb memory editor); local-only by default, remote via Tailscale + rotating pairing code. See [dashboard docs](packages/coding-agent/docs/dashboard.md).
-- **VS Code extension** *(early)* — `packages/vscode` embeds a native chat webview driven over RPC: streaming responses with a collapsible thinking/tool activity box, slash commands, and inline prompts. See [its README](packages/vscode/README.md).
+- **VS Code extension** *(early)* — `packages/vscode` embeds a native chat webview driven over RPC: streaming responses with a collapsible thinking/tool activity box, slash commands, and inline prompts. Install it from your dreb folder with `npm run install-vscode` (symlinks it into VS Code so it runs from the repo). See [its README](packages/vscode/README.md).
 
 ### Web dashboard
 
