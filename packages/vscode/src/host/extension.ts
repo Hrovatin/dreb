@@ -13,7 +13,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { relative, sep } from "node:path";
 import * as vscode from "vscode";
@@ -21,6 +20,7 @@ import type { LiveSessionInput } from "../shared/session-list.js";
 import { formatTabTitle } from "../shared/tab-title.js";
 import { buildArgs } from "./build-args.js";
 import { resolveCliPath } from "./cli-path.js";
+import { resolveRealFsPath } from "./extension-paths.js";
 import type { resolveNodePath } from "./node-path.js";
 import { createNodeRuntimeCacheState, resolveNodeRuntimeCached } from "./node-runtime-cache.js";
 import type { ReviewUi } from "./review-ui.js";
@@ -108,7 +108,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	inventory = createSessionInventory();
 	flags = new SessionFlagsStore(context.globalState);
 	order = new SessionOrderStore(context.globalState);
-	sessionsView = new SessionsViewProvider(context.extensionUri, {
+	sessionsView = new SessionsViewProvider(extensionRootUriReal(), {
 		inventory,
 		flags,
 		order,
@@ -129,8 +129,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			),
 		activeKey: () => pool.active?.key,
 		pathForKey: (key) => pool.get(key)?.controller.sessionPath ?? (key.startsWith("new:") ? undefined : key),
-		openSession: (key) => void openSession(context, key),
-		newSession: () => void openNewSession(context),
+		openSession: (key) => void openSession(key),
+		newSession: () => void openNewSession(),
 		renameSession: (key, name) => renameSession(key, name),
 		deleteSession: (key) => deleteSession(key),
 		stopSession: (key) => stopSession(key),
@@ -138,14 +138,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(SessionsViewProvider.viewId, sessionsView),
-		vscode.commands.registerCommand("dreb.openChat", () => void openActiveOrNew(context)),
-		vscode.commands.registerCommand("dreb.sessions.newSession", () => void openNewSession(context)),
+		vscode.commands.registerCommand("dreb.openChat", () => void openActiveOrNew()),
+		vscode.commands.registerCommand("dreb.sessions.newSession", () => void openNewSession()),
 		vscode.commands.registerCommand("dreb.sessions.refresh", () => sessionsView?.refresh()),
 		vscode.commands.registerCommand("dreb.tagSelectionToChat", () =>
-			tagSelectionToChat(selectionTagDeps(() => openActiveOrNew(context))),
+			tagSelectionToChat(selectionTagDeps(() => openActiveOrNew())),
 		),
 		vscode.commands.registerCommand("dreb.tagSelectionToNewChat", () =>
-			tagSelectionToChat(selectionTagDeps(() => openNewSession(context))),
+			tagSelectionToChat(selectionTagDeps(() => openNewSession())),
 		),
 		vscode.commands.registerCommand("dreb.review.openDiff", (arg?: unknown) => {
 			const resolved = resolveReviewTarget(arg);
@@ -210,7 +210,7 @@ export async function deactivate(): Promise<void> {
 
 /** Open (or resume) a session by pool key. Reveals a live panel, or spawns a
  * controller resuming that session's `.jsonl` (disk-only rows key by path). */
-async function openSession(context: vscode.ExtensionContext, key: string): Promise<ChatSession | undefined> {
+async function openSession(key: string): Promise<ChatSession | undefined> {
 	try {
 		const keyPath = key.startsWith("new:") ? undefined : key;
 		// A crashed session (child gone, controller not disposed) is treated as
@@ -224,7 +224,7 @@ async function openSession(context: vscode.ExtensionContext, key: string): Promi
 				? existing.controller.sessionPath
 				: undefined;
 		const resumePath = keyPath ?? crashedPath;
-		const session = await pool.open(key, () => createSession(context, key, resumePath));
+		const session = await pool.open(key, () => createSession(key, resumePath));
 		pool.setActive(key);
 		scheduleSidebarRefresh();
 		return session;
@@ -235,8 +235,8 @@ async function openSession(context: vscode.ExtensionContext, key: string): Promi
 }
 
 /** Start a brand-new session in the current workspace. */
-async function openNewSession(context: vscode.ExtensionContext): Promise<ChatSession | undefined> {
-	return openSession(context, `new:${randomUUID()}`);
+async function openNewSession(): Promise<ChatSession | undefined> {
+	return openSession(`new:${randomUUID()}`);
 }
 
 /** Reveal the last-active session, or start a new one — used by the chat command
@@ -245,12 +245,12 @@ async function openNewSession(context: vscode.ExtensionContext): Promise<ChatSes
  * `pool.active`) so that tagging from the editor targets the chat the user was
  * last in, rather than spawning a new one just because focus moved from the chat
  * webview to the code editor. */
-async function openActiveOrNew(context: vscode.ExtensionContext): Promise<ChatSession | undefined> {
+async function openActiveOrNew(): Promise<ChatSession | undefined> {
 	return resolveActiveOrNew(pool, {
 		isDisposed: (s) => s.controller.isDisposed(),
 		hasFailed: (s) => s.controller.hasFailed(),
 		reveal: (s) => revealSession(s),
-		openNew: () => openNewSession(context),
+		openNew: () => openNewSession(),
 	});
 }
 
@@ -292,7 +292,7 @@ function selectionTagDeps(open: () => Promise<ChatSession | undefined>): TagSele
  * view attach/detach so the agent keeps running when the tab is closed. Only the
  * panel + webview bridge are *view-bound*; {@link attachView} builds them and
  * `onDidDispose` detaches (backgrounds) them without killing the controller. */
-function createSession(context: vscode.ExtensionContext, key: string, sessionPath?: string): ChatSession {
+function createSession(key: string, sessionPath?: string): ChatSession {
 	const config = vscode.workspace.getConfiguration("dreb");
 	const cwd = workspaceCwd();
 	const { cli, node } = resolveRuntime(config);
@@ -352,7 +352,7 @@ function createSession(context: vscode.ExtensionContext, key: string, sessionPat
 	// Reset the inactivity cap whenever the user drives the session.
 	controller.onUserInput(() => session.sleep.onUserInput());
 
-	attachView(context, session);
+	attachView(session);
 
 	if (!cli.ok) {
 		// Surface an actionable error into the transcript; the webview shows it
@@ -371,15 +371,16 @@ function createSession(context: vscode.ExtensionContext, key: string, sessionPat
 /** Build and attach a fresh chat panel + webview bridge to a session's
  * controller — on first creation and again when reopening a backgrounded session
  * whose original panel was closed. */
-function attachView(context: vscode.ExtensionContext, session: ChatSession): void {
+function attachView(session: ChatSession): void {
+	const extensionRootUri = extensionRootUriReal();
 	const panel = vscode.window.createWebviewPanel("dreb.chat", panelTitle(session), vscode.ViewColumn.Active, {
 		enableScripts: true,
 		retainContextWhenHidden: true,
-		localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist", "webview")],
+		localResourceRoots: [vscode.Uri.joinPath(extensionRootUri, "dist", "webview")],
 	});
 
 	const connection = connectWebview(panel.webview, session.controller);
-	panel.webview.html = getWebviewHtml(panel.webview, context.extensionUri, makeNonce());
+	panel.webview.html = getWebviewHtml(panel.webview, extensionRootUri, makeNonce());
 	session.panel = panel;
 	session.connection = connection;
 	session.sleep.onAttach();
@@ -424,7 +425,7 @@ function revealSession(session: ChatSession): void {
 		{
 			reveal: () => session.panel?.reveal(vscode.ViewColumn.Active),
 			rebuild: () => {
-				if (ctx) attachView(ctx, session);
+				if (ctx) attachView(session);
 			},
 		},
 	);
@@ -558,12 +559,25 @@ function extensionDirReal(): string | undefined {
 	if (extensionRealDirCache) return extensionRealDirCache;
 	const raw = extensionContext?.extensionUri.fsPath;
 	if (!raw) return undefined;
-	try {
-		extensionRealDirCache = realpathSync(raw);
-	} catch {
-		extensionRealDirCache = raw;
-	}
+	extensionRealDirCache = resolveRealFsPath(raw);
 	return extensionRealDirCache;
+}
+
+/**
+ * This extension's root as a `vscode.Uri` with symlinks resolved. Webview
+ * `localResourceRoots` and `asWebviewUri` must be built from this (not the raw,
+ * possibly-symlinked `context.extensionUri`): VS Code's webview resource server
+ * realpath-resolves each requested file before checking it against the allowed
+ * roots, so under a `npm run install-vscode` symlink install a symlink-path root
+ * won't match the file's real path and the webview assets 404 (blank chat).
+ * Falls back to the raw extension Uri if resolution is somehow unavailable.
+ */
+function extensionRootUriReal(): vscode.Uri {
+	const real = extensionDirReal();
+	if (real) return vscode.Uri.file(real);
+	// Unreachable in practice (activate always sets extensionContext first), but
+	// keep a safe fallback rather than throwing during webview construction.
+	return (extensionContext as vscode.ExtensionContext).extensionUri;
 }
 
 /**
