@@ -3,6 +3,7 @@ import {
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
+	readFileSync,
 	readlinkSync,
 	realpathSync,
 	rmSync,
@@ -22,6 +23,7 @@ import {
 	linkName,
 	manifestPath,
 	parseArgs,
+	parseManifest,
 	readManifest,
 	removeEntry,
 	removeExisting,
@@ -266,11 +268,48 @@ describe("runInstall (side-effecting install core)", () => {
 		expect(removed).toContain("/ext/hrovatin.dreb-vscode-0.1.0");
 		expect(removed).not.toContain("/ext/unrelated.ext");
 		const entries = JSON.parse(writes[0][1]);
-		// Exactly one dreb entry (deduped), unrelated entry preserved.
-		expect(
-			entries.filter((e: { identifier: { id: string } }) => e.identifier.id === "hrovatin.dreb-vscode"),
-		).toHaveLength(1);
+		// Exactly one dreb entry (deduped), and it is the freshly-built entry —
+		// the stale `version: "0.0.9"` is replaced, not merely kept alongside.
+		const drebEntries = entries.filter(
+			(e: { identifier: { id: string } }) => e.identifier.id === "hrovatin.dreb-vscode",
+		);
+		expect(drebEntries).toHaveLength(1);
+		expect(drebEntries[0].version).toBe(pkg.version);
+		expect(drebEntries[0].location.path).toBe("/ext/hrovatin.dreb-vscode");
+		expect(drebEntries[0].metadata.installedTimestamp).toBe(12345);
 		expect(entries.some((e: { identifier: { id: string } }) => e.identifier.id === "other.ext")).toBe(true);
+	});
+
+	it("aborts without overwriting when extensions.json is present but malformed (finding 1)", () => {
+		const writes: Array<[string, string]> = [];
+		const errors: string[] = [];
+		let exitCode: number | undefined;
+		const result = runInstall({
+			pkgRoot: "/repo/packages/vscode",
+			pkg,
+			extDir: "/ext",
+			fileExists: () => true,
+			makeDir: () => {},
+			isLink: () => false,
+			readLink: () => undefined,
+			remove: () => {},
+			createSymlink: () => {},
+			readDir: () => [],
+			// A truncated/hand-broken manifest that still lists the user's other extensions.
+			readManifestFile: () => '[{"identifier":{"id":"other.ext"}',
+			writeManifestFile: (p: string, d: string) => writes.push([p, d]),
+			now: () => 12345,
+			log: () => {},
+			error: (m: string) => errors.push(m),
+			exit: (c: number) => {
+				exitCode = c;
+			},
+		});
+		expect(result).toMatchObject({ ok: false, reason: "manifest-malformed" });
+		expect(exitCode).toBe(1);
+		// Crucially: the manifest is NOT rewritten, so other extensions survive.
+		expect(writes).toEqual([]);
+		expect(errors.join("\n")).toContain("not a valid JSON array");
 	});
 
 	it("re-links when an existing symlink points at a different target", () => {
@@ -323,6 +362,13 @@ describe("runInstall (side-effecting install core)", () => {
 			const second = runInstall({ pkgRoot, pkg, extDir, log: () => {}, error: () => {}, exit: () => {} });
 			expect(second).toMatchObject({ ok: true, reason: "already-linked" });
 			expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+
+			// Idempotent against the manifest too: the second (already-linked) run
+			// re-registers via upsert, so the entry is refreshed but never duplicated.
+			const manifest = JSON.parse(readFileSync(join(extDir, "extensions.json"), "utf8"));
+			expect(
+				manifest.filter((e: { identifier: { id: string } }) => e.identifier.id === "hrovatin.dreb-vscode"),
+			).toHaveLength(1);
 		});
 	});
 
@@ -445,6 +491,28 @@ describe("extensions.json manifest helpers (issue 92)", () => {
 		});
 	});
 
+	describe("parseManifest (distinguishes absent from malformed — finding 1)", () => {
+		it("treats a missing file as empty, not malformed", () => {
+			expect(parseManifest(undefined)).toEqual({ entries: [], malformed: false });
+		});
+		it("treats an empty / whitespace-only file as empty, not malformed", () => {
+			expect(parseManifest("")).toEqual({ entries: [], malformed: false });
+			expect(parseManifest("  \n")).toEqual({ entries: [], malformed: false });
+		});
+		it("returns the entries for a valid JSON array", () => {
+			expect(parseManifest('[{"identifier":{"id":"a.b"}}]')).toEqual({
+				entries: [{ identifier: { id: "a.b" } }],
+				malformed: false,
+			});
+		});
+		it("flags a present-but-unparseable file as malformed", () => {
+			expect(parseManifest("{not json")).toEqual({ entries: [], malformed: true });
+		});
+		it("flags a present non-array file as malformed", () => {
+			expect(parseManifest('{"identifier":{"id":"a.b"}}')).toEqual({ entries: [], malformed: true });
+		});
+	});
+
 	describe("buildManifestEntry", () => {
 		it("builds the VS Code entry shape with a file:// location and metadata", () => {
 			const entry = buildManifestEntry({
@@ -530,6 +598,12 @@ describe("extensions.json manifest helpers (issue 92)", () => {
 		});
 		it("returns [] when only the canonical link is present", () => {
 			expect(staleInstallNames(["hrovatin.dreb-vscode"], "hrovatin.dreb-vscode")).toEqual([]);
+		});
+		it("ignores a sibling extension that only shares the id prefix (finding 3)", () => {
+			// `<id>-extras` is a different extension, not a versioned copy of `<id>` —
+			// only a version-shaped suffix (`-` + digit) counts, so it is never deleted.
+			const names = ["hrovatin.dreb-vscode-0.1.0", "hrovatin.dreb-vscode-extras", "hrovatin.dreb-vscode-beta"];
+			expect(staleInstallNames(names, "hrovatin.dreb-vscode")).toEqual(["hrovatin.dreb-vscode-0.1.0"]);
 		});
 	});
 });

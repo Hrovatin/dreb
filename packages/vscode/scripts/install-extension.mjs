@@ -68,16 +68,34 @@ export function manifestPath(extDir) {
 	return join(extDir, "extensions.json");
 }
 
-/** Parse the manifest's raw JSON into an array of entries. Tolerant: a missing
- * (`undefined`), empty, non-array, or malformed file yields `[]` — never throws. */
-export function readManifest(raw) {
-	if (!raw) return [];
+/** Parse the manifest's raw JSON into `{ entries, malformed }`.
+ *
+ * - absent (`undefined`) or empty/whitespace-only → `{ entries: [], malformed: false }`
+ *   (nothing to preserve; safe to create fresh);
+ * - a valid JSON array → `{ entries, malformed: false }`;
+ * - present but non-array or unparseable → `{ entries: [], malformed: true }`.
+ *
+ * The `malformed` flag lets a caller refuse to overwrite a file it could not
+ * understand — the manifest lists *every* installed extension, so blindly
+ * rewriting an unreadable one would silently deregister the others. Never throws. */
+export function parseManifest(raw) {
+	if (raw === undefined || raw.trim() === "") return { entries: [], malformed: false };
 	try {
 		const parsed = JSON.parse(raw);
-		return Array.isArray(parsed) ? parsed : [];
+		if (Array.isArray(parsed)) return { entries: parsed, malformed: false };
 	} catch {
-		return [];
+		// fall through to malformed
 	}
+	return { entries: [], malformed: true };
+}
+
+/** Parse the manifest's raw JSON into an array of entries. Tolerant: a missing
+ * (`undefined`), empty, non-array, or malformed file yields `[]` — never throws.
+ * Use this where a malformed manifest should be treated as empty (e.g. uninstall,
+ * which then simply finds nothing to remove); prefer `parseManifest` when the
+ * malformed case must be distinguished before overwriting the file. */
+export function readManifest(raw) {
+	return parseManifest(raw).entries;
 }
 
 /** Build the manifest entry VS Code expects for a symlinked (dev) extension. */
@@ -117,9 +135,12 @@ export function removeEntry(entries, id) {
 /** Stale on-disk install folders belonging to this extension: versioned-copy
  * variants like `<id>-0.1.0` (a prior `.vsix`-style install). The canonical
  * `<id>` link itself is excluded — install (re)creates it, uninstall removes it
- * via the normal link path. */
+ * via the normal link path. Only a *version-shaped* suffix (`-` followed by a
+ * digit) counts, so a genuinely different sibling extension that merely shares
+ * the id prefix (e.g. `<id>-extras`) is never matched and never deleted. */
 export function staleInstallNames(names, name) {
-	return names.filter((n) => n !== name && n.startsWith(`${name}-`));
+	const prefix = `${name}-`;
+	return names.filter((n) => n !== name && n.startsWith(prefix) && /^\d/.test(n.slice(prefix.length)));
 }
 
 
@@ -166,6 +187,16 @@ export function isSymlink(p) {
 function pkgRootDir() {
 	// scripts/ -> packages/vscode
 	return resolve(dirname(fileURLToPath(import.meta.url)), "..");
+}
+
+/** Remove every stale versioned-copy folder in `staleNames`, logging each. Shared
+ * by install and uninstall so their cleanup wording/semantics can't drift apart. */
+function removeStaleInstalls(staleNames, extDir, remove, log) {
+	for (const n of staleNames) {
+		const stalePath = join(extDir, n);
+		remove(stalePath, log);
+		log(`Removed stale install: ${stalePath}`);
+	}
 }
 
 /**
@@ -222,19 +253,27 @@ export function runInstall({
 
 	// Reconcile any prior install state: remove leftover versioned-copy folders
 	// (e.g. a stale `.vsix`-style `<id>-0.1.0`) so the editor sees exactly one.
-	for (const stale of staleInstallNames(readDir(extDir), name)) {
-		const stalePath = join(extDir, stale);
-		remove(stalePath, log);
-		log(`Removed stale install: ${stalePath}`);
-	}
+	removeStaleInstalls(staleInstallNames(readDir(extDir), name), extDir, remove, log);
 
 	// Register (or refresh) the extensions.json entry. Runs on both paths so a
 	// pre-existing symlink with a missing/stale manifest entry self-heals —
 	// without this, modern VS Code silently never loads the extension.
+	//
+	// The manifest lists *every* installed extension. If the file is present but
+	// unparseable (truncated by a concurrent editor write, hand-edited, etc.),
+	// refuse to overwrite it — collapsing it to `[]` and rewriting would silently
+	// deregister all the user's other extensions. `runUninstall` guards the same
+	// way. An absent/empty file is fine to create fresh.
 	const manifestFile = manifestPath(extDir);
+	const { entries: existing, malformed } = parseManifest(readManifestFile(manifestFile));
+	if (malformed) {
+		error(`dreb: ${manifestFile} exists but is not a valid JSON array — refusing to overwrite it.`);
+		error("  Fix or remove that file, then re-run — otherwise your other extensions would be deregistered.");
+		exit(1);
+		return { ok: false, reason: "manifest-malformed", linkPath, targetPath };
+	}
 	const entry = buildManifestEntry({ id: name, version: pkg.version, linkPath, now: now() });
-	const entries = upsertEntry(readManifest(readManifestFile(manifestFile)), entry);
-	writeManifestFile(manifestFile, JSON.stringify(entries, null, 0));
+	writeManifestFile(manifestFile, JSON.stringify(upsertEntry(existing, entry), null, 0));
 	log(`Registered ${name} in ${manifestFile}`);
 
 	log('Reload the editor ("Developer: Reload Window") to activate the extension.');
@@ -260,7 +299,7 @@ export function runUninstall({
 	log = console.log,
 }) {
 	const name = linkName(pkg);
-	const { linkPath } = installPlan({ extDir, pkg, target: "" });
+	const linkPath = join(extDir, name);
 
 	// The link itself: check with `isSymlink` (lstat-based), not `existsSync`,
 	// which follows the link — after the user moves/deletes their dreb repo the
@@ -287,11 +326,7 @@ export function runUninstall({
 		remove(linkPath);
 		log(`Removed ${linkPath}`);
 	}
-	for (const n of stale) {
-		const stalePath = join(extDir, n);
-		remove(stalePath, log);
-		log(`Removed stale install: ${stalePath}`);
-	}
+	removeStaleInstalls(stale, extDir, remove, log);
 	if (manifestChanged) {
 		writeManifestFile(manifestFile, JSON.stringify(after, null, 0));
 		log(`Deregistered ${name} from ${manifestFile}`);

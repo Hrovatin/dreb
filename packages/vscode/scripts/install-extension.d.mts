@@ -20,6 +20,8 @@ export interface ManifestEntry {
 
 export function readManifest(raw: string | undefined): ManifestEntry[];
 
+export function parseManifest(raw: string | undefined): { entries: ManifestEntry[]; malformed: boolean };
+
 export function buildManifestEntry(opts: {
 	id: string;
 	version?: string;
@@ -70,6 +72,7 @@ export interface RunInstallDeps {
 
 export type RunInstallResult =
 	| { ok: false; reason: "missing-build"; missing: string[] }
+	| { ok: false; reason: "manifest-malformed"; linkPath: string; targetPath: string }
 	| { ok: true; reason: "already-linked" | "linked"; linkPath: string; targetPath: string };
 
 export function runInstall(deps: RunInstallDeps): RunInstallResult;
