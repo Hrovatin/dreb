@@ -108,7 +108,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	inventory = createSessionInventory();
 	flags = new SessionFlagsStore(context.globalState);
 	order = new SessionOrderStore(context.globalState);
-	sessionsView = new SessionsViewProvider(extensionRootUriReal(), {
+	sessionsView = new SessionsViewProvider(() => extensionRootUriReal(), {
 		inventory,
 		flags,
 		order,
