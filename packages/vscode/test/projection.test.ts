@@ -73,6 +73,65 @@ describe("projection", () => {
 		expect(onlyResponse(state).answer).toBe("Let me look. First the config.\n\nNow the answer.");
 	});
 
+	it("interleaves activity boxes and answer blocks in true streaming order (segments)", () => {
+		const state = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			// Box 1: think + tool
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_start" } },
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "planning" } },
+			{ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: { path: "a.ts" } },
+			{ type: "tool_execution_end", toolCallId: "t1", result: "body", isError: false },
+			// Answer 1
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "First result." } },
+			// Box 2: tool + think (arrives AFTER answer 1 — must open a new box, not join box 1)
+			{ type: "tool_execution_start", toolCallId: "t2", toolName: "grep", args: { pattern: "x" } },
+			{ type: "tool_execution_end", toolCallId: "t2", result: "hit", isError: false },
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_start" } },
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "more" } },
+			// Answer 2
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Second result." } },
+			{ type: "agent_end" },
+		]);
+
+		const group = onlyResponse(state);
+		expect(group.segments.map((s) => s.kind)).toEqual(["activity", "answer", "activity", "answer"]);
+		const [box1, ans1, box2, ans2] = group.segments;
+		expect(box1.kind === "activity" && box1.items.map((i) => i.kind)).toEqual(["thinking", "tool"]);
+		expect(ans1).toEqual({ kind: "answer", text: "First result." });
+		expect(box2.kind === "activity" && box2.items.map((i) => i.kind)).toEqual(["tool", "thinking"]);
+		expect(ans2).toEqual({ kind: "answer", text: "Second result." });
+		// The aggregate views still hold the whole run.
+		expect(group.activity).toHaveLength(4);
+		expect(group.answer).toBe("First result.\n\nSecond result.");
+	});
+
+	it("coalesces consecutive thinking/tools into one box, and collapses finished boxes", () => {
+		const state = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_start" } },
+			{ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: {} },
+			{ type: "tool_execution_end", toolCallId: "t1", result: "b", isError: false },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "answer" } },
+		]);
+
+		const streaming = onlyResponse(state);
+		expect(streaming.segments).toHaveLength(2);
+		const box = streaming.segments[0];
+		expect(box.kind === "activity" && box.items).toHaveLength(2);
+		// The box is finished (an answer opened after it) → collapsed even while the run streams.
+		expect(box.kind === "activity" && box.collapsed).toBe(true);
+
+		// A trailing box (no answer after it) collapses only when the run ends.
+		applyEvent(state, { type: "tool_execution_start", toolCallId: "t2", toolName: "grep", args: {} });
+		const trailing = onlyResponse(state).segments[2];
+		expect(trailing.kind === "activity" && trailing.collapsed).toBe(false);
+		applyEvent(state, { type: "agent_end" });
+		const closed = onlyResponse(state).segments[2];
+		expect(closed.kind === "activity" && closed.collapsed).toBe(true);
+	});
+
 	it("marks the run streaming, then collapses activity at agent_end", () => {
 		const state = createTranscriptState();
 		applyEvent(state, { type: "agent_start" });
@@ -326,6 +385,7 @@ describe("projection", () => {
 	it("summarizes activity for the collapsed header", () => {
 		const group: ResponseGroup = {
 			kind: "response",
+			segments: [],
 			id: 1,
 			activity: [
 				{ kind: "thinking", text: "x" },
@@ -442,6 +502,33 @@ describe("foldMessagesIntoState (Phase 6 full-content rebuild)", () => {
 		expect(tool).toMatchObject({ toolCallId: "t1", toolName: "read", status: "done", resultText: "file body" });
 	});
 
+	it("rebuilds interleaved answer/activity into ordered segments matching the live stream", () => {
+		const state = createTranscriptState();
+		foldMessagesIntoState(state, [
+			{ role: "user", content: "go" },
+			// One run: text, then a tool call, then more text — content parts in order.
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "First." },
+					{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a.txt" } },
+				],
+				stopReason: "toolUse",
+			},
+			{ role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "body" }] },
+			{ role: "assistant", content: [{ type: "text", text: "Second." }], stopReason: "stop" },
+		]);
+
+		const g = state.items.find((i): i is ResponseGroup => i.kind === "response");
+		if (!g) throw new Error("no response group");
+		expect(g.segments.map((s) => s.kind)).toEqual(["answer", "activity", "answer"]);
+		expect(g.segments[0]).toEqual({ kind: "answer", text: "First." });
+		expect(g.segments[2]).toEqual({ kind: "answer", text: "Second." });
+		// Every rebuilt (historical) box is collapsed.
+		const box = g.segments[1];
+		expect(box.kind === "activity" && box.collapsed).toBe(true);
+	});
+
 	it("marks a tool as error when its result is an error, and leaves an unmatched tool running", () => {
 		const state = createTranscriptState();
 		foldMessagesIntoState(state, [
@@ -507,6 +594,7 @@ describe("alignCheckpoints (Phase 6)", () => {
 		for (let i = 0; i < count; i++) {
 			state.items.push({
 				kind: "response",
+				segments: [],
 				id: i + 1,
 				activity: [],
 				answer: `a${i}`,
@@ -527,8 +615,24 @@ describe("alignCheckpoints (Phase 6)", () => {
 
 	it("skips only actively-streaming groups (the in-flight turn has no persisted entry yet)", () => {
 		const state = createTranscriptState();
-		state.items.push({ kind: "response", id: 1, activity: [], answer: "ok", streaming: false, collapsed: true });
-		state.items.push({ kind: "response", id: 2, activity: [], answer: "", streaming: true, collapsed: false });
+		state.items.push({
+			kind: "response",
+			segments: [],
+			id: 1,
+			activity: [],
+			answer: "ok",
+			streaming: false,
+			collapsed: true,
+		});
+		state.items.push({
+			kind: "response",
+			segments: [],
+			id: 2,
+			activity: [],
+			answer: "",
+			streaming: true,
+			collapsed: false,
+		});
 		expect(alignCheckpoints(state, ["e1"], new Set(["e1"]))).toEqual([
 			{ responseId: 1, entryId: "e1", canRestore: false, canFork: true },
 		]);
@@ -541,9 +645,18 @@ describe("alignCheckpoints (Phase 6)", () => {
 		// Fork is offered only where the backend allows it: the errored turn B is
 		// NOT in the forkable set, so its canFork is false.
 		const state = createTranscriptState();
-		state.items.push({ kind: "response", id: 1, activity: [], answer: "a", streaming: false, collapsed: true });
 		state.items.push({
 			kind: "response",
+			segments: [],
+			id: 1,
+			activity: [],
+			answer: "a",
+			streaming: false,
+			collapsed: true,
+		});
+		state.items.push({
+			kind: "response",
+			segments: [],
 			id: 2,
 			activity: [],
 			answer: "",
@@ -551,7 +664,15 @@ describe("alignCheckpoints (Phase 6)", () => {
 			collapsed: true,
 			error: "rate limited",
 		});
-		state.items.push({ kind: "response", id: 3, activity: [], answer: "c", streaming: false, collapsed: true });
+		state.items.push({
+			kind: "response",
+			segments: [],
+			id: 3,
+			activity: [],
+			answer: "c",
+			streaming: false,
+			collapsed: true,
+		});
 		expect(alignCheckpoints(state, ["a", "b", "c"], new Set(["a", "c"]))).toEqual([
 			{ responseId: 1, entryId: "a", canRestore: true, canFork: true },
 			{ responseId: 2, entryId: "b", canRestore: true, canFork: false },

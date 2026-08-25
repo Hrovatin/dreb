@@ -14,7 +14,7 @@
 
 import { render } from "solid-js/web/dist/web.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ResponseGroup, ToolActivity } from "../src/shared/projection.js";
+import type { ResponseGroup, ResponseSegment, ToolActivity } from "../src/shared/projection.js";
 
 const hoisted = vi.hoisted(() => ({ posted: [] as unknown[] }));
 
@@ -28,14 +28,23 @@ vi.mock("../src/webview/vscode-api.js", () => ({
 import { ResponseView } from "../src/webview/app.js";
 
 function group(partial: Partial<ResponseGroup>): ResponseGroup {
+	const activity = partial.activity ?? [];
+	const answer = partial.answer ?? "";
+	// Derive the ordered segments the renderer consumes from the aggregate
+	// activity/answer fields, so existing test cases keep their simple shape.
+	const segments: ResponseSegment[] = partial.segments ?? [
+		...(activity.length > 0 ? [{ kind: "activity" as const, items: activity, collapsed: true }] : []),
+		...(answer.length > 0 ? [{ kind: "answer" as const, text: answer }] : []),
+	];
 	return {
 		kind: "response",
 		id: 1,
-		activity: [],
-		answer: "",
 		streaming: false,
 		collapsed: true,
 		...partial,
+		activity,
+		answer,
+		segments,
 	};
 }
 
@@ -103,5 +112,28 @@ describe("ResponseView code-link click wiring", () => {
 		answer.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
 
 		expect(hoisted.posted).toEqual([]);
+	});
+
+	it("renders interleaved activity boxes and answer blocks in segment order", () => {
+		const host = mount(
+			group({
+				segments: [
+					{ kind: "activity", items: [{ kind: "thinking", text: "plan" }], collapsed: true },
+					{ kind: "answer", text: "First result." },
+					{ kind: "activity", items: [searchTool("1. src/x.ts:L1 (fn go)")], collapsed: true },
+					{ kind: "answer", text: "Second result." },
+				],
+			}),
+		);
+		// Two distinct activity boxes render (not one merged box hoisted to the top).
+		expect(host.querySelectorAll(".dreb-activity")).toHaveLength(2);
+		// The two answer blocks render in order, between/after the boxes.
+		const answers = [...host.querySelectorAll(".dreb-answer")].map((el) => el.textContent?.trim());
+		expect(answers).toEqual(["First result.", "Second result."]);
+		// Document order is box → answer → box → answer.
+		const kinds = [...host.querySelectorAll(".dreb-activity, .dreb-answer")].map((el) =>
+			el.classList.contains("dreb-activity") ? "box" : "answer",
+		);
+		expect(kinds).toEqual(["box", "answer", "box", "answer"]);
 	});
 });

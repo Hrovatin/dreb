@@ -31,9 +31,9 @@ export function buildManifestEntry(opts: {
 
 export function sameId(a: unknown, b: unknown): boolean;
 
-export function upsertEntry(entries: ManifestEntry[], entry: ManifestEntry): ManifestEntry[];
+export function upsertEntry<T extends { identifier: { id: string } }>(entries: readonly T[], entry: T): T[];
 
-export function removeEntry(entries: ManifestEntry[], id: string): ManifestEntry[];
+export function removeEntry<T extends { identifier: { id: string } }>(entries: readonly T[], id: string): T[];
 
 export function staleInstallNames(names: string[], name: string): string[];
 

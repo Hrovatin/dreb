@@ -28,21 +28,52 @@ export interface ToolActivity {
 
 export type ActivityItem = ThinkingActivity | ToolActivity;
 
+/** One collapsible activity box: a contiguous run of thinking + tool calls that
+ * arrived with no answer text between them. Its `items` share object references
+ * with {@link ResponseGroup.activity}, so a tool-result update mutates both. */
+export interface ActivitySegment {
+	kind: "activity";
+	items: ActivityItem[];
+	/** Per-box collapse state: a box auto-collapses once the next segment (an
+	 * answer block, or the run's end) opens after it. */
+	collapsed: boolean;
+}
+
+/** One clean answer block: a contiguous run of assistant text with no activity
+ * between deltas. */
+export interface AnswerSegment {
+	kind: "answer";
+	text: string;
+}
+
+/** Ordered piece of a response run. Segments interleave in true arrival order so
+ * the transcript renders `activity → answer → activity → answer` as it actually
+ * streamed, instead of hoisting all activity above all answer text. This is what
+ * {@link ResponseView} iterates. */
+export type ResponseSegment = ActivitySegment | AnswerSegment;
+
 export interface ResponseGroup {
 	kind: "response";
 	id: number;
-	/** Thinking + tool activity, in arrival order (rendered in the activity box). */
+	/** Ordered interleaving of activity boxes and answer blocks for this run —
+	 * the render source of truth. */
+	segments: ResponseSegment[];
+	/** Thinking + tool activity aggregated across the whole run, in arrival order.
+	 * Shares object references with the activity segments' `items`; used for
+	 * grounded refs and the run summary, not for rendering order. */
 	activity: ActivityItem[];
-	/** Accumulated final-answer markdown (assistant text content). */
+	/** Accumulated final-answer markdown aggregated across the whole run. Used for
+	 * persistence/crash-recovery bookkeeping (offset math), not for rendering. */
 	answer: string;
 	/** Internal: `activity.length` when the last answer text was appended. Used to
 	 * detect a new narration block (activity arrived since the last text) so
-	 * consecutive text blocks in one run are separated instead of concatenated.
-	 * Not rendered. */
+	 * consecutive text blocks in one run are separated instead of concatenated in
+	 * the `answer` aggregate. Not rendered. */
 	answerActivityMark?: number;
 	/** True between agent_start and agent_end for this run. */
 	streaming: boolean;
-	/** Activity box collapse state; auto-collapses when the run ends. */
+	/** Whole-run collapse state, set when the run ends; individual boxes also carry
+	 * their own {@link ActivitySegment.collapsed}. */
 	collapsed: boolean;
 	/** Provider failure text, if this run ended in an error. */
 	error?: string;
@@ -203,6 +234,7 @@ function activeResponse(state: TranscriptState, create: boolean): ResponseGroup 
 	const group: ResponseGroup = {
 		kind: "response",
 		id: state.nextResponseId++,
+		segments: [],
 		activity: [],
 		answer: "",
 		streaming: true,
@@ -217,18 +249,40 @@ function lastThinking(group: ResponseGroup): ThinkingActivity | undefined {
 	return last?.kind === "thinking" ? last : undefined;
 }
 
-/** Append assistant answer text, inserting a blank-line separator when a new text
- * block begins after intervening activity (a tool call or thinking) since the last
- * text was written. This keeps consecutive narration blocks in a single run from
- * running together into one wall of text. */
+/** Append an activity item to the run: extend the trailing activity segment, or
+ * open a new box when the last segment is an answer block (or there is none). The
+ * same object reference lands in both the ordered {@link ResponseGroup.segments}
+ * and the flat {@link ResponseGroup.activity} aggregate, so a later tool-result
+ * update mutates both views at once. */
+function pushActivity(group: ResponseGroup, item: ActivityItem): void {
+	group.activity.push(item);
+	const last = group.segments[group.segments.length - 1];
+	if (last && last.kind === "activity") last.items.push(item);
+	else group.segments.push({ kind: "activity", items: [item], collapsed: false });
+}
+
+/** Append assistant answer text. Extends the trailing answer segment, or opens a
+ * new answer block (collapsing the activity box that preceded it, since that box
+ * is now finished). Also maintains the flat {@link ResponseGroup.answer} aggregate
+ * used for crash-recovery offset math — with the historical blank-line separator
+ * so the recovered suffix keeps narration blocks readable. */
 function appendAnswerText(group: ResponseGroup, text: string): void {
 	if (!text) return;
+	// Aggregate (persistence bookkeeping only — not rendered).
 	const mark = group.answerActivityMark ?? 0;
 	if (group.answer.length > 0 && group.activity.length > mark && !group.answer.endsWith("\n\n")) {
 		group.answer += group.answer.endsWith("\n") ? "\n" : "\n\n";
 	}
 	group.answer += text;
 	group.answerActivityMark = group.activity.length;
+	// Ordered segments (render source of truth).
+	const last = group.segments[group.segments.length - 1];
+	if (last && last.kind === "answer") {
+		last.text += text;
+	} else {
+		if (last && last.kind === "activity") last.collapsed = true;
+		group.segments.push({ kind: "answer", text });
+	}
 }
 
 function findTool(group: ResponseGroup, toolCallId: string): ToolActivity | undefined {
@@ -248,6 +302,8 @@ function closeActiveResponse(state: TranscriptState, error?: string): void {
 	if (group) {
 		group.streaming = false;
 		group.collapsed = true;
+		// Collapse every activity box now that the run has ended.
+		for (const segment of group.segments) if (segment.kind === "activity") segment.collapsed = true;
 		if (error) group.error = group.error ?? error;
 	}
 }
@@ -401,12 +457,12 @@ export function applyEvent(state: TranscriptState, event: any): void {
 					state.sawTextDeltaInBlock = false;
 					break;
 				case "thinking_start":
-					group.activity.push({ kind: "thinking", text: "" });
+					pushActivity(group, { kind: "thinking", text: "" });
 					break;
 				case "thinking_delta": {
 					const thinking = lastThinking(group);
 					if (thinking) thinking.text += stream.delta ?? "";
-					else group.activity.push({ kind: "thinking", text: stream.delta ?? "" });
+					else pushActivity(group, { kind: "thinking", text: stream.delta ?? "" });
 					break;
 				}
 				case "thinking_end": {
@@ -449,7 +505,7 @@ export function applyEvent(state: TranscriptState, event: any): void {
 				existing.status = "running";
 				existing.resultText = "";
 			} else {
-				group.activity.push({
+				pushActivity(group, {
 					kind: "tool",
 					toolCallId,
 					toolName: String(event.toolName),
@@ -558,14 +614,19 @@ export function applyEvent(state: TranscriptState, event: any): void {
 	}
 }
 
-/** One-line summary of a response's activity for the collapsed header. */
-export function activitySummary(group: ResponseGroup): string {
-	const toolCount = group.activity.filter((a) => a.kind === "tool").length;
-	const thoughtCount = group.activity.filter((a) => a.kind === "thinking").length;
+/** One-line summary of a set of activity items for a box's collapsed header. */
+export function activityItemsSummary(items: readonly ActivityItem[]): string {
+	const toolCount = items.filter((a) => a.kind === "tool").length;
+	const thoughtCount = items.filter((a) => a.kind === "thinking").length;
 	const parts: string[] = [];
 	if (thoughtCount > 0) parts.push(`${thoughtCount} thought${thoughtCount === 1 ? "" : "s"}`);
 	if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount === 1 ? "" : "s"}`);
 	return parts.length > 0 ? parts.join(" · ") : "no activity";
+}
+
+/** One-line summary of a whole response's activity (all boxes combined). */
+export function activitySummary(group: ResponseGroup): string {
+	return activityItemsSummary(group.activity);
 }
 
 /**
@@ -624,9 +685,9 @@ function foldAssistantContent(group: ResponseGroup, content: unknown): void {
 		if (part?.type === "text" && typeof part.text === "string") {
 			appendAnswerText(group, part.text);
 		} else if (part?.type === "thinking" && typeof part.thinking === "string") {
-			group.activity.push({ kind: "thinking", text: part.thinking });
+			pushActivity(group, { kind: "thinking", text: part.thinking });
 		} else if (part?.type === "toolCall") {
-			group.activity.push({
+			pushActivity(group, {
 				kind: "tool",
 				toolCallId: String(part.id ?? ""),
 				toolName: String(part.name ?? "tool"),
@@ -671,6 +732,7 @@ export function foldMessagesIntoState(state: TranscriptState, messages: readonly
 		const created: ResponseGroup = {
 			kind: "response",
 			id: state.nextResponseId++,
+			segments: [],
 			activity: [],
 			answer: "",
 			streaming: false,
@@ -710,6 +772,13 @@ export function foldMessagesIntoState(state: TranscriptState, messages: readonly
 			}
 		}
 		// Other/unknown roles (defensive): ignored — they never render a turn.
+	}
+
+	// Rebuilt turns are all historical/complete, so collapse every activity box —
+	// matching the live projection, where `agent_end` collapses them.
+	for (const item of state.items) {
+		if (item.kind !== "response") continue;
+		for (const segment of item.segments) if (segment.kind === "activity") segment.collapsed = true;
 	}
 }
 

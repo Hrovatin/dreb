@@ -4,8 +4,9 @@ import { type ComposerPrefillMode, mergeComposerPrefill } from "../shared/compos
 import { formatContextUsage, formatCost, formatModel, formatThinking } from "../shared/format.js";
 import { activeMention, isFullPickerTrigger, mentionReference, replaceMention } from "../shared/mention.js";
 import {
+	type ActivitySegment,
 	type AskQuestion,
-	activitySummary,
+	activityItemsSummary,
 	applyEvent,
 	type Checkpoint,
 	createTranscriptState,
@@ -426,21 +427,31 @@ export function SuggestionBar(props: {
 export function ResponseView(props: { group: ResponseGroup; onRetry?: () => void }) {
 	return (
 		<div class="dreb-response">
-			<Show when={props.group.activity.length > 0}>
-				<ActivityBox group={props.group} />
-			</Show>
-			<Show when={props.group.answer.length > 0}>
-				{/* Sanitized markdown with grounded, clickable code links. Links are
-				    wired via event delegation (postToHost) rather than href navigation,
-				    so they work under the webview's strict CSP. */}
-				{/* biome-ignore lint/a11y/noStaticElementInteractions: delegates activation of the rendered-markdown <a> links (the anchors are the interactive elements) */}
-				{/* biome-ignore lint/a11y/useKeyWithClickEvents: the links are keyboard-focusable anchors inside innerHTML; delegation only forwards their activation */}
-				<div
-					class="dreb-answer"
-					onClick={onCodeLinkClick}
-					innerHTML={linkifyAnswer(renderMarkdown(props.group.answer), buildGroundedRefs(props.group.activity))}
-				/>
-			</Show>
+			<For each={props.group.segments}>
+				{(segment, index) =>
+					segment.kind === "activity" ? (
+						<ActivityBox
+							segment={segment}
+							streaming={props.group.streaming && index() === props.group.segments.length - 1}
+						/>
+					) : (
+						<Show when={segment.text.length > 0}>
+							{/* Sanitized markdown with grounded, clickable code links. Links are
+							    wired via event delegation (postToHost) rather than href navigation,
+							    so they work under the webview's strict CSP. Grounded refs come from
+							    the whole run's tool activity so a path read in an earlier box still
+							    linkifies in a later answer block. */}
+							{/* biome-ignore lint/a11y/noStaticElementInteractions: delegates activation of the rendered-markdown <a> links (the anchors are the interactive elements) */}
+							{/* biome-ignore lint/a11y/useKeyWithClickEvents: the links are keyboard-focusable anchors inside innerHTML; delegation only forwards their activation */}
+							<div
+								class="dreb-answer"
+								onClick={onCodeLinkClick}
+								innerHTML={linkifyAnswer(renderMarkdown(segment.text), buildGroundedRefs(props.group.activity))}
+							/>
+						</Show>
+					)
+				}
+			</For>
 			<Show when={props.group.aborted}>
 				<div
 					class="dreb-aborted"
@@ -577,23 +588,24 @@ export function TreePanel(props: { tree: SessionTreeDto; onNavigate: (entryId: s
 	);
 }
 
-function ActivityBox(props: { group: ResponseGroup }) {
+function ActivityBox(props: { segment: ActivitySegment; streaming: boolean }) {
 	const [open, setOpen] = createSignal(true);
-	// Auto-collapse once the run finishes; the user can reopen freely afterward.
+	// Auto-collapse once this box finishes (an answer follows it, or the run ends);
+	// the user can reopen freely afterward.
 	let autoCollapsed = false;
 	createEffect(() => {
-		if (props.group.collapsed && !autoCollapsed) {
+		if (props.segment.collapsed && !autoCollapsed) {
 			autoCollapsed = true;
 			setOpen(false);
 		}
 	});
-	const summary = createMemo(() => activitySummary(props.group));
+	const summary = createMemo(() => activityItemsSummary(props.segment.items));
 
 	return (
 		<div class="dreb-activity">
 			<button type="button" class="dreb-activity-head" onClick={() => setOpen(!open())}>
 				<span class="dreb-caret">{open() ? "▾" : "▸"}</span>
-				<Show when={props.group.streaming} fallback={<span class="dreb-activity-label">Worked · {summary()}</span>}>
+				<Show when={props.streaming} fallback={<span class="dreb-activity-label">Worked · {summary()}</span>}>
 					<span class="dreb-activity-label">
 						<span class="dreb-spinner" /> Working · {summary()}
 					</span>
@@ -601,7 +613,7 @@ function ActivityBox(props: { group: ResponseGroup }) {
 			</button>
 			<Show when={open()}>
 				<div class="dreb-activity-body">
-					<For each={props.group.activity}>
+					<For each={props.segment.items}>
 						{(item) =>
 							item.kind === "thinking" ? <div class="dreb-thinking">{item.text}</div> : <ToolCard tool={item} />
 						}
