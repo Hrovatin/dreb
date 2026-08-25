@@ -32,8 +32,9 @@ export interface NodePathSources {
 	/** Existence probe (defaults to `fs.existsSync`). */
 	fileExists?: (path: string) => boolean;
 	/** Return the major version of a Node executable, or `undefined` if it cannot
-	 * be run / parsed (defaults to executing `<nodePath> --version`). */
-	probeVersion?: (nodePath: string) => number | undefined;
+	 * be run / parsed (defaults to executing `<nodePath> --version`). An optional
+	 * env is merged for the probe (used to pass `ELECTRON_RUN_AS_NODE=1`). */
+	probeVersion?: (nodePath: string, extraEnv?: Record<string, string>) => number | undefined;
 	/** Ordered, highest-priority-first list of candidate Node executables
 	 * (defaults to PATH entries then common install locations). */
 	candidatePaths?: () => string[];
@@ -52,6 +53,11 @@ export type NodePathResult = {
 	env?: Record<string, string>;
 	/** Which rung of the precedence ladder produced the result. */
 	source: "setting" | "discovered" | "electron";
+	/** The resolved runtime's major version, when it could be determined. For the
+	 * Electron fallback this lets the host warn when the editor runtime is older
+	 * than {@link MIN_NODE_MAJOR} (it is not version-gated, since it is the
+	 * last-resort rung that must always produce a runnable executable). */
+	major?: number;
 };
 
 export function resolveNodePath(sources: NodePathSources = {}): NodePathResult {
@@ -72,22 +78,35 @@ export function resolveNodePath(sources: NodePathSources = {}): NodePathResult {
 		if (!exists(candidate)) continue;
 		const major = probe(candidate);
 		if (major != null && major >= MIN_NODE_MAJOR) {
-			return { nodePath: candidate, source: "discovered" };
+			return { nodePath: candidate, source: "discovered", major };
 		}
 	}
 
 	// 3. Editor runtime as plain Node — always present, so resolution never fails.
+	// Probe its version (via ELECTRON_RUN_AS_NODE so the Electron binary reports
+	// Node's version instead of launching a GUI) so the host can warn if it is
+	// older than MIN_NODE_MAJOR. This rung is intentionally NOT version-gated.
+	const execPath = sources.execPath ?? process.execPath;
+	const electronEnv = { ELECTRON_RUN_AS_NODE: "1" };
+	const major = probe(execPath, electronEnv);
 	return {
-		nodePath: sources.execPath ?? process.execPath,
-		env: { ELECTRON_RUN_AS_NODE: "1" },
+		nodePath: execPath,
+		env: electronEnv,
 		source: "electron",
+		...(major != null ? { major } : {}),
 	};
 }
 
-/** Run `<nodePath> --version` and parse the major version (e.g. `v22.3.1` -> 22). */
-function defaultProbeVersion(nodePath: string): number | undefined {
+/** Run `<nodePath> --version` and parse the major version (e.g. `v22.3.1` -> 22).
+ * `extraEnv` is merged into the child (used to pass `ELECTRON_RUN_AS_NODE=1` when
+ * probing the editor's own Electron binary). */
+export function defaultProbeVersion(nodePath: string, extraEnv?: Record<string, string>): number | undefined {
 	try {
-		const out = execFileSync(nodePath, ["--version"], { encoding: "utf8", timeout: 3000 }).trim();
+		const out = execFileSync(nodePath, ["--version"], {
+			encoding: "utf8",
+			timeout: 3000,
+			...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
+		}).trim();
 		const match = /^v?(\d+)\./.exec(out);
 		return match ? Number(match[1]) : undefined;
 	} catch {
@@ -95,9 +114,25 @@ function defaultProbeVersion(nodePath: string): number | undefined {
 	}
 }
 
+/** Injectable dependencies for {@link defaultCandidatePaths} (for testing). */
+export interface CandidatePathDeps {
+	/** The raw `PATH` string (defaults to `process.env.PATH`). */
+	pathEnv?: string;
+	/** Home directory used to locate nvm versions (defaults to `os.homedir()`). */
+	homeDir?: string;
+	/** Directory lister used for nvm expansion (defaults to `fs.readdirSync`). */
+	readdir?: (dir: string) => string[];
+}
+
 /** Build the ordered candidate list: PATH entries first, then common install
  * locations (Homebrew, /usr/local/bin, nvm versions — newest first). */
-function defaultCandidatePaths(platform: NodeJS.Platform = process.platform): string[] {
+export function defaultCandidatePaths(
+	platform: NodeJS.Platform = process.platform,
+	deps: CandidatePathDeps = {},
+): string[] {
+	const pathEnv = deps.pathEnv ?? process.env.PATH ?? "";
+	const homeDir = deps.homeDir ?? homedir();
+	const readdir = deps.readdir ?? readdirSync;
 	const exe = platform === "win32" ? "node.exe" : "node";
 	const seen = new Set<string>();
 	const out: string[] = [];
@@ -109,7 +144,7 @@ function defaultCandidatePaths(platform: NodeJS.Platform = process.platform): st
 	};
 
 	// PATH entries (the user's chosen Node, when the process inherited a PATH).
-	for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+	for (const dir of pathEnv.split(delimiter)) {
 		if (dir) add(join(dir, exe));
 	}
 
@@ -118,16 +153,16 @@ function defaultCandidatePaths(platform: NodeJS.Platform = process.platform): st
 		add(join("/opt/homebrew/bin", exe)); // Apple-silicon Homebrew
 		add(join("/usr/local/bin", exe)); // Intel Homebrew / manual installs
 	}
-	for (const p of nvmNodePaths(exe)) add(p);
+	for (const p of nvmNodePaths(exe, homeDir, readdir)) add(p);
 
 	return out;
 }
 
 /** Expand `~/.nvm/versions/node/<version>/bin/<exe>`, newest version first. */
-function nvmNodePaths(exe: string): string[] {
-	const base = join(homedir(), ".nvm", "versions", "node");
+function nvmNodePaths(exe: string, homeDir: string, readdir: (dir: string) => string[]): string[] {
+	const base = join(homeDir, ".nvm", "versions", "node");
 	try {
-		return readdirSync(base)
+		return readdir(base)
 			.sort(compareVersionDesc)
 			.map((v) => join(base, v, "bin", exe));
 	} catch {
@@ -136,7 +171,7 @@ function nvmNodePaths(exe: string): string[] {
 }
 
 /** Descending semver-ish compare on directory names like `v22.3.1`. */
-function compareVersionDesc(a: string, b: string): number {
+export function compareVersionDesc(a: string, b: string): number {
 	const parse = (s: string) => s.replace(/^v/, "").split(".").map(Number);
 	const [a0 = 0, a1 = 0, a2 = 0] = parse(a);
 	const [b0 = 0, b1 = 0, b2 = 0] = parse(b);

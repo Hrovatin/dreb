@@ -1,5 +1,7 @@
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { resolveCliPath } from "../src/host/cli-path.js";
+import { defaultExtensionDir, repoRelativeCliPath, resolveCliPath } from "../src/host/cli-path.js";
 
 describe("cli-path resolution", () => {
 	it("prefers the configured setting when the file exists", () => {
@@ -63,5 +65,32 @@ describe("cli-path resolution", () => {
 		});
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.error).toContain("dreb folder");
+	});
+});
+
+describe("repo-relative walk (the real un-injected mechanism)", () => {
+	it("repoRelativeCliPath points at the sibling coding-agent package", () => {
+		expect(repoRelativeCliPath("/repo/packages/vscode")).toBe("/repo/packages/coding-agent/dist/cli.js");
+	});
+
+	it("defaultExtensionDir walks up exactly to packages/vscode (load-bearing hop count)", () => {
+		// This is the assumption the whole repo-local install rests on: three parent
+		// hops from the module (`.../packages/vscode/<dist|src>/host/cli-path.<js|ts>`)
+		// must land on `packages/vscode`. If the compiled layout ever changes, this
+		// test fails instead of silently resolving the wrong directory.
+		const dir = defaultExtensionDir();
+		expect(dir).toBeDefined();
+		expect(basename(dir as string)).toBe("vscode");
+		expect(basename(dirname(dir as string))).toBe("packages");
+
+		// And it matches a direct three-hop computation from this test's own module URL,
+		// which lives one level deeper (test/ vs host/) — so hop from its parent.
+		const hereDir = dirname(fileURLToPath(import.meta.url)); // .../packages/vscode/test
+		expect(dir).toBe(dirname(hereDir)); // .../packages/vscode
+	});
+
+	it("the derived dir yields a real sibling cli.js candidate shape", () => {
+		const dir = defaultExtensionDir() as string;
+		expect(repoRelativeCliPath(dir)).toBe(join(dir, "..", "coding-agent", "dist", "cli.js"));
 	});
 });

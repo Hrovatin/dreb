@@ -16,11 +16,11 @@
  * is executed directly.
  */
 
-import { existsSync, lstatSync, mkdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested; no side effects)
@@ -60,11 +60,14 @@ export function parseArgs(argv) {
 /** Remove an existing link/dir at `linkPath`. Symlinks are unlinked; a real
  * directory (e.g. a stale copied `.vsix` install) is removed with a warning. */
 export function removeExisting(linkPath, log = console.log) {
-	if (!existsSync(linkPath) && !isSymlink(linkPath)) return;
+	// Symlink (valid or broken) — unlink it; the real target is untouched.
 	if (isSymlink(linkPath)) {
 		rmSync(linkPath);
 		return;
 	}
+	// Nothing there.
+	if (!existsSync(linkPath)) return;
+	// A real directory (e.g. a stale copied .vsix install) — remove with a warning.
 	log(`Replacing existing non-symlink install at ${linkPath}`);
 	rmSync(linkPath, { recursive: true, force: true });
 }
@@ -82,39 +85,65 @@ function pkgRootDir() {
 	return resolve(dirname(fileURLToPath(import.meta.url)), "..");
 }
 
+/**
+ * Core install logic, with every side effect injectable so it can be unit-tested
+ * without touching the real filesystem or exiting the process. Verifies the build
+ * prerequisites, is idempotent (no-op when already linked to the same target), and
+ * otherwise (re)creates the symlink.
+ */
+export function runInstall({
+	pkgRoot,
+	pkg,
+	extDir,
+	fileExists = existsSync,
+	makeDir = (d) => mkdirSync(d, { recursive: true }),
+	isLink = isSymlink,
+	readLink = safeReadlink,
+	createSymlink = (target, link) => symlinkSync(target, link, "dir"),
+	remove = removeExisting,
+	log = console.log,
+	error = console.error,
+	exit = process.exit,
+}) {
+	// Prerequisites: both the extension host and the sibling CLI must be built.
+	const hostEntry = join(pkgRoot, "dist", "host", "extension.js");
+	const cliEntry = resolve(pkgRoot, "..", "coding-agent", "dist", "cli.js");
+	const missing = [hostEntry, cliEntry].filter((p) => !fileExists(p));
+	if (missing.length > 0) {
+		error("dreb: build outputs missing — run `npm run build` at the repo root first.");
+		for (const m of missing) error(`  missing: ${m}`);
+		exit(1);
+		return { ok: false, reason: "missing-build", missing };
+	}
+
+	makeDir(extDir);
+	const { linkPath, targetPath } = installPlan({ extDir, pkg, target: pkgRoot });
+
+	// Idempotent: if already linked to this target, nothing to do.
+	if (isLink(linkPath) && readLink(linkPath) === targetPath) {
+		log(`Already linked: ${linkPath} -> ${targetPath}`);
+		log('Reload the editor ("Developer: Reload Window") to activate the extension.');
+		return { ok: true, reason: "already-linked", linkPath, targetPath };
+	}
+
+	remove(linkPath);
+	createSymlink(targetPath, linkPath);
+	log(`Linked ${linkPath} -> ${targetPath}`);
+	log('Reload the editor ("Developer: Reload Window") to activate the extension.');
+	return { ok: true, reason: "linked", linkPath, targetPath };
+}
+
 function main() {
 	const pkgRoot = pkgRootDir();
 	const require = createRequire(import.meta.url);
 	const pkg = require(join(pkgRoot, "package.json"));
-
-	// Prerequisites: both the extension host and the sibling CLI must be built.
-	const hostEntry = join(pkgRoot, "dist", "host", "extension.js");
-	const cliEntry = resolve(pkgRoot, "..", "coding-agent", "dist", "cli.js");
-	const missing = [hostEntry, cliEntry].filter((p) => !existsSync(p));
-	if (missing.length > 0) {
-		console.error("dreb: build outputs missing — run `npm run build` at the repo root first.");
-		for (const m of missing) console.error(`  missing: ${m}`);
-		process.exit(1);
-	}
-
 	const args = parseArgs(process.argv.slice(2));
 	const extDir = extensionsDir({ insiders: args.insiders, override: args.dir });
-	mkdirSync(extDir, { recursive: true });
-
-	const { linkPath, targetPath } = installPlan({ extDir, pkg, target: pkgRoot });
-
-	// Idempotent: if already linked to this target, nothing to do.
-	if (isSymlink(linkPath) && safeReadlink(linkPath) === targetPath) {
-		console.log(`Already linked: ${linkPath} -> ${targetPath}`);
-	} else {
-		removeExisting(linkPath);
-		symlinkSync(targetPath, linkPath, "dir");
-		console.log(`Linked ${linkPath} -> ${targetPath}`);
-	}
-	console.log('Reload the editor ("Developer: Reload Window") to activate the extension.');
+	runInstall({ pkgRoot, pkg, extDir });
 }
 
-function safeReadlink(p) {
+/** Read a symlink target, or `undefined` if the path is not a readable symlink. */
+export function safeReadlink(p) {
 	try {
 		return readlinkSync(p);
 	} catch {
@@ -122,4 +151,25 @@ function safeReadlink(p) {
 	}
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main();
+/**
+ * True when this module is the process entry point (run directly, not imported).
+ *
+ * A naive `import.meta.url === \`file://${process.argv[1]}\`` breaks two ways:
+ *   - `import.meta.url` is a percent-encoded file URL while `process.argv[1]` is a
+ *     raw path, so any space or special char (e.g. `~/My Projects/dreb`) fails to
+ *     match — the script then silently does nothing and exits 0; and
+ *   - Node realpath-resolves `import.meta.url` but not `process.argv[1]`, so a
+ *     symlinked path component (common: macOS `/tmp` -> `/private/tmp`) also fails.
+ * Comparing canonical, realpath-resolved file URLs handles both.
+ */
+export function isDirectRun(importMetaUrl, argv1 = process.argv[1]) {
+	if (!argv1) return false;
+	try {
+		if (importMetaUrl === pathToFileURL(realpathSync(argv1)).href) return true;
+	} catch {
+		// realpath can throw (e.g. argv1 no longer exists); fall back to the raw path.
+	}
+	return importMetaUrl === pathToFileURL(argv1).href;
+}
+
+if (isDirectRun(import.meta.url)) main();

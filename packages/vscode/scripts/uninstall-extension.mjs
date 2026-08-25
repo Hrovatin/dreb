@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { extensionsDir, installPlan, parseArgs, removeExisting } from "./install-extension.mjs";
+import { extensionsDir, installPlan, isDirectRun, parseArgs, removeExisting } from "./install-extension.mjs";
 
 function main() {
 	const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -32,4 +32,5 @@ function main() {
 	console.log('Reload the editor ("Developer: Reload Window") to deactivate the extension.');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main();
+// Run only when executed directly (see isDirectRun in install-extension.mjs).
+if (isDirectRun(import.meta.url)) main();

@@ -21,7 +21,7 @@ import type { LiveSessionInput } from "../shared/session-list.js";
 import { formatTabTitle } from "../shared/tab-title.js";
 import { buildArgs } from "./build-args.js";
 import { resolveCliPath } from "./cli-path.js";
-import { resolveNodePath } from "./node-path.js";
+import { MIN_NODE_MAJOR, resolveNodePath } from "./node-path.js";
 import type { ReviewUi } from "./review-ui.js";
 import { SessionController } from "./session-controller.js";
 import { SessionFlagsStore } from "./session-flags.js";
@@ -570,7 +570,15 @@ function extensionDirReal(): string | undefined {
  * default) and the Node executable to spawn it with (a discovered Node >=22 or
  * the editor's own runtime). Centralized so every controller call site stays in
  * sync.
+ *
+ * The Node result is cached (keyed by the `dreb.nodePath` setting) because
+ * resolving it spawns a synchronous `node --version` probe per candidate; without
+ * caching, every `createSession`/`renameSession` would re-probe and could briefly
+ * stall the extension host. The cache is invalidated when the setting changes.
  */
+let nodeRuntimeCache: { key: string; result: ReturnType<typeof resolveNodePath> } | undefined;
+let warnedElectronNodeVersion = false;
+
 function resolveRuntime(config: vscode.WorkspaceConfiguration): {
 	cli: ReturnType<typeof resolveCliPath>;
 	node: ReturnType<typeof resolveNodePath>;
@@ -579,7 +587,23 @@ function resolveRuntime(config: vscode.WorkspaceConfiguration): {
 		configuredPath: config.get<string>("cliPath"),
 		extensionDir: extensionDirReal(),
 	});
-	const node = resolveNodePath({ configuredPath: config.get<string>("nodePath") });
+
+	const configuredNode = config.get<string>("nodePath") ?? "";
+	if (nodeRuntimeCache?.key !== configuredNode) {
+		nodeRuntimeCache = { key: configuredNode, result: resolveNodePath({ configuredPath: configuredNode }) };
+	}
+	const node = nodeRuntimeCache.result;
+
+	// The Electron fallback is not version-gated (it must always yield a runnable
+	// executable), but the CLI targets Node >=22. Warn once if the editor's own
+	// runtime is older, so a subtle version mismatch is diagnosable.
+	if (node.source === "electron" && node.major != null && node.major < MIN_NODE_MAJOR && !warnedElectronNodeVersion) {
+		warnedElectronNodeVersion = true;
+		vscode.window.showWarningMessage(
+			`dreb: no Node ${MIN_NODE_MAJOR}+ found on PATH; falling back to the editor's Node ${node.major} runtime, which is older than dreb requires. Set "dreb.nodePath" to a Node ${MIN_NODE_MAJOR}+ executable if you hit runtime errors.`,
+		);
+	}
+
 	return { cli, node };
 }
 

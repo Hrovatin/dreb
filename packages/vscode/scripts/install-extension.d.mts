@@ -11,3 +11,28 @@ export function installPlan(opts: {
 export function parseArgs(argv: string[]): { insiders: boolean; dir: string | undefined };
 
 export function removeExisting(linkPath: string, log?: (msg: string) => void): void;
+
+export function safeReadlink(p: string): string | undefined;
+
+export function isDirectRun(importMetaUrl: string, argv1?: string): boolean;
+
+export interface RunInstallDeps {
+	pkgRoot: string;
+	pkg: { publisher?: string; name: string };
+	extDir: string;
+	fileExists?: (path: string) => boolean;
+	makeDir?: (dir: string) => void;
+	isLink?: (path: string) => boolean;
+	readLink?: (path: string) => string | undefined;
+	createSymlink?: (target: string, link: string) => void;
+	remove?: (linkPath: string, log?: (msg: string) => void) => void;
+	log?: (msg: string) => void;
+	error?: (msg: string) => void;
+	exit?: (code: number) => void;
+}
+
+export type RunInstallResult =
+	| { ok: false; reason: "missing-build"; missing: string[] }
+	| { ok: true; reason: "already-linked" | "linked"; linkPath: string; targetPath: string };
+
+export function runInstall(deps: RunInstallDeps): RunInstallResult;

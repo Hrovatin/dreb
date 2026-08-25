@@ -72,7 +72,7 @@ export function resolveCliPath(sources: CliPathSources = {}): CliPathResult {
 }
 
 /** `packages/vscode` -> `packages/coding-agent/dist/cli.js` (sibling package). */
-function repoRelativeCliPath(extensionDir: string): string {
+export function repoRelativeCliPath(extensionDir: string): string {
 	return join(extensionDir, "..", "coding-agent", "dist", "cli.js");
 }
 
@@ -82,7 +82,7 @@ function repoRelativeCliPath(extensionDir: string): string {
  * hops land on `packages/vscode`. Under a symlinked repo-local install Node
  * resolves real paths, so this lands inside the actual repo.
  */
-function defaultExtensionDir(): string | undefined {
+export function defaultExtensionDir(): string | undefined {
 	try {
 		const here = fileURLToPath(import.meta.url); // .../packages/vscode/dist/host/cli-path.js
 		return dirname(dirname(dirname(here))); // .../packages/vscode
