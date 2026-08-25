@@ -57,7 +57,7 @@ export class SessionsViewProvider implements vscode.WebviewViewProvider {
 	private readonly model: SessionsViewModel;
 
 	constructor(
-		private readonly extensionUri: vscode.Uri,
+		private readonly resolveExtensionUri: () => vscode.Uri,
 		deps: Omit<SessionsViewDeps, "post">,
 	) {
 		this.model = new SessionsViewModel({ ...deps, post: (msg) => this.post(msg) });
@@ -65,11 +65,17 @@ export class SessionsViewProvider implements vscode.WebviewViewProvider {
 
 	resolveWebviewView(view: vscode.WebviewView): void {
 		this.view = view;
+		// Re-resolve the extension root here (not once at construction) so the
+		// sidebar self-heals like the chat panel: if the realpath resolution failed
+		// at activation, a later view (re)resolve picks up the recovered real path
+		// instead of pinning the symlink fallback (which would 404 the sidebar
+		// assets until a full window reload).
+		const extensionUri = this.resolveExtensionUri();
 		view.webview.options = {
 			enableScripts: true,
-			localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "dist", "webview-sidebar")],
+			localResourceRoots: [vscode.Uri.joinPath(extensionUri, "dist", "webview-sidebar")],
 		};
-		view.webview.html = getSidebarHtml(view.webview, this.extensionUri, makeNonce());
+		view.webview.html = getSidebarHtml(view.webview, extensionUri, makeNonce());
 		view.webview.onDidReceiveMessage((msg: SidebarToHost) => void this.model.handle(msg));
 		view.onDidDispose(() => {
 			if (this.view === view) this.view = undefined;
