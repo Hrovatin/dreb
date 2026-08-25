@@ -1,8 +1,8 @@
 import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { resolveRealFsPath } from "../src/host/extension-paths.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveRealFsPath, tryResolveRealFsPath } from "../src/host/extension-paths.js";
 
 describe("resolveRealFsPath", () => {
 	it("returns the raw path unchanged for a plain (non-symlinked) real path (no-op)", () => {
@@ -40,5 +40,41 @@ describe("resolveRealFsPath", () => {
 			symlinkSync(real, link, "dir");
 			expect(resolveRealFsPath(link)).toBe(link);
 		});
+	});
+});
+
+describe("tryResolveRealFsPath", () => {
+	it("reports resolved:true with the real target on success", () => {
+		const target = "/Users/me/Documents/code/dreb/packages/vscode";
+		const result = tryResolveRealFsPath("/Users/me/.vscode/extensions/pub.name", () => target);
+		expect(result).toEqual({ path: target, resolved: true });
+	});
+
+	it("reports resolved:false with the raw path when realpath throws", () => {
+		const raw = "/Users/me/.vscode/extensions/pub.name";
+		const result = tryResolveRealFsPath(raw, () => {
+			throw new Error("ENOENT");
+		});
+		// resolved:false is what lets the caller avoid caching the fallback and retry.
+		expect(result).toEqual({ path: raw, resolved: false });
+	});
+
+	it("invokes onError with the thrown error on fallback, and not on success", () => {
+		const onError = vi.fn();
+		const err = new Error("EMFILE");
+
+		tryResolveRealFsPath(
+			"/raw",
+			() => {
+				throw err;
+			},
+			onError,
+		);
+		expect(onError).toHaveBeenCalledTimes(1);
+		expect(onError).toHaveBeenCalledWith(err);
+
+		onError.mockClear();
+		tryResolveRealFsPath("/raw", (p) => p, onError);
+		expect(onError).not.toHaveBeenCalled();
 	});
 });
