@@ -13,7 +13,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { relative, sep } from "node:path";
 import * as vscode from "vscode";
@@ -21,7 +20,7 @@ import type { LiveSessionInput } from "../shared/session-list.js";
 import { formatTabTitle } from "../shared/tab-title.js";
 import { buildArgs } from "./build-args.js";
 import { resolveCliPath } from "./cli-path.js";
-import { tryResolveRealFsPath } from "./extension-paths.js";
+import { createExtensionRealDirState, resolveExtensionRealDir } from "./extension-paths.js";
 import type { resolveNodePath } from "./node-path.js";
 import { createNodeRuntimeCacheState, resolveNodeRuntimeCached } from "./node-runtime-cache.js";
 import type { ReviewUi } from "./review-ui.js";
@@ -548,31 +547,25 @@ function workspaceCwd(): string {
 }
 
 /** Cached real (symlink-resolved) directory of this extension's install. */
-let extensionRealDirCache: string | undefined;
+const extensionRealDirState = createExtensionRealDirState();
 
 /**
  * This extension's own directory with symlinks resolved. A repo-local install
  * symlinks `packages/vscode` into `~/.vscode/extensions`, so `extensionUri.fsPath`
  * is the symlink; `realpath` yields the actual monorepo path, which repo-relative
- * CLI resolution needs to reach the sibling `packages/coding-agent`.
+ * CLI resolution needs to reach the sibling `packages/coding-agent`. The
+ * cache-only-on-success self-heal lives in `resolveExtensionRealDir`.
  */
 function extensionDirReal(): string | undefined {
-	if (extensionRealDirCache) return extensionRealDirCache;
-	const raw = extensionContext?.extensionUri.fsPath;
-	if (!raw) return undefined;
-	const { path, resolved } = tryResolveRealFsPath(raw, realpathSync, (err) =>
-		console.warn(
-			`[dreb] failed to resolve the extension's real path for "${raw}"; using it as-is. ` +
-				"Webview assets may 404 (blank chat) under a symlinked (npm run install-vscode) install.",
-			err,
-		),
-	);
-	// Cache only a successful resolution: a transient realpath failure must not
-	// pin the (possibly-symlinked) fallback for the whole session, or the webview
-	// roots built from it would 404 until a full window reload. Leaving the cache
-	// unset lets a later call retry and self-heal.
-	if (resolved) extensionRealDirCache = path;
-	return path;
+	return resolveExtensionRealDir(extensionRealDirState, {
+		rawFsPath: extensionContext?.extensionUri.fsPath,
+		onError: (raw, err) =>
+			console.warn(
+				`[dreb] failed to resolve the extension's real path for "${raw}"; using it as-is. ` +
+					"Webview assets may 404 (blank chat) under a symlinked (npm run install-vscode) install.",
+				err,
+			),
+	});
 }
 
 /**
