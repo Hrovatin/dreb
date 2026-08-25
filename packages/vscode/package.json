@@ -170,7 +170,12 @@
 				"dreb.cliPath": {
 					"type": "string",
 					"default": "",
-					"markdownDescription": "Absolute path to the dreb CLI entry point (`dist/cli.js`). Leave empty to auto-resolve the bundled `@dreb/coding-agent`. Required when running a packaged `.vsix` that does not ship the CLI."
+					"markdownDescription": "Absolute path to the dreb CLI entry point (`packages/coding-agent/dist/cli.js`). Leave empty to auto-resolve: the extension uses the CLI in the same dreb monorepo it is installed from, else the resolvable `@dreb/coding-agent` dependency."
+				},
+				"dreb.nodePath": {
+					"type": "string",
+					"default": "",
+					"markdownDescription": "Absolute path to a Node.js executable (>= 22) used to spawn the dreb CLI. Leave empty to auto-resolve: a Node >= 22 from `PATH` or a common install location, else the editor's own runtime. Set this if a GUI-launched editor cannot find your Node install."
 				},
 				"dreb.provider": {
 					"type": "string",

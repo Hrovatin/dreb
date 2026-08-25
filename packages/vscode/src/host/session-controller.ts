@@ -175,11 +175,25 @@ export type RpcClientFactory = (options: {
 	cliPath: string;
 	cwd: string;
 	args: string[];
+	/** Absolute Node executable to spawn the CLI with (see `nodePath` on the
+	 * controller options). Forwarded to `RpcClient`; omit to default to `"node"`. */
+	nodePath?: string;
+	/** Extra environment for the child (e.g. `ELECTRON_RUN_AS_NODE` when the
+	 * editor's own runtime is used as the Node executable). */
+	env?: Record<string, string>;
 }) => RpcClientLike | Promise<RpcClientLike>;
 
 export interface SessionControllerOptions {
 	cwd: string;
 	cliPath: string;
+	/** Absolute path to the Node executable used to spawn the RPC child. Omit to
+	 * let `RpcClient` default to `"node"` (PATH lookup). Set by the extension to a
+	 * discovered Node >=22 or the editor's own runtime so a GUI-launched editor
+	 * with no shell PATH can still spawn the child. */
+	nodePath?: string;
+	/** Extra environment for the RPC child (merged over `process.env`), e.g.
+	 * `ELECTRON_RUN_AS_NODE` when `nodePath` is the editor's Electron binary. */
+	env?: Record<string, string>;
 	/** Extra CLI args (e.g. --provider/--model), appended verbatim. */
 	args?: string[];
 	/** Resume a specific session .jsonl by passing `--session <path>` to the RPC
@@ -230,7 +244,13 @@ export type ControllerUpdate =
  * never pull it in. */
 const defaultClientFactory: RpcClientFactory = async (options) => {
 	const { RpcClient } = await import("@dreb/coding-agent/rpc");
-	return new RpcClient({ cliPath: options.cliPath, cwd: options.cwd, args: options.args });
+	return new RpcClient({
+		cliPath: options.cliPath,
+		cwd: options.cwd,
+		args: options.args,
+		nodePath: options.nodePath,
+		env: options.env,
+	});
 };
 
 function formatExit(info: { code?: number | null; signal?: string | null; error?: Error; stderr?: string }): string {
@@ -593,6 +613,8 @@ export class SessionController {
 			cliPath: this.options.cliPath,
 			cwd: this.options.cwd,
 			args,
+			nodePath: this.options.nodePath,
+			env: this.options.env,
 		});
 		this.client = client;
 		this.unsubEvent = client.onEvent((event) => this.handleEvent(event));

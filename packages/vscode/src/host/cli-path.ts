@@ -3,10 +3,14 @@
  * `RpcClient` spawns as `node <cliPath> --mode rpc`. `RpcClient` defaults to a
  * cwd-relative `"dist/cli.js"`, so the host must always pass an absolute path.
  *
- * Precedence (mirrors the plan's layered resolution):
- *   1. the `dreb.cliPath` setting (explicit override, required for packaged
- *      `.vsix` installs that do not ship the CLI on disk);
- *   2. dependency resolution via `@dreb/coding-agent`'s package entry.
+ * Precedence (repo-as-distribution: the extension is installed from within a
+ * user's dreb monorepo, where a built `@dreb/coding-agent` already exists):
+ *   1. the `dreb.cliPath` setting (explicit override);
+ *   2. the CLI shipped in the same monorepo, resolved relative to this
+ *      extension's own location (`packages/vscode` -> `../coding-agent/dist/cli.js`).
+ *      This is deterministic and does not depend on `node_modules` layout, so a
+ *      symlinked repo-local install "just works" with no setting;
+ *   3. dependency resolution via `@dreb/coding-agent`'s package entry (dev fallback).
  *
  * All I/O is injectable so the precedence logic is unit-testable without a real
  * filesystem or a resolvable dependency.
@@ -19,17 +23,24 @@ import { fileURLToPath } from "node:url";
 export interface CliPathSources {
 	/** The `dreb.cliPath` setting value; empty/whitespace means unset. */
 	configuredPath?: string;
+	/** This extension's own directory (`packages/vscode`), used to resolve the
+	 * sibling `packages/coding-agent/dist/cli.js` in the same monorepo. Defaults
+	 * to a location derived from this module's URL. */
+	extensionDir?: string;
 	/** Directory that should contain `cli.js` (defaults to dependency resolution). */
 	resolveCliDir?: () => string | undefined;
 	/** Existence probe (defaults to `fs.existsSync`). */
 	fileExists?: (path: string) => boolean;
 }
 
-export type CliPathResult = { ok: true; path: string; source: "setting" | "dependency" } | { ok: false; error: string };
+export type CliPathResult =
+	| { ok: true; path: string; source: "setting" | "repo" | "dependency" }
+	| { ok: false; error: string };
 
 export function resolveCliPath(sources: CliPathSources = {}): CliPathResult {
 	const exists = sources.fileExists ?? existsSync;
 
+	// 1. Explicit setting wins when it points at a real file.
 	const configured = sources.configuredPath?.trim();
 	if (configured) {
 		if (exists(configured)) return { ok: true, path: configured, source: "setting" };
@@ -39,6 +50,14 @@ export function resolveCliPath(sources: CliPathSources = {}): CliPathResult {
 		};
 	}
 
+	// 2. Sibling CLI in the same monorepo, resolved relative to this extension.
+	const extensionDir = sources.extensionDir ?? defaultExtensionDir();
+	if (extensionDir) {
+		const candidate = repoRelativeCliPath(extensionDir);
+		if (exists(candidate)) return { ok: true, path: candidate, source: "repo" };
+	}
+
+	// 3. Dependency resolution (dev / non-monorepo fallback).
 	const resolveCliDir = sources.resolveCliDir ?? defaultResolveCliDir;
 	const dir = resolveCliDir();
 	if (dir) {
@@ -48,8 +67,28 @@ export function resolveCliPath(sources: CliPathSources = {}): CliPathResult {
 
 	return {
 		ok: false,
-		error: 'Could not locate the dreb CLI. Ensure @dreb/coding-agent is installed, or set the "dreb.cliPath" setting to the absolute path of its dist/cli.js.',
+		error: 'Could not locate the dreb CLI. Install the extension from within your dreb folder (run the repo-local install), or set the "dreb.cliPath" setting to the absolute path of packages/coding-agent/dist/cli.js.',
 	};
+}
+
+/** `packages/vscode` -> `packages/coding-agent/dist/cli.js` (sibling package). */
+export function repoRelativeCliPath(extensionDir: string): string {
+	return join(extensionDir, "..", "coding-agent", "dist", "cli.js");
+}
+
+/**
+ * Derive this extension's directory from the compiled module location. At
+ * runtime this file is `packages/vscode/dist/host/cli-path.js`, so three parent
+ * hops land on `packages/vscode`. Under a symlinked repo-local install Node
+ * resolves real paths, so this lands inside the actual repo.
+ */
+export function defaultExtensionDir(): string | undefined {
+	try {
+		const here = fileURLToPath(import.meta.url); // .../packages/vscode/dist/host/cli-path.js
+		return dirname(dirname(dirname(here))); // .../packages/vscode
+	} catch {
+		return undefined;
+	}
 }
 
 /**

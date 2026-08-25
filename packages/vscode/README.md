@@ -178,23 +178,48 @@ The message composer can be **dragged taller** so long prompts get more room, up
 ## Requirements
 
 - **VS Code 1.100+** — this is an [ESM extension](https://code.visualstudio.com/updates/v1_100#_esm-support-for-extensions) (`"type": "module"`), which requires the ESM-capable extension host.
-- **Node 22.x** available to the extension host — `RpcClient` spawns `node <cli.js> --mode rpc`.
-- A resolvable dreb CLI (see below).
+- **A built dreb monorepo** — the extension is installed from within your dreb folder, where `@dreb/coding-agent` is already built. `npm run build` at the repo root produces both the extension and the CLI it spawns.
+- **Node 22.x** — the extension resolves a Node ≥ 22 to spawn the CLI (see "Locating the Node runtime"). No global install of `@dreb/coding-agent` and no network are required.
+
+## Installation (from your dreb folder)
+
+This extension is distributed as part of the dreb repo, not as a published `.vsix`. Install it by **symlinking** it into VS Code's extensions directory, so it keeps running from inside the monorepo and resolves `@dreb/coding-agent` straight from the workspace.
+
+```bash
+# from the repo root
+npm run install-vscode        # builds the repo, then links packages/vscode into ~/.vscode/extensions
+```
+
+Then reload the editor (**Developer: Reload Window**) and run **dreb: Open Chat**.
+
+- VS Code Insiders: `node packages/vscode/scripts/install-extension.mjs --insiders`
+- Custom extensions dir: `... --dir <path>`
+- Remove the link: `npm run uninstall-vscode`
+
+Because it's a symlink, rebuilding the repo (`npm run build`) is picked up automatically — no re-install or re-packaging. Installing a **copied** `.vsix` instead detaches the extension from the repo and is not supported (it cannot resolve the CLI or the in-process runtime).
 
 ## Locating the dreb CLI
 
 `RpcClient` spawns the compiled dreb CLI. The host resolves its absolute path in this order:
 
-1. the **`dreb.cliPath`** setting, if set (absolute path to `@dreb/coding-agent`'s `dist/cli.js`);
-2. dependency resolution via the bundled `@dreb/coding-agent` (works out of the box in the F5 dev host).
+1. the **`dreb.cliPath`** setting, if set (absolute path to `packages/coding-agent/dist/cli.js`);
+2. the CLI in the **same monorepo**, resolved relative to the extension's own (symlink-resolved) location — `packages/vscode` → `../coding-agent/dist/cli.js`. This is what a repo-local install uses; no setting needed;
+3. dependency resolution via a resolvable `@dreb/coding-agent` (F5 dev host / non-monorepo fallback).
 
-When running a packaged `.vsix` that does not ship the CLI, set `dreb.cliPath` to a local dreb install's `dist/cli.js`.
+## Locating the Node runtime
+
+A GUI-launched editor (Dock/Finder/Explorer) does not inherit your shell `PATH`, so a bare `node` spawn fails. The host resolves a Node executable in this order:
+
+1. the **`dreb.nodePath`** setting, if set;
+2. the first **Node ≥ 22** found among `PATH` entries, then common install locations (Homebrew, `/usr/local/bin`, nvm versions — newest first);
+3. the **editor's own runtime** (`process.execPath` run as Node via `ELECTRON_RUN_AS_NODE=1`) — always available, so a session can always start.
 
 ## Settings
 
 | Setting | Description |
 | --- | --- |
-| `dreb.cliPath` | Absolute path to the dreb CLI (`dist/cli.js`). Empty = auto-resolve. |
+| `dreb.cliPath` | Absolute path to the dreb CLI (`packages/coding-agent/dist/cli.js`). Empty = auto-resolve (repo-relative, then dependency). |
+| `dreb.nodePath` | Absolute path to a Node ≥ 22 used to spawn the CLI. Empty = auto-resolve (PATH / common locations / editor runtime). |
 | `dreb.provider` | Optional provider passed to dreb (e.g. `anthropic`). |
 | `dreb.model` | Optional model id/pattern passed to dreb. |
 | `dreb.session.idleSleepMinutes` | Minutes a detached + idle session stays alive before sleeping (releasing its RPC child). Reopening before then reattaches losslessly. Default `60`; `0` disables; an invalid value falls back to the default. |
@@ -219,7 +244,7 @@ Then press **F5** ("Run Extension") to launch an Extension Development Host and 
 npm run package          # → dreb-vscode-<version>.vsix (via @vscode/vsce)
 ```
 
-Install the `.vsix` with `code --install-extension dreb-vscode-<version>.vsix`.
+A packaged `.vsix` is a **copied**, repo-detached artifact: it ships no `node_modules` and cannot resolve the CLI or the in-process runtime, so `code --install-extension` is not the supported install path. Use the repo-local symlink install (see [Installation](#installation-from-your-dreb-folder)) instead.
 
 ## Testing notes
 
