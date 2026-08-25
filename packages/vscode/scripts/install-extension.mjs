@@ -16,7 +16,18 @@
  * is executed directly.
  */
 
-import { existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	readlinkSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -42,6 +53,96 @@ export function linkName(pkg) {
 export function installPlan({ extDir, pkg, target }) {
 	return { linkPath: join(extDir, linkName(pkg)), targetPath: target };
 }
+
+// ---------------------------------------------------------------------------
+// extensions.json manifest helpers (pure; unit-tested)
+//
+// Modern VS Code (verified on 1.134.0) treats `<extensionsDir>/extensions.json`
+// as the authoritative list of user-installed extensions and no longer purely
+// directory-scans, so a bare symlink is invisible unless it is also registered
+// here. These helpers build/merge that manifest with no side effects.
+// ---------------------------------------------------------------------------
+
+/** Path to the editor's user-extensions control file. */
+export function manifestPath(extDir) {
+	return join(extDir, "extensions.json");
+}
+
+/** Parse the manifest's raw JSON into `{ entries, malformed }`.
+ *
+ * - absent (`undefined`) or empty/whitespace-only → `{ entries: [], malformed: false }`
+ *   (nothing to preserve; safe to create fresh);
+ * - a valid JSON array → `{ entries, malformed: false }`;
+ * - present but non-array or unparseable → `{ entries: [], malformed: true }`.
+ *
+ * The `malformed` flag lets a caller refuse to overwrite a file it could not
+ * understand — the manifest lists *every* installed extension, so blindly
+ * rewriting an unreadable one would silently deregister the others. Never throws. */
+export function parseManifest(raw) {
+	if (raw === undefined || raw.trim() === "") return { entries: [], malformed: false };
+	try {
+		const parsed = JSON.parse(raw);
+		if (Array.isArray(parsed)) return { entries: parsed, malformed: false };
+	} catch {
+		// fall through to malformed
+	}
+	return { entries: [], malformed: true };
+}
+
+/** Parse the manifest's raw JSON into an array of entries. Tolerant: a missing
+ * (`undefined`), empty, non-array, or malformed file yields `[]` — never throws.
+ * Use this where a malformed manifest should be treated as empty (e.g. uninstall,
+ * which then simply finds nothing to remove); prefer `parseManifest` when the
+ * malformed case must be distinguished before overwriting the file. */
+export function readManifest(raw) {
+	return parseManifest(raw).entries;
+}
+
+/** Build the manifest entry VS Code expects for a symlinked (dev) extension. */
+export function buildManifestEntry({ id, version, linkPath, now = Date.now() }) {
+	return {
+		identifier: { id },
+		version: version ?? "0.0.0",
+		location: {
+			$mid: 1,
+			fsPath: linkPath,
+			external: pathToFileURL(linkPath).href,
+			path: linkPath,
+			scheme: "file",
+		},
+		relativeLocation: id,
+		metadata: { installedTimestamp: now, pinned: true, source: "vsix" },
+	};
+}
+
+/** True when two extension ids match. VS Code compares ids case-insensitively. */
+export function sameId(a, b) {
+	return String(a ?? "").toLowerCase() === String(b ?? "").toLowerCase();
+}
+
+/** Return a new array with every existing entry for `entry.identifier.id`
+ * dropped and `entry` appended — so re-installs never duplicate the extension. */
+export function upsertEntry(entries, entry) {
+	const id = entry.identifier?.id;
+	return [...entries.filter((e) => !sameId(e?.identifier?.id, id)), entry];
+}
+
+/** Return a new array with every entry for `id` removed. */
+export function removeEntry(entries, id) {
+	return entries.filter((e) => !sameId(e?.identifier?.id, id));
+}
+
+/** Stale on-disk install folders belonging to this extension: versioned-copy
+ * variants like `<id>-0.1.0` (a prior `.vsix`-style install). The canonical
+ * `<id>` link itself is excluded — install (re)creates it, uninstall removes it
+ * via the normal link path. Only a *version-shaped* suffix (`-` followed by a
+ * digit) counts, so a genuinely different sibling extension that merely shares
+ * the id prefix (e.g. `<id>-extras`) is never matched and never deleted. */
+export function staleInstallNames(names, name) {
+	const prefix = `${name}-`;
+	return names.filter((n) => n !== name && n.startsWith(prefix) && /^\d/.test(n.slice(prefix.length)));
+}
+
 
 /** Parse the supported flags: `--insiders` and `--dir <path>`. */
 export function parseArgs(argv) {
@@ -88,6 +189,16 @@ function pkgRootDir() {
 	return resolve(dirname(fileURLToPath(import.meta.url)), "..");
 }
 
+/** Remove every stale versioned-copy folder in `staleNames`, logging each. Shared
+ * by install and uninstall so their cleanup wording/semantics can't drift apart. */
+function removeStaleInstalls(staleNames, extDir, remove, log) {
+	for (const n of staleNames) {
+		const stalePath = join(extDir, n);
+		remove(stalePath, log);
+		log(`Removed stale install: ${stalePath}`);
+	}
+}
+
 /**
  * Core install logic, with every side effect injectable so it can be unit-tested
  * without touching the real filesystem or exiting the process. Verifies the build
@@ -104,6 +215,10 @@ export function runInstall({
 	readLink = safeReadlink,
 	createSymlink = (target, link) => symlinkSync(target, link, "dir"),
 	remove = removeExisting,
+	readDir = safeReaddir,
+	readManifestFile = safeReadFile,
+	writeManifestFile = (p, data) => writeFileSync(p, data),
+	now = Date.now,
 	log = console.log,
 	error = console.error,
 	exit = process.exit,
@@ -120,20 +235,105 @@ export function runInstall({
 	}
 
 	makeDir(extDir);
+	const name = linkName(pkg);
 	const { linkPath, targetPath } = installPlan({ extDir, pkg, target: pkgRoot });
 
-	// Idempotent: if already linked to this target, nothing to do.
+	// (Re)establish the canonical symlink. Idempotent: leave it in place when it
+	// already points at this target, otherwise remove-and-relink.
+	let reason;
 	if (isLink(linkPath) && readLink(linkPath) === targetPath) {
+		reason = "already-linked";
 		log(`Already linked: ${linkPath} -> ${targetPath}`);
-		log('Reload the editor ("Developer: Reload Window") to activate the extension.');
-		return { ok: true, reason: "already-linked", linkPath, targetPath };
+	} else {
+		remove(linkPath);
+		createSymlink(targetPath, linkPath);
+		reason = "linked";
+		log(`Linked ${linkPath} -> ${targetPath}`);
 	}
 
-	remove(linkPath);
-	createSymlink(targetPath, linkPath);
-	log(`Linked ${linkPath} -> ${targetPath}`);
+	// Reconcile any prior install state: remove leftover versioned-copy folders
+	// (e.g. a stale `.vsix`-style `<id>-0.1.0`) so the editor sees exactly one.
+	removeStaleInstalls(staleInstallNames(readDir(extDir), name), extDir, remove, log);
+
+	// Register (or refresh) the extensions.json entry. Runs on both paths so a
+	// pre-existing symlink with a missing/stale manifest entry self-heals —
+	// without this, modern VS Code silently never loads the extension.
+	//
+	// The manifest lists *every* installed extension. If the file is present but
+	// unparseable (truncated by a concurrent editor write, hand-edited, etc.),
+	// refuse to overwrite it — collapsing it to `[]` and rewriting would silently
+	// deregister all the user's other extensions. `runUninstall` guards the same
+	// way. An absent/empty file is fine to create fresh.
+	const manifestFile = manifestPath(extDir);
+	const { entries: existing, malformed } = parseManifest(readManifestFile(manifestFile));
+	if (malformed) {
+		error(`dreb: ${manifestFile} exists but is not a valid JSON array — refusing to overwrite it.`);
+		error("  Fix or remove that file, then re-run — otherwise your other extensions would be deregistered.");
+		exit(1);
+		return { ok: false, reason: "manifest-malformed", linkPath, targetPath };
+	}
+	const entry = buildManifestEntry({ id: name, version: pkg.version, linkPath, now: now() });
+	writeManifestFile(manifestFile, JSON.stringify(upsertEntry(existing, entry), null, 0));
+	log(`Registered ${name} in ${manifestFile}`);
+
 	log('Reload the editor ("Developer: Reload Window") to activate the extension.');
-	return { ok: true, reason: "linked", linkPath, targetPath };
+	return { ok: true, reason, linkPath, targetPath };
+}
+
+/**
+ * Core uninstall logic (paired with `runInstall`), with every side effect
+ * injectable so it can be unit-tested without touching the real filesystem.
+ * Removes the symlink, any stale versioned-copy folders, and this extension's
+ * `extensions.json` entry. Safe when nothing is installed and when the manifest
+ * is absent/malformed. The `uninstall-extension.mjs` CLI is a thin wrapper.
+ */
+export function runUninstall({
+	extDir,
+	pkg,
+	isLink = isSymlink,
+	fileExists = existsSync,
+	remove = removeExisting,
+	readDir = safeReaddir,
+	readManifestFile = safeReadFile,
+	writeManifestFile = (p, data) => writeFileSync(p, data),
+	log = console.log,
+}) {
+	const name = linkName(pkg);
+	const linkPath = join(extDir, name);
+
+	// The link itself: check with `isSymlink` (lstat-based), not `existsSync`,
+	// which follows the link — after the user moves/deletes their dreb repo the
+	// link dangles and `existsSync` would report it gone, silently leaving the
+	// broken extension entry behind.
+	const linkPresent = isLink(linkPath) || fileExists(linkPath);
+
+	// Leftover versioned-copy folders from a prior `.vsix`-style install.
+	const stale = staleInstallNames(readDir(extDir), name);
+
+	// The manifest entry (only rewrite when it actually changes / exists).
+	const manifestFile = manifestPath(extDir);
+	const raw = readManifestFile(manifestFile);
+	const before = readManifest(raw);
+	const after = removeEntry(before, name);
+	const manifestChanged = raw !== undefined && after.length !== before.length;
+
+	if (!linkPresent && stale.length === 0 && !manifestChanged) {
+		log(`Nothing to remove: ${linkPath} does not exist.`);
+		return { ok: true, reason: "nothing" };
+	}
+
+	if (linkPresent) {
+		remove(linkPath);
+		log(`Removed ${linkPath}`);
+	}
+	removeStaleInstalls(stale, extDir, remove, log);
+	if (manifestChanged) {
+		writeManifestFile(manifestFile, JSON.stringify(after, null, 0));
+		log(`Deregistered ${name} from ${manifestFile}`);
+	}
+
+	log('Reload the editor ("Developer: Reload Window") to deactivate the extension.');
+	return { ok: true, reason: "removed" };
 }
 
 function main() {
@@ -151,6 +351,24 @@ export function safeReadlink(p) {
 		return readlinkSync(p);
 	} catch {
 		return undefined;
+	}
+}
+
+/** Read a file as UTF-8, or `undefined` if it does not exist / is unreadable. */
+export function safeReadFile(p) {
+	try {
+		return readFileSync(p, "utf8");
+	} catch {
+		return undefined;
+	}
+}
+
+/** List a directory's entries, or `[]` if it does not exist / is unreadable. */
+export function safeReaddir(d) {
+	try {
+		return readdirSync(d);
+	} catch {
+		return [];
 	}
 }
 
