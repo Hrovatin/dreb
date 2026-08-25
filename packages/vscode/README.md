@@ -196,6 +196,8 @@ Then reload the editor (**Developer: Reload Window**) and run **dreb: Open Chat*
 - Custom extensions dir: `... --dir <path>`
 - Remove the link: `npm run uninstall-vscode`
 
+The installer also registers the extension in VS Code's `extensions.json` control file (modern VS Code no longer discovers a bare symlinked folder on its own), reconciles any prior install of dreb (including a stale copied `.vsix` folder), and `uninstall-vscode` removes both the link and that entry — so you never end up with a half-registered or dangling extension.
+
 Because it's a symlink, rebuilding the repo (`npm run build`) is picked up automatically — no re-install or re-packaging. Installing a **copied** `.vsix` instead detaches the extension from the repo and is not supported (it cannot resolve the CLI or the in-process runtime).
 
 ## Locating the dreb CLI

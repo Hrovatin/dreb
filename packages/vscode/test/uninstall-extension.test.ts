@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,5 +70,42 @@ describe("uninstall-extension.mjs main() — end-to-end (finding 2)", () => {
 	it("reports 'Nothing to remove' when no link exists (guard's other arm)", () => {
 		const out = runUninstall(extDir);
 		expect(out).toContain("Nothing to remove");
+	});
+});
+
+describe("uninstall-extension.mjs main() — end-to-end manifest cleanup (issue 92)", () => {
+	let dir: string;
+	let extDir: string;
+	const pkg = { publisher: "hrovatin", name: "dreb-vscode" };
+
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "dreb-uninstall-manifest-"));
+		extDir = join(dir, "extensions");
+		mkdirSync(extDir, { recursive: true });
+	});
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("removes the symlink, versioned copy, and manifest entry via the real script", () => {
+		const name = linkName(pkg);
+		const target = join(dir, "repo");
+		mkdirSync(target);
+		symlinkSync(target, join(extDir, name), "dir");
+		mkdirSync(join(extDir, `${name}-0.1.0`)); // stale versioned copy
+		const manifest = join(extDir, "extensions.json");
+		writeFileSync(manifest, JSON.stringify([{ identifier: { id: name } }, { identifier: { id: "keep.me" } }]));
+
+		const out = execFileSync(
+			process.execPath,
+			[join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "uninstall-extension.mjs"), "--dir", extDir],
+			{ encoding: "utf8" },
+		);
+
+		expect(out).toContain("Removed");
+		expect(isSymlink(join(extDir, name))).toBe(false);
+		expect(existsSync(join(extDir, `${name}-0.1.0`))).toBe(false);
+		const entries = JSON.parse(readFileSync(manifest, "utf8"));
+		expect(entries).toEqual([{ identifier: { id: "keep.me" } }]);
 	});
 });
