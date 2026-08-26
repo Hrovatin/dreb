@@ -180,6 +180,7 @@ The message composer can be **dragged taller** so long prompts get more room, up
 - **VS Code 1.100+** — this is an [ESM extension](https://code.visualstudio.com/updates/v1_100#_esm-support-for-extensions) (`"type": "module"`), which requires the ESM-capable extension host.
 - **A built dreb monorepo** — the extension is installed from within your dreb folder, where `@dreb/coding-agent` is already built. `npm run build` at the repo root produces both the extension and the CLI it spawns.
 - **Node 22.x** — the extension resolves a Node ≥ 22 to spawn the CLI (see "Locating the Node runtime"). No global install of `@dreb/coding-agent` and no network are required.
+- **A trusted workspace** — the extension is **not supported in untrusted workspaces**. It declares no [Workspace Trust](https://code.visualstudio.com/docs/editor/workspace-trust) capability, so opening an untrusted folder disables it entirely: no dreb icon in the Activity Bar and no commands in the palette. If the dreb icon is missing in a project, that folder is may be untrusted — trust it (click **Trust** on the folder prompt, or run **Workspaces: Manage Workspace Trust**).
 
 ## Installation (from your dreb folder)
 
