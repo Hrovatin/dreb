@@ -29,8 +29,9 @@ export interface ToolActivity {
 export type ActivityItem = ThinkingActivity | ToolActivity;
 
 /** One collapsible activity box: a contiguous run of thinking + tool calls that
- * arrived with no answer text between them. Its `items` share object references
- * with {@link ResponseGroup.activity}, so a tool-result update mutates both. */
+ * arrived with no answer text between them. These `items` are the sole store of
+ * the run's activity — the flat aggregate ({@link runActivity}) is derived from
+ * them — so a tool-result update mutates exactly the object the box renders. */
 export interface ActivitySegment {
 	kind: "activity";
 	items: ActivityItem[];
@@ -56,24 +57,27 @@ export interface ResponseGroup {
 	kind: "response";
 	id: number;
 	/** Ordered interleaving of activity boxes and answer blocks for this run —
-	 * the render source of truth. */
+	 * the single render source of truth *and* the sole store of activity items.
+	 * The flat activity aggregate used by grounded refs / the summary is DERIVED
+	 * from these segments via {@link runActivity}, so there is never a second copy
+	 * to fall out of sync (see the mid-stream-snapshot regression this avoids: a
+	 * JSON-serialized snapshot would duplicate a shared reference, leaving a
+	 * separately-stored aggregate frozen while the rendered segment updated). */
 	segments: ResponseSegment[];
-	/** Thinking + tool activity aggregated across the whole run, in arrival order.
-	 * Shares object references with the activity segments' `items`; used for
-	 * grounded refs and the run summary, not for rendering order. */
-	activity: ActivityItem[];
 	/** Accumulated final-answer markdown aggregated across the whole run. Used for
 	 * persistence/crash-recovery bookkeeping (offset math), not for rendering. */
 	answer: string;
-	/** Internal: `activity.length` when the last answer text was appended. Used to
+	/** Internal: activity-item count when the last answer text was appended. Used to
 	 * detect a new narration block (activity arrived since the last text) so
 	 * consecutive text blocks in one run are separated instead of concatenated in
 	 * the `answer` aggregate. Not rendered. */
 	answerActivityMark?: number;
 	/** True between agent_start and agent_end for this run. */
 	streaming: boolean;
-	/** Whole-run collapse state, set when the run ends; individual boxes also carry
-	 * their own {@link ActivitySegment.collapsed}. */
+	/** Run-level state: set true once the run ends (a coarse "this run is
+	 * finished" flag, e.g. asserted in tests). Individual activity boxes carry
+	 * their own {@link ActivitySegment.collapsed}, which is what the renderer
+	 * actually reads to fold each box. */
 	collapsed: boolean;
 	/** Provider failure text, if this run ended in an error. */
 	error?: string;
@@ -235,7 +239,6 @@ function activeResponse(state: TranscriptState, create: boolean): ResponseGroup 
 		kind: "response",
 		id: state.nextResponseId++,
 		segments: [],
-		activity: [],
 		answer: "",
 		streaming: true,
 		collapsed: false,
@@ -244,18 +247,40 @@ function activeResponse(state: TranscriptState, create: boolean): ResponseGroup 
 	return group;
 }
 
+/** All activity items of a run, flattened across its activity segments in arrival
+ * order. Derived on demand from {@link ResponseGroup.segments} (the sole store),
+ * so grounded refs and the summary always read the same live objects the boxes
+ * render — never a separately-stored copy that a snapshot round-trip could
+ * freeze. */
+export function runActivity(group: ResponseGroup): ActivityItem[] {
+	const items: ActivityItem[] = [];
+	for (const segment of group.segments) if (segment.kind === "activity") items.push(...segment.items);
+	return items;
+}
+
+/** Count of a run's activity items without materializing the flattened array
+ * (used for the answer-aggregate's narration-block bookkeeping). */
+function activityCount(group: ResponseGroup): number {
+	let n = 0;
+	for (const segment of group.segments) if (segment.kind === "activity") n += segment.items.length;
+	return n;
+}
+
 function lastThinking(group: ResponseGroup): ThinkingActivity | undefined {
-	const last = group.activity[group.activity.length - 1];
-	return last?.kind === "thinking" ? last : undefined;
+	// The most recent activity item overall lives at the end of the trailing
+	// activity segment (a later answer segment would mean a new thinking starts a
+	// fresh box, so there is no in-flight thought to extend).
+	const last = group.segments[group.segments.length - 1];
+	if (!last || last.kind !== "activity") return undefined;
+	const item = last.items[last.items.length - 1];
+	return item?.kind === "thinking" ? item : undefined;
 }
 
 /** Append an activity item to the run: extend the trailing activity segment, or
- * open a new box when the last segment is an answer block (or there is none). The
- * same object reference lands in both the ordered {@link ResponseGroup.segments}
- * and the flat {@link ResponseGroup.activity} aggregate, so a later tool-result
- * update mutates both views at once. */
+ * open a new box when the last segment is an answer block (or there is none).
+ * Items live only here (in {@link ResponseGroup.segments}); the flat aggregate is
+ * derived via {@link runActivity}, so there is no second copy to keep in sync. */
 function pushActivity(group: ResponseGroup, item: ActivityItem): void {
-	group.activity.push(item);
 	const last = group.segments[group.segments.length - 1];
 	if (last && last.kind === "activity") last.items.push(item);
 	else group.segments.push({ kind: "activity", items: [item], collapsed: false });
@@ -270,11 +295,11 @@ function appendAnswerText(group: ResponseGroup, text: string): void {
 	if (!text) return;
 	// Aggregate (persistence bookkeeping only — not rendered).
 	const mark = group.answerActivityMark ?? 0;
-	if (group.answer.length > 0 && group.activity.length > mark && !group.answer.endsWith("\n\n")) {
+	if (group.answer.length > 0 && activityCount(group) > mark && !group.answer.endsWith("\n\n")) {
 		group.answer += group.answer.endsWith("\n") ? "\n" : "\n\n";
 	}
 	group.answer += text;
-	group.answerActivityMark = group.activity.length;
+	group.answerActivityMark = activityCount(group);
 	// Ordered segments (render source of truth).
 	const last = group.segments[group.segments.length - 1];
 	if (last && last.kind === "answer") {
@@ -286,9 +311,16 @@ function appendAnswerText(group: ResponseGroup, text: string): void {
 }
 
 function findTool(group: ResponseGroup, toolCallId: string): ToolActivity | undefined {
-	for (let i = group.activity.length - 1; i >= 0; i--) {
-		const item = group.activity[i];
-		if (item.kind === "tool" && item.toolCallId === toolCallId) return item;
+	// Scan the segments (the sole store) newest-first so the returned object is
+	// the exact one the box renders — a status/result mutation therefore always
+	// reaches the DOM, even after a snapshot round-trip.
+	for (let s = group.segments.length - 1; s >= 0; s--) {
+		const segment = group.segments[s];
+		if (segment.kind !== "activity") continue;
+		for (let i = segment.items.length - 1; i >= 0; i--) {
+			const item = segment.items[i];
+			if (item.kind === "tool" && item.toolCallId === toolCallId) return item;
+		}
 	}
 	return undefined;
 }
@@ -624,11 +656,6 @@ export function activityItemsSummary(items: readonly ActivityItem[]): string {
 	return parts.length > 0 ? parts.join(" · ") : "no activity";
 }
 
-/** One-line summary of a whole response's activity (all boxes combined). */
-export function activitySummary(group: ResponseGroup): string {
-	return activityItemsSummary(group.activity);
-}
-
 /**
  * The id of the response group eligible for a **Retry** control, or `undefined`
  * when none is. Only the *most recent* turn qualifies, and only when it ended in
@@ -733,7 +760,6 @@ export function foldMessagesIntoState(state: TranscriptState, messages: readonly
 			kind: "response",
 			id: state.nextResponseId++,
 			segments: [],
-			activity: [],
 			answer: "",
 			streaming: false,
 			collapsed: true,

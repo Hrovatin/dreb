@@ -7,6 +7,7 @@ import {
 	SessionController,
 } from "../src/host/session-controller.js";
 import type { SourceLinkUi } from "../src/host/source-link-ui.js";
+import { runActivity } from "../src/shared/projection.js";
 import type { OpenSourceRef, SessionTreeNodeDto } from "../src/shared/protocol.js";
 
 /** Fake RpcClient that captures calls and lets a test drive events/exit. */
@@ -2232,8 +2233,8 @@ describe("SessionController session tree (Phase 6)", () => {
 		const group = items.find((i) => i.kind === "response");
 		if (group?.kind !== "response") throw new Error("expected a response group");
 		expect(group.answer).toBe("here is the answer");
-		expect(group.activity.filter((a) => a.kind === "thinking")).toHaveLength(1);
-		const tool = group.activity.find((a) => a.kind === "tool");
+		expect(runActivity(group).filter((a) => a.kind === "thinking")).toHaveLength(1);
+		const tool = runActivity(group).find((a) => a.kind === "tool");
 		expect(tool).toMatchObject({ toolName: "read", status: "done", resultText: "file body" });
 		// The single restore/fork control keys to the run-terminal entry (a2).
 		expect(controller.getCheckpoints().map((c) => `${c.entryId}:${c.canRestore}:${c.canFork}`)).toEqual([

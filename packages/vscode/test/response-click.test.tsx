@@ -14,7 +14,7 @@
 
 import { render } from "solid-js/web/dist/web.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ResponseGroup, ResponseSegment, ToolActivity } from "../src/shared/projection.js";
+import type { ActivityItem, ResponseGroup, ResponseSegment, ToolActivity } from "../src/shared/projection.js";
 
 const hoisted = vi.hoisted(() => ({ posted: [] as unknown[] }));
 
@@ -27,13 +27,15 @@ vi.mock("../src/webview/vscode-api.js", () => ({
 
 import { ResponseView } from "../src/webview/app.js";
 
-function group(partial: Partial<ResponseGroup>): ResponseGroup {
-	const activity = partial.activity ?? [];
-	const answer = partial.answer ?? "";
-	// Derive the ordered segments the renderer consumes from the aggregate
-	// activity/answer fields, so existing test cases keep their simple shape.
-	const segments: ResponseSegment[] = partial.segments ?? [
-		...(activity.length > 0 ? [{ kind: "activity" as const, items: activity, collapsed: true }] : []),
+function group(partial: Partial<ResponseGroup> & { activity?: ActivityItem[] }): ResponseGroup {
+	const { activity, ...rest } = partial;
+	const answer = rest.answer ?? "";
+	// Derive the ordered segments the renderer consumes from the convenience
+	// activity/answer inputs, so existing test cases keep their simple shape.
+	// `activity` is a factory-only input — the group stores items solely in
+	// `segments` now.
+	const segments: ResponseSegment[] = rest.segments ?? [
+		...(activity && activity.length > 0 ? [{ kind: "activity" as const, items: activity, collapsed: true }] : []),
 		...(answer.length > 0 ? [{ kind: "answer" as const, text: answer }] : []),
 	];
 	return {
@@ -41,8 +43,7 @@ function group(partial: Partial<ResponseGroup>): ResponseGroup {
 		id: 1,
 		streaming: false,
 		collapsed: true,
-		...partial,
-		activity,
+		...rest,
 		answer,
 		segments,
 	};
@@ -135,5 +136,54 @@ describe("ResponseView code-link click wiring", () => {
 			el.classList.contains("dreb-activity") ? "box" : "answer",
 		);
 		expect(kinds).toEqual(["box", "answer", "box", "answer"]);
+	});
+
+	it("linkifies a later answer using a symbol grounded by a tool in an EARLIER box (whole-run refs)", () => {
+		// The grounding tool lives two segments before the answer that references
+		// it — proving ResponseView grounds each answer against the WHOLE run's
+		// activity (buildGroundedRefs(runActivity(group))), not just its own
+		// segment. A segment-local grounding would drop this cross-box link.
+		const host = mount(
+			group({
+				segments: [
+					{ kind: "activity", items: [searchTool("1. src/widget.ts:L7-20 (class Widget)")], collapsed: true },
+					{ kind: "answer", text: "Looking into it." },
+					{ kind: "activity", items: [{ kind: "thinking", text: "still thinking" }], collapsed: true },
+					{ kind: "answer", text: "The Widget class is the culprit." },
+				],
+			}),
+		);
+		const answers = [...host.querySelectorAll(".dreb-answer")] as HTMLElement[];
+		const laterAnswer = answers[answers.length - 1];
+		const link = laterAnswer.querySelector("a.dreb-code-link") as HTMLAnchorElement;
+		expect(link?.dataset.symbol).toBe("Widget");
+
+		link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+		expect(hoisted.posted).toEqual([
+			{ type: "open-source", ref: { symbol: "Widget", path: "src/widget.ts", line: 7 } },
+		]);
+	});
+
+	it("shows the working spinner only on the trailing activity box while streaming", () => {
+		const host = mount(
+			group({
+				streaming: true,
+				segments: [
+					// An earlier, finished box (an answer opened after it).
+					{ kind: "activity", items: [{ kind: "thinking", text: "first" }], collapsed: true },
+					{ kind: "answer", text: "Interim." },
+					// The trailing, in-flight box.
+					{ kind: "activity", items: [{ kind: "thinking", text: "second" }], collapsed: false },
+				],
+			}),
+		);
+		const boxes = [...host.querySelectorAll(".dreb-activity")] as HTMLElement[];
+		expect(boxes).toHaveLength(2);
+		// Exactly one spinner, on the last (in-flight) box.
+		expect(host.querySelectorAll(".dreb-spinner")).toHaveLength(1);
+		expect(boxes[0].querySelector(".dreb-spinner")).toBeNull();
+		expect(boxes[0].textContent).toContain("Worked");
+		expect(boxes[1].querySelector(".dreb-spinner")).toBeTruthy();
+		expect(boxes[1].textContent).toContain("Working");
 	});
 });

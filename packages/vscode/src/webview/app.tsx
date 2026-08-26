@@ -12,6 +12,7 @@ import {
 	createTranscriptState,
 	type ResponseGroup,
 	retryableResponseId,
+	runActivity,
 	type SuggestionState,
 	type ToolActivity,
 	type TranscriptState,
@@ -446,7 +447,10 @@ export function ResponseView(props: { group: ResponseGroup; onRetry?: () => void
 							<div
 								class="dreb-answer"
 								onClick={onCodeLinkClick}
-								innerHTML={linkifyAnswer(renderMarkdown(segment.text), buildGroundedRefs(props.group.activity))}
+								innerHTML={linkifyAnswer(
+									renderMarkdown(segment.text),
+									buildGroundedRefs(runActivity(props.group)),
+								)}
 							/>
 						</Show>
 					)
