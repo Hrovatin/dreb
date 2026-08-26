@@ -16,7 +16,18 @@ export default defineConfig({
 		rollupOptions: {
 			output: {
 				entryFileNames: "main.js",
-				assetFileNames: "main[extname]",
+				// Keep the single stylesheet at the stable `main.css` the host HTML
+				// links, but give every other asset (KaTeX's ~60 font files) a
+				// distinct hashed name — a flat `main[extname]` would collapse them
+				// all onto one file, breaking font loading (tofu/missing glyphs).
+				assetFileNames: (assetInfo) => {
+					const name =
+						(assetInfo as { names?: string[]; name?: string }).names?.[0] ??
+						(assetInfo as { name?: string }).name ??
+						"";
+					if (name.endsWith(".css")) return "main.css";
+					return "assets/[name]-[hash][extname]";
+				},
 				chunkFileNames: "chunk-[name].js",
 			},
 		},

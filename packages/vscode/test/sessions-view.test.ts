@@ -80,7 +80,7 @@ describe("SessionsViewProvider — resource root self-heal", () => {
 		const FALLBACK = "/Users/me/.vscode/extensions/pub.name";
 		const REAL = "/Users/me/Documents/code/dreb/packages/vscode";
 		const resolve = vi
-			.fn<[], vscode.Uri>()
+			.fn<() => vscode.Uri>()
 			.mockReturnValueOnce(vscode.Uri.file(FALLBACK))
 			.mockReturnValue(vscode.Uri.file(REAL));
 		const provider = new SessionsViewProvider(resolve, stubDeps);

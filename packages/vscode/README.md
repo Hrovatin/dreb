@@ -152,7 +152,16 @@ File paths and code symbols that appear in an answer render as **clickable links
 - **Reliability lives in the client, not the model.** The agent is never trusted to emit valid links: the webview linkifies syntactically/greedily but only *grounds* ambiguous symbols against real tool hits, and the host **validates** on click (a path that does not exist, or a symbol that resolves nowhere, shows an unobtrusive notice — never a broken jump). References that match nothing real simply stay plain text.
 - Links are wired via **event delegation → `postToHost`** (not `href` navigation), so they work under the webview's strict `default-src 'none'` CSP.
 
-Grounding + linkification are pure and unit-tested in `webview/code-links.ts` (`buildGroundedRefs` parses the tool-output formats; `linkifyAnswer` walks the sanitized answer DOM without corrupting existing markdown links/code spans). The open/resolve logic is driven through the vscode-free `host/source-link-ui.ts` port (real impl `host/vscode-source-link-ui.ts`), so the controller stays testable. A grounded symbol carries its usage location so the host can jump even before the language server resolves; semantic-search-based resolution is a possible future deepening.
+Grounding + linkification are pure and unit-tested in `webview/code-links.ts` (`buildGroundedRefs` parses the tool-output formats; `linkifyAnswer` walks the sanitized answer DOM without corrupting existing markdown links/code spans — it skips rendered-math subtrees so equations are never linkified). The open/resolve logic is driven through the vscode-free `host/source-link-ui.ts` port (real impl `host/vscode-source-link-ui.ts`), so the controller stays testable. A grounded symbol carries its usage location so the host can jump even before the language server resolves; semantic-search-based resolution is a possible future deepening.
+
+## Math rendering
+
+LaTeX math in an answer is typeset with **KaTeX**. Both display and inline math render, in either delimiter style the model emits:
+
+- **Display** — `$$…$$` or `\[…\]` render as centered equations.
+- **Inline** — `$…$` or `\(…\)` render inline with the surrounding text.
+
+Ordinary `$` in prose is safe: inline `$…$` uses **standard** (no-space) matching, so currency like "$5 and $10" is not mistaken for math. Math inside `` `code` `` spans and fenced blocks stays literal, and an unclosed delimiter (e.g. mid-stream) simply renders as plain text until it closes. Malformed or unsupported LaTeX degrades to its visible source (KaTeX `throwOnError:false`) rather than blanking the message. The rendered HTML/MathML still passes through DOMPurify (KaTeX runs with `trust:false`, so there is no XSS surface). Rendering lives in `webview/markdown.ts` and is unit-tested in `test/markdown.test.ts`; KaTeX's stylesheet + fonts are bundled into the webview (`dist/webview`), so nothing loads over the network.
 
 ## Session tree — restore checkpoint + fork
 

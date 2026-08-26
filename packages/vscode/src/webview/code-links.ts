@@ -209,6 +209,10 @@ function walk(parent: Node, refs: GroundedRefs): void {
 			const el = child as Element;
 			// Never nest links inside an existing anchor.
 			if (el.tagName === "A") continue;
+			// Never descend into rendered math (KaTeX). Its text nodes are layout
+			// glyphs and its MathML <annotation> carries the raw LaTeX source —
+			// linkifying inside would corrupt the equation.
+			if (el.classList.contains("katex")) continue;
 			walk(el, refs);
 		}
 	}
