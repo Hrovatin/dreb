@@ -539,6 +539,46 @@ describe("foldMessagesIntoState (Phase 6 full-content rebuild)", () => {
 		expect(tool).toMatchObject({ toolCallId: "t1", toolName: "read", status: "done", resultText: "file body" });
 	});
 
+	it("coalesces a rebuilt burst of back-to-back tool calls (separate messages) into ONE box", () => {
+		// Two tool calls arriving as SEPARATE assistant+toolResult message pairs with
+		// no intervening answer text must fold into a single activity box — identical
+		// to how the live stream coalesces consecutive tools (AC 2 / AC 3). Guards the
+		// rebuild path's across-message coalescing, which shares pushActivity with live.
+		const state = createTranscriptState();
+		foldMessagesIntoState(state, [
+			{ role: "user", content: "do both" },
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a.txt" } }],
+				stopReason: "toolUse",
+			},
+			{ role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "body a" }] },
+			// A SECOND tool call in its own assistant turn, with NO answer text between.
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "t2", name: "grep", arguments: { pattern: "x" } }],
+				stopReason: "toolUse",
+			},
+			{ role: "toolResult", toolCallId: "t2", toolName: "grep", content: [{ type: "text", text: "body b" }] },
+			{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" },
+		]);
+
+		const g = state.items.find((i): i is ResponseGroup => i.kind === "response");
+		if (!g) throw new Error("no response group");
+		// Exactly ONE activity box (not two stacked boxes), holding both tools in order.
+		const activityBoxes = g.segments.filter((s) => s.kind === "activity");
+		expect(activityBoxes).toHaveLength(1);
+		const box = activityBoxes[0];
+		expect(box.kind === "activity" && box.items.map((i) => i.kind)).toEqual(["tool", "tool"]);
+		expect(box.kind === "activity" && box.items.map((i) => (i.kind === "tool" ? i.toolCallId : null))).toEqual([
+			"t1",
+			"t2",
+		]);
+		// Whole run: one box, then the final answer.
+		expect(g.segments.map((s) => s.kind)).toEqual(["activity", "answer"]);
+		expect(g.answer).toBe("done");
+	});
+
 	it("rebuilds interleaved answer/activity into ordered segments matching the live stream", () => {
 		const state = createTranscriptState();
 		foldMessagesIntoState(state, [
