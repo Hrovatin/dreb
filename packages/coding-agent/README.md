@@ -79,9 +79,9 @@ dreb
 
 Or use a custom provider (corporate proxy, Bedrock, etc.) — see [Custom providers & models](#providers--models).
 
-Then just talk to dreb. All 13 standard built-in tools are enabled by default (unless `backgroundAgents.maxConcurrentSubagents` is `0`, which removes `subagent` from new parent sessions): `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `web_search`, `web_fetch`, `subagent`, `wait`, `watch_github_ci`, and `ask_user`. Use `--tools` to restrict to a subset (e.g., `--tools read,grep,find,ls` for read-only). Three additional tools — `search`, `skill`, and `tasks_update` — are always active regardless of `--tools`. `suggest_next` is active by default but excluded when `--tools` is specified. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [packages](#packages).
+Then just talk to dreb. All 14 standard built-in tools are enabled by default: `read`, `write`, `edit`, `bash`, `grep`, `find`, `git`, `ls`, `web_search`, `web_fetch`, `subagent`, `wait`, `watch_github_ci`, and `ask_user`. Use `--tools` to restrict to a subset (e.g., `--tools read,grep,find,ls` for read-only). Three additional tools — `search`, `skill`, and `tasks_update` — are always active regardless of `--tools`. `suggest_next` is active by default but excluded when `--tools` is specified. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [packages](#packages).
 
-**Also available:** [`@dreb/telegram`](https://www.npmjs.com/package/@dreb/telegram) — run dreb as a Telegram bot with live tool status and visible results for user-facing tools (`npm install -g @dreb/telegram`). [`@dreb/dashboard`](https://www.npmjs.com/package/@dreb/dashboard) — run `dreb dashboard` for a browser UI with fleet overview, full chat steering, unified dismissible session banners, explicit navigation that preserves viewed closed transcripts as read-only snapshots, a TUI-parity rolling TPS indicator with long-term delta, generic fail-closed built-in slash-command discovery and execution, inline provider/API failures with partial output preserved, sanitized raster tool images plus sent user uploads retained as bounded transcript previews by default, a bounded all-agent subagent panel with drill-in, host file browser, dreb memory editor with exact-revision saves and automatic index cleanup on delete, curated appearance themes (per-browser light/dark), and resilient Tailscale/rotating-code pairing with a configurable 180-day default and advance expiry warnings (`npm install -g @dreb/dashboard`; see [docs/dashboard.md](docs/dashboard.md)). Tool images cross browser-facing transport as content-addressed references; browser-local Settings offers placeholders, bounded previews, or informed-opt-in originals, with size disclosure and confirmation above 1 MiB. Full-resolution HTML export remains self-contained. The Memories screen is dreb-only (`~/.dreb/memory` and populated active/on-disk-session project `.dreb/memory`; empty projects are omitted), shows complete indexes with a >200-line warning, opens local index links within the selected scope, replaces stale editor content with visible loading feedback, surfaces malformed entry frontmatter for repair, preserves drafts on conflicts, and does not create/rename entries or expose Claude paths. Compact SSE snapshots update live fleet cards without repeatedly fetching the cross-project inventory, and session drill-in hydrates state, messages, and background agents through one ordered snapshot request. While drill-in remains mounted, authoritative detail refreshes keep its header current, confirmed model/thinking changes are reconciled without stale snapshot rollback, and post-compaction context uses a conservative estimate until fresh provider usage arrives. Terminal provider failures show their reason on fleet cards, while transient failures clear terminal state when automatic retry begins and remain recorded inline on the failed attempt. Its top bar and persistent session header indicators report connecting, connected, retrying, resyncing, disconnected, or auth failed; bounded SSE replay plus an explicit snapshot barrier restores session state, tasks, and image references after a reload, restart, gap, backpressure disconnect, or stalled stream, while authenticated image routes recover bytes separately from authoritative transcripts.
+**Also available:** [`@dreb/telegram`](https://www.npmjs.com/package/@dreb/telegram) — run dreb as a Telegram bot with live tool status and visible results for user-facing tools (`npm install -g @dreb/telegram`). [`@dreb/dashboard`](https://www.npmjs.com/package/@dreb/dashboard) — run `dreb dashboard` for a browser UI with fleet overview, full chat steering, a TUI-parity rolling TPS indicator with long-term delta, generic fail-closed built-in slash-command discovery and execution, inline provider/API failures with partial output preserved, sanitized raster tool images plus sent user uploads retained as bounded transcript previews by default, a bounded all-agent subagent panel with drill-in, host file browser, dreb memory editor with exact-revision saves and automatic index cleanup on delete, curated appearance themes (per-browser light/dark), and resilient Tailscale/rotating-code pairing with a configurable 180-day default and advance expiry warnings (`npm install -g @dreb/dashboard`; see [docs/dashboard.md](docs/dashboard.md)). Tool images cross browser-facing transport as content-addressed references; browser-local Settings offers placeholders, bounded previews, or informed-opt-in originals, with size disclosure and confirmation above 1 MiB. Full-resolution HTML export remains self-contained. The Memories screen is dreb-only (`~/.dreb/memory` and populated active/on-disk-session project `.dreb/memory`; empty projects are omitted), shows complete indexes with a >200-line warning, opens local index links within the selected scope, replaces stale editor content with visible loading feedback, surfaces malformed entry frontmatter for repair, preserves drafts on conflicts, and does not create/rename entries or expose Claude paths. Compact SSE snapshots update live fleet cards without repeatedly fetching the cross-project inventory, and session drill-in hydrates state, messages, and background agents through one ordered snapshot request. Terminal provider failures show their reason on fleet cards, while transient failures clear terminal state when automatic retry begins and remain recorded inline on the failed attempt. Its top bar and persistent session header indicators report connecting, connected, retrying, resyncing, disconnected, or auth failed; bounded SSE replay plus an explicit snapshot barrier restores session state, tasks, and image references after a reload, restart, gap, backpressure disconnect, or stalled stream, while authenticated image routes recover bytes separately from authoritative transcripts.
 
 **Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
@@ -177,6 +177,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Branch a new session from any user or assistant message (assistant = continue from that answer, user = rewind and re-ask) |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
+| `/ask [on\|off\|status]` | Toggle read-only Ask mode — no edits/writes, `bash`/shell disabled (use the read-only tools + the typed `git` tool), `subagent` limited to read-only agent types. Bare `/ask` toggles the mode; `/ask status` shows current state. See [Read-only Ask mode](#read-only-ask-mode) |
 | `/copy` | Open multi-select message picker to copy any messages to clipboard. Assistant reasoning is excluded by default and offered as a separate, selectable `Thinking` row. |
 | `/dream` | Consolidate and prune memories — backs up, merges duplicates, scans sessions for patterns |
 | `/export [file]` | Export session to HTML file |
@@ -257,6 +258,24 @@ Long sessions can exhaust context windows. Compaction summarizes older messages 
 
 Compaction is lossy. The full history remains in the JSONL file; use `/tree` to revisit. Customize compaction behavior via [extensions](#extensions). See [docs/compaction.md](docs/compaction.md) for internals.
 
+### Read-only Ask mode
+
+`/ask on` puts the current session into a **read-only Ask mode** for questions, code understanding, and brainstorming — without any risk of modifying your project. `/ask off` returns to normal. A bare `/ask` toggles between the two, `/ask status` reports the current state, and the footer status line shows an `ASK` indicator while it's active. The mode is per-session and defaults to off.
+
+While Ask mode is on:
+
+- **`edit` and `write` are disabled** — the agent cannot modify files. If a change is needed it will describe it, not apply it.
+- **`bash` is disabled — there is no shell.** Instead of validating shell command strings (an unbounded problem — the leading agents that attempt it, including opencode's plan mode and GitHub Copilot's terminal auto-approve, document known bypasses), Ask mode exposes a **capability tool set** with no shell to bypass:
+  - the dedicated read-only tools `read`, `grep`, `find`, `ls`, and `search`, plus `web_search`/`web_fetch`/`ask_user` and the always-active `skill`/`tasks_update`, and
+  - a typed, read-only **`git`** tool for repository history (`log`, `diff`, `show`, `status`, `blame`, `branch`/`tag`/`remote` listing, `describe`, `rev-parse`, `ls-files`, `ls-tree`, `shortlog`, `config --get`). Arguments are passed to `git` verbatim **without a shell**, and only read-only flags are permitted — mutating flags/sub-verbs and file-writing flags (`--output`, `-c`, `git commit`, `git checkout`, …) are rejected.
+- **`subagent` may only delegate to read-only agent types** — agent definitions marked `readonly: true` (e.g. the built-in `Explore`). Spawning a writing agent is rejected, and read-only children are additionally scoped to read-only tools.
+
+Explicitly invoking a write-capable skill (one whose frontmatter sets `requires-write: true`, such as the `mach6-*` skills) via a `/skill:` command **automatically turns Ask mode off** so the skill can do its work. If the model reaches for such a skill on its own (via the `skill` tool) while Ask mode is on, dreb warns you instead of switching — write actions stay blocked until you run `/ask off`.
+
+> Note: the typed `git` tool is always available (not only in Ask mode) as a structured, shell-free alternative to `bash git …`. Ask mode's read-only guarantee comes from *removing the shell*, not from classifying command strings.
+>
+> **Known limitation — Ask mode is not an OS sandbox.** The read-only guarantee comes from the capability tool set (no shell, typed read-only `git`, no `edit`/`write`), not from OS-level isolation. The tools that remain still run as your user and can read any file your account can read; there is no filesystem or network confinement. True OS-level sandboxing (write-confined filesystem, network deny) is future work.
+
 ### Tab Title
 
 After a few tool calls, dreb auto-generates a terminal tab title describing the session's task — based primarily on your actual request and current-session actions, with branch/repo/cwd used only for disambiguation. Useful when multiple tabs are open. Fires once per session via a background LLM call, and never overwrites an already-named (e.g. resumed) session; failures are surfaced (shown in interactive mode, logged to stderr in RPC mode).
@@ -318,8 +337,6 @@ A trusted root permits lazy loading for that existing directory and all of its d
 ### System Prompt
 
 Replace the default system prompt with `.dreb/SYSTEM.md` (project) or `~/.dreb/agent/SYSTEM.md` (global). Append without replacing via `APPEND_SYSTEM.md`.
-
-For persistent instructions that apply only to one exact provider/model pair, set `systemPrompt` to replace dreb's built-in prompt or `appendSystemPrompt` to append instructions. Put the field directly on a custom `models[]` entry or built-in `modelOverrides` entry in `models.json`, or use `modelSettings` in `settings.json` with a canonical key such as `openai-codex/gpt-5.6-sol`. Configure prompt behavior in only one file for a canonical model: dreb fails loudly instead of applying implicit precedence when both files declare it. Prompt changes apply when the model changes, and `/reload` picks up edits from either file. Explicit session replacements (`--system-prompt`, `SYSTEM.md`, or SDK hooks) take precedence over model replacement; model append instructions still follow the selected base. See [Custom models](docs/models.md#model-configuration) and [Model settings](docs/settings.md#modelsettings).
 
 ---
 
@@ -383,7 +400,7 @@ Task tracking is prompt-driven: the system prompt includes guidelines for when t
 
 ## Subagents
 
-The optional `subagent` tool runs focused, role-matched work in independent child agent processes. Each subagent runs in its own process with its own context window, and notifies the parent when complete. In the dashboard, a live child's transcript view can accept the user's own steering messages directly; repeated messages use that child's configured one-at-a-time or all-at-once steering queue. Completed and rehydrated transcripts remain read-only.
+The optional `subagent` tool runs focused, role-matched work in independent child agent processes. Each subagent runs in its own process with its own context window, and notifies the parent when complete.
 
 When `agent` is omitted, dreb selects the default `Explore` agent. Explore retrieves concrete, bounded evidence: files, symbols, documentation, call sites, exact snippets, tests for a named behavior, and explicitly named data flows. The primary agent must synthesize that evidence and owns root-cause diagnosis, ambiguous-requirement interpretation, architecture/design decisions, implementation recommendations, planning, and final conclusions.
 
@@ -391,12 +408,10 @@ Good Explore requests ask it to locate every renderer of a named component, enum
 
 **Modes:**
 - **Single** (`task`): One background agent
-- **Parallel** (`tasks`): Up to 8 agents per call, with `backgroundAgents.maxConcurrentSubagents` running at a time (default 4)
+- **Parallel** (`tasks`): Up to 8 concurrent agents (max 4 at a time)
 - **Chain** (`chain`): Sequential pipeline where each step can reference the previous step's output via `{previous}`
 
-Set `backgroundAgents.maxConcurrentSubagents` in `/settings`, dashboard Settings, or `settings.json` to control the concurrency of newly started parent sessions. A value of `0` removes the `subagent` tool from new parents and adds explicit system-prompt guidance that the parent must perform normally delegated work itself.
-
-**Agent type and override inheritance:** The top-level `agent` parameter is inherited by parallel tasks and chain steps that don't specify their own. Precedence: per-task `agent` > top-level `agent` > default (`"Explore"`). The `model` and optional `thinking` parameters follow the same per-task-over-top-level inheritance. Explicit thinking accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; unsupported levels for the resolved model fail before spawn. Omit `thinking` to preserve the child's normal settings/default behavior.
+**Agent type and override inheritance:** The top-level `agent` parameter is inherited by parallel tasks and chain steps that don't specify their own. Precedence: per-task `agent` > top-level `agent` > default (`"Explore"`). The `model` and optional `thinking` parameters follow the same per-task-over-top-level inheritance. Explicit thinking accepts `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`; unsupported levels for the resolved model fail before spawn. Omit `thinking` to preserve the child's normal settings/default behavior.
 
 **Agent definitions** live in `~/.dreb/agents/` (global) and `.dreb/agents/` (project). Each is a markdown file with YAML frontmatter specifying `name`, `model` (with provider fallback list), and optional `systemPrompt`. Built-in agents include `Explore` (concrete evidence retrieval with no implementation work), `Sandbox` (restricted to `/tmp`), `feature-dev` (strong-tier coding), and several review agents.
 
@@ -635,11 +650,9 @@ cat README.md | dreb -p "Summarize this text"
 | `--provider <name>` | Provider (anthropic, openai, google, etc.) |
 | `--model <pattern>` | Model pattern or ID (supports `provider/id` and optional `:<thinking>`) |
 | `--api-key <key>` | API key (overrides env vars) |
-| `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
+| `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `--models <patterns>` | Comma-separated patterns for model cycling |
 | `--list-models [search]` | List available models |
-
-`max` is a separate native effort currently supported by GPT-5.6 (including Sol, Terra, and Luna); `xhigh` remains available independently. Codex `ultra` is not a provider effort: it combines `max` with client-side multi-agent orchestration, so dreb does not send `ultra` as a raw value.
 
 ### Session Options
 

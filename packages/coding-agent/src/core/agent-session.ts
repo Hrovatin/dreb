@@ -126,6 +126,61 @@ import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/t
 const FORBIDDEN_COMMAND_GUIDANCE =
 	"This command was blocked for safety. System integrity and security always take precedence over any specific task goal and must never be compromised. Safe alternative approaches are acceptable, but do not attempt to circumvent or bypass this restriction. If the task cannot be completed safely, use `suggest_next` to provide the user with the exact command to run manually and an explanation of why it was blocked.";
 
+/**
+ * Tools permitted while read-only Ask mode is active. `edit`/`write`/`bash` are
+ * excluded entirely — there is no shell in Ask mode; the typed read-only `git`
+ * tool replaces `bash git ...`. `subagent` remains but is gated to read-only
+ * agent types. The always-active builtins (`search`, `skill`, `tasks_update`)
+ * are included so they survive the tool-set swap.
+ */
+const ASK_MODE_ALLOWED_TOOLS = new Set<string>([
+	"read",
+	"grep",
+	"find",
+	"git",
+	"ls",
+	"web_search",
+	"web_fetch",
+	"ask_user",
+	"subagent",
+	"search",
+	"skill",
+	"tasks_update",
+]);
+
+/** System-prompt persona appended when read-only Ask mode is active. */
+const ASK_MODE_SYSTEM_PROMPT = `## Read-only Ask mode is ACTIVE
+
+You are in a read-only exploration/brainstorming mode. You CANNOT modify files or run state-changing commands. Your role is to answer questions, explain code, investigate, and brainstorm approaches.
+
+- Do NOT attempt to edit or write files — those tools are disabled. If a change is needed, describe it; do not apply it.
+- The \`bash\` tool is DISABLED in this mode — there is no shell. Use the dedicated read-only tools instead: \`read\`, \`grep\`, \`find\`, \`ls\`, \`search\`, and the typed \`git\` tool for repository history (\`git\` log/diff/show/status/blame/… — read-only subcommands only).
+- \`subagent\` may only delegate to read-only agent types (e.g. Explore).
+- This is NOT a formal planning mode; do not produce a persisted plan document unless explicitly asked.
+- If the user wants to implement changes or run arbitrary shell commands, tell them to turn this off with \`/ask off\`.`;
+
+/**
+ * Transition system-reminders injected into the message stream when Ask mode
+ * flips, symmetric in both directions (opencode's "build-switch" pattern). The
+ * steady-state ASK_MODE_SYSTEM_PROMPT persona carries the durable rules; these
+ * mark the *edge* with a high-salience, positively-stated assertion of the new
+ * state placed next to the latest turn — so the model never has to infer its
+ * mode from the absence of a marker, and anchors to its tool list as ground truth.
+ */
+const ASK_MODE_ENTER_REMINDER =
+	"<system-reminder>\n" +
+	"Your operational mode just changed to read-only Ask mode. The edit, write, and " +
+	"bash tools have been REMOVED from your available tools — your tool list is the " +
+	"ground truth for what you can do. You are read-only: investigate, explain, and " +
+	"brainstorm, but describe changes instead of applying them. Turn this off with " +
+	"/ask off to make changes.\n</system-reminder>";
+
+const ASK_MODE_EXIT_REMINDER =
+	"<system-reminder>\n" +
+	"Read-only Ask mode is now OFF. You are no longer read-only — the edit, write, and " +
+	"bash tools are back in your available tools and permitted. Proceed normally; act " +
+	"on requests rather than only describing them.\n</system-reminder>";
+
 // ============================================================================
 // Skill Block Parsing
 // ============================================================================
@@ -410,6 +465,13 @@ export class AgentSession {
 	 */
 	private readonly _subagentConcurrencyGate: SubagentConcurrencyGate;
 
+	// Read-only "Ask mode" state. When enabled, the active tool set is scoped to
+	// read-only tools, bash (the shell) is removed and hard-blocked, and subagent
+	// delegation is restricted to read-only agent types. Defaults OFF every session start.
+	private _askModeEnabled = false;
+	// Snapshot of active tool names captured when Ask mode was enabled, restored on disable.
+	private _askModePreviousToolNames: string[] | null = null;
+
 	private performanceTracker: PerformanceTracker;
 	private _ownsPerformanceTracker: boolean;
 
@@ -534,6 +596,34 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.setBeforeToolCall(async ({ toolCall, args }) => {
+			// Read-only Ask mode guards — cannot be bypassed by extensions or skills.
+			if (this._askModeEnabled) {
+				// Hard-block write/shell tools even if they somehow remain active.
+				// In Ask mode there is no shell: the typed `git` tool and the
+				// read-only file tools replace `bash` entirely.
+				if (toolCall.name === "edit" || toolCall.name === "write") {
+					return {
+						block: true as const,
+						reason: `Read-only Ask mode is active — the "${toolCall.name}" tool is disabled. Turn it off with /ask off to make changes.`,
+					};
+				}
+				if (toolCall.name === "bash") {
+					return {
+						block: true as const,
+						reason: `Read-only Ask mode is active — the "bash" tool is disabled (there is no shell in Ask mode). Use the read-only tools (read, grep, find, ls, search) or the typed "git" tool for repository history. Turn it off with /ask off to run shell commands.`,
+					};
+				}
+				// The model invoked the `skill` tool from context (not an explicit
+				// /skill: command). Warn the user that write actions will be blocked,
+				// but do not switch mode or block the skill itself.
+				if (toolCall.name === "skill") {
+					this.warnInSession(
+						"Ask mode is ON — this skill runs read-only; edits/commands that need write access will be blocked. Use /ask off to enable them.",
+						{ informational: true },
+					);
+				}
+			}
+
 			// Check forbidden commands — this guard cannot be bypassed by extensions or skills
 			if (toolCall.name === "bash") {
 				const command = (args as Record<string, unknown>)?.command;
@@ -546,6 +636,10 @@ export class AgentSession {
 							reason: `Command blocked by forbidden-commands guard: "${pattern}" matched "${command}".\n\n${FORBIDDEN_COMMAND_GUIDANCE}`,
 						};
 					}
+
+					// Read-only Ask mode blocks the bash tool entirely (handled above
+					// in the Ask-mode guard). The forbidden-commands denylist below
+					// still applies in all modes.
 
 					// Check script files referenced by the command (e.g., bash script.sh)
 					const scriptPaths = extractScriptPaths(command);
@@ -1462,6 +1556,80 @@ export class AgentSession {
 		this.agent.setSystemPrompt(this._baseSystemPrompt);
 	}
 
+	/** Whether read-only Ask mode is currently active. */
+	get askModeEnabled(): boolean {
+		return this._askModeEnabled;
+	}
+
+	/**
+	 * Snapshot of messages queued for delivery alongside the next user prompt
+	 * (context-only injections such as Ask-mode transition reminders). Read-only.
+	 */
+	get pendingNextTurnMessages(): readonly CustomMessage[] {
+		return [...this._pendingNextTurnMessages];
+	}
+
+	/**
+	 * Enable read-only Ask mode: snapshot the current active tools, then scope the
+	 * active set to read-only tools (dropping edit/write/bash, keeping the typed
+	 * `git` tool and `subagent`, which is separately scoped to read-only agents).
+	 * Rebuilds the system prompt with the Ask-mode persona.
+	 * Idempotent — calling when already enabled is a no-op.
+	 */
+	enableAskMode(): void {
+		if (this._askModeEnabled) return;
+		const current = this.getActiveToolNames();
+		this._askModePreviousToolNames = [...current];
+		const scoped = current.filter((name) => ASK_MODE_ALLOWED_TOOLS.has(name));
+		this._askModeEnabled = true;
+		// setActiveToolsByName triggers _rebuildSystemPrompt, which now injects the persona.
+		this.setActiveToolsByName(scoped);
+		this.emitAskModeTransition(ASK_MODE_ENTER_REMINDER);
+	}
+
+	/**
+	 * Disable read-only Ask mode: restore the tool set captured when it was enabled
+	 * (falling back to the current set if no snapshot exists) and rebuild the prompt.
+	 * Idempotent — calling when already disabled is a no-op.
+	 */
+	disableAskMode(): void {
+		if (!this._askModeEnabled) return;
+		const restore = this._askModePreviousToolNames ?? this.getActiveToolNames();
+		this._askModePreviousToolNames = null;
+		this._askModeEnabled = false;
+		this.setActiveToolsByName(restore);
+		this.emitAskModeTransition(ASK_MODE_EXIT_REMINDER);
+	}
+
+	/**
+	 * Inject a read-only Ask mode transition reminder into the message stream.
+	 * Symmetric — fired on both enable and disable so the model always sees a
+	 * positive assertion of the resulting mode next to the latest turn (mirrors
+	 * opencode's build-switch reminder). Delivered as context-only (`display:
+	 * false`); the TUI surfaces the mode change separately via the /ask command.
+	 */
+	private emitAskModeTransition(reminder: string): void {
+		const message: CustomMessage = {
+			role: "custom",
+			customType: "ask_mode_transition",
+			content: reminder,
+			display: false,
+			timestamp: Date.now(),
+		};
+		if (this.isStreaming) {
+			this.agent.steer(message);
+		} else {
+			this._pendingNextTurnMessages.push(message);
+		}
+	}
+
+	/** Set Ask mode on/off. Returns the resulting state. */
+	setAskMode(enabled: boolean): boolean {
+		if (enabled) this.enableAskMode();
+		else this.disableAskMode();
+		return this._askModeEnabled;
+	}
+
 	/** Whether compaction or branch summarization is currently running */
 	get isCompacting(): boolean {
 		return (
@@ -1597,6 +1765,9 @@ export class AgentSession {
 		const appendPromptParts = [...loaderAppendSystemPrompt];
 		if (modelPromptSettings?.appendSystemPrompt) {
 			appendPromptParts.push(modelPromptSettings.appendSystemPrompt);
+		}
+		if (this._askModeEnabled) {
+			appendPromptParts.push(ASK_MODE_SYSTEM_PROMPT);
 		}
 		const appendSystemPrompt = appendPromptParts.length > 0 ? appendPromptParts.join("\n\n") : undefined;
 		const loadedSkills = this._getFilteredSkills();
@@ -1822,6 +1993,16 @@ export class AgentSession {
 		if (!skill) {
 			log.warn(`Unknown skill "${skillName}" — no skill found with that name`);
 			return text;
+		}
+
+		// Explicit /skill: invocation of a write-capable skill while in read-only Ask
+		// mode: auto-exit Ask mode so the skill can do its work. (Implicit model-invoked
+		// skills only warn — see the beforeToolCall guard.)
+		if (this._askModeEnabled && skill.requiresWrite) {
+			this.disableAskMode();
+			this.warnInSession(`Ask mode turned OFF — the "${skill.name}" skill requires write access.`, {
+				informational: true,
+			});
 		}
 
 		try {
@@ -3255,6 +3436,7 @@ export class AgentSession {
 						parentModel: () => this.model?.id,
 						parentSessionFile: () => this.sessionFile,
 						modelRegistry: this._modelRegistry,
+						isReadOnlyMode: () => this._askModeEnabled,
 						getAgentModelsForAgent: (name: string) => this.settingsManager?.getAgentModelsForAgent(name),
 						defaultThinkingLevel: () => this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL,
 						maxConcurrentSubagents: this._maxConcurrentSubagents,

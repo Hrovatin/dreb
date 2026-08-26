@@ -39,6 +39,8 @@ export interface AgentTypeConfig {
 	tools?: string;
 	/** Single model ID or ordered fallback list. First resolvable model wins. */
 	model?: string | string[];
+	/** When true, the agent is declared read-only (does not write) via `readonly:` frontmatter. */
+	readonly?: boolean;
 	systemPrompt: string;
 }
 
@@ -87,6 +89,13 @@ export function parseAgentFrontmatter(
 	const name = get("name");
 	if (!name) return { ok: false, error: "missing required 'name' field in frontmatter" };
 
+	/** Parse `readonly` boolean field — true when the value is `true` (case-insensitive). */
+	const getReadonly = (): boolean | undefined => {
+		const value = get("readonly");
+		if (value === undefined) return undefined;
+		return value.toLowerCase() === "true";
+	};
+
 	return {
 		ok: true,
 		config: {
@@ -94,6 +103,7 @@ export function parseAgentFrontmatter(
 			description: get("description") || "",
 			tools: get("tools"),
 			model: getModel(),
+			readonly: getReadonly(),
 			systemPrompt: body,
 		},
 	};
@@ -243,6 +253,34 @@ function summarizeAgentsForArbitration(
 						: [],
 		};
 	});
+}
+
+/**
+ * Read-only tools a child agent may keep when spawned from a read-only Ask-mode
+ * parent. Write/mutating tools (edit, write, bash) are stripped so the child
+ * cannot perform writes even though its own definition permits them. The typed
+ * `git` tool is read-only (mutating git flags/sub-verbs are rejected) so it is
+ * kept.
+ */
+const READONLY_CHILD_TOOLS = new Set(["read", "grep", "find", "git", "ls", "web_search", "web_fetch"]);
+const READONLY_CHILD_FALLBACK = "read,grep,find,git,ls";
+
+/**
+ * Return a copy of the agent-type map with every config's tools intersected with
+ * the read-only tool set. Preserves the `readonly` flag and all other fields.
+ * Used when the parent session is in read-only Ask mode so spawned children are
+ * guaranteed not to write (belt-and-suspenders on top of the read-only gate).
+ */
+export function scopeAgentsReadOnly(agents: Map<string, AgentTypeConfig>): Map<string, AgentTypeConfig> {
+	const out = new Map<string, AgentTypeConfig>();
+	for (const [name, config] of agents) {
+		const scopedTools = (config.tools ?? "")
+			.split(",")
+			.map((t) => t.trim())
+			.filter((t) => t.length > 0 && READONLY_CHILD_TOOLS.has(t));
+		out.set(name, { ...config, tools: scopedTools.length > 0 ? scopedTools.join(",") : READONLY_CHILD_FALLBACK });
+	}
+	return out;
 }
 
 // TODO: Support PATH-based binary discovery.
@@ -1936,6 +1974,12 @@ export interface SubagentToolOptions {
 	parentSessionFile?: () => string | undefined;
 	/** Model registry for validating model names before spawning child processes. */
 	modelRegistry?: ModelRegistry;
+	/**
+	 * Returns true when the parent session is in read-only Ask mode. When true,
+	 * the subagent tool rejects non-read-only agent types and force-scopes spawned
+	 * children to a read-only tool set.
+	 */
+	isReadOnlyMode?: () => boolean;
 	/** Settings-based model override getter for mach6.models. */
 	getAgentModelsForAgent?: (agentName: string) => string[] | undefined;
 	/** Mode-independent headless arbitration callback. Disabled arbitration returns `{ enabled: false }`. */
@@ -2223,7 +2267,8 @@ export function createSubagentToolDefinition(
 		parameters: subagentSchema,
 
 		async execute(_toolCallId, params: SubagentToolInput, _signal, _onUpdate) {
-			const agents = discoverAgentTypes(cwd);
+			const readOnly = options?.isReadOnlyMode?.() ?? false;
+			const rawAgents = discoverAgentTypes(cwd);
 
 			// Determine mode
 			const modeCount = (params.task ? 1 : 0) + (params.tasks ? 1 : 0) + (params.chain ? 1 : 0);
@@ -2245,6 +2290,42 @@ export function createSubagentToolDefinition(
 					],
 					details: undefined,
 				};
+			}
+
+			// Read-only Ask mode: only agent types explicitly declared `readonly: true`
+			// may be delegated to. Reject any writing agent type up front, and scope
+			// every spawned child to a read-only tool set as belt-and-suspenders.
+			let agents = rawAgents;
+			if (readOnly) {
+				const requested = new Set<string>();
+				if (params.task) requested.add(params.agent || DEFAULT_AGENT);
+				if (params.tasks) {
+					for (const item of params.tasks) requested.add(item.agent || params.agent || DEFAULT_AGENT);
+				}
+				if (params.chain) {
+					for (const step of params.chain) requested.add(step.agent || params.agent || DEFAULT_AGENT);
+				}
+				const rejected: string[] = [];
+				for (const name of requested) {
+					const cfg = rawAgents.get(name);
+					if (!cfg?.readonly) rejected.push(name);
+				}
+				if (rejected.length > 0) {
+					const readonlyNames = [...rawAgents.entries()].filter(([, c]) => c.readonly).map(([n]) => n);
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									`Read-only Ask mode is active — cannot delegate to non-read-only agent type(s): ${rejected.join(", ")}. ` +
+									`Only read-only agent types may be used: ${readonlyNames.join(", ") || "(none)"}. ` +
+									`Turn Ask mode off with /ask off to use writing agents.`,
+							},
+						],
+						details: undefined,
+					};
+				}
+				agents = scopeAgentsReadOnly(rawAgents);
 			}
 
 			// All subagents run in background mode — return immediately, notify on completion

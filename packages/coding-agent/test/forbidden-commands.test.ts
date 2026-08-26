@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { checkScriptContent, extractScriptPaths, isForbiddenCommand } from "../src/core/forbidden-commands.js";
+import {
+	checkScriptContent,
+	containsAnsiCQuoting,
+	extractScriptPaths,
+	isForbiddenCommand,
+} from "../src/core/forbidden-commands.js";
 
 describe("isForbiddenCommand", () => {
 	describe("default patterns (always active)", () => {
@@ -404,6 +409,73 @@ describe("isForbiddenCommand", () => {
 
 		it("allows safe commands chained with ;", () => {
 			expect(isForbiddenCommand("echo hello; echo world")).toBeUndefined();
+		});
+
+		// Finding 2: a backslash-escaped `\'` OUTSIDE any quote is a literal
+		// character in bash, not a single-quote opener. It must not mask a real
+		// operator that follows — otherwise a dangerous command chained after it
+		// would be hidden from segment splitting and slip past the denylist.
+		it("splits on an operator following an escaped single quote", () => {
+			expect(isForbiddenCommand("git log \\'x ; git push --force\\'")).toBe("^git push.*(-f\\b|--force)");
+			expect(isForbiddenCommand("echo \\'a && git push --force\\'")).toBe("^git push.*(-f\\b|--force)");
+		});
+
+		it("still masks operators inside genuine single quotes", () => {
+			// A real single-quoted string keeps `;`/`&&` literal — no false split.
+			expect(isForbiddenCommand("git log 'a ; git push --force'")).toBeUndefined();
+		});
+
+		// Finding G1: bash ANSI-C `$'...'` quoting. Backslash IS an escape inside
+		// `$'...'`, so `\'` is a literal apostrophe that does NOT close the
+		// string. Treating it like a plain single-quoted string would exit one
+		// char early, invert quote parity, and mask a chained dangerous command
+		// from segment splitting — letting it slip past the always-on denylist.
+		it("splits on an operator following a $'...' ANSI-C string", () => {
+			expect(isForbiddenCommand("echo $'\\'' ; git push --force")).toBe("^git push.*(-f\\b|--force)");
+			expect(isForbiddenCommand("echo $'\\'' && git push --force")).toBe("^git push.*(-f\\b|--force)");
+			expect(isForbiddenCommand("git log $'a\\'b' ; git push --force")).toBe("^git push.*(-f\\b|--force)");
+		});
+
+		it("does not over-block legitimate $'...' usage (denylist runs in all modes)", () => {
+			// ANSI-C quoting is common in normal (non-Ask) mode; it must not be
+			// treated as forbidden just because it contains escapes.
+			expect(isForbiddenCommand("git commit -m $'line1\\nline2'")).toBeUndefined();
+			expect(isForbiddenCommand("printf $'%s\\n' hi")).toBeUndefined();
+			expect(isForbiddenCommand("echo $'a\\tb'")).toBeUndefined();
+		});
+
+		// Finding H1: `$$'...'` is bash PID expansion (`$$`) followed by a PLAIN
+		// `'...'` string — NOT ANSI-C quoting. An earlier fix mis-classified the
+		// second `$` of `$$` as an ANSI-C opener, which desynced the masker and
+		// let a chained dangerous command hide. The masker now detects ANSI-C
+		// quoting broadly (including the `$$'` case) and falls back to a
+		// conservative unmasked split, so a chained command is never hidden.
+		it("splits on an operator following a $$'...' sequence", () => {
+			expect(isForbiddenCommand("echo $$'\\''' ; git push --force")).toBe("^git push.*(-f\\b|--force)");
+			expect(isForbiddenCommand("echo $$'\\''' && git push --force")).toBe("^git push.*(-f\\b|--force)");
+			expect(isForbiddenCommand("echo $$'\\''' | git push origin main --force")).toBe("^git push.*(-f\\b|--force)");
+		});
+
+		it("does not over-block a legitimate $$'...' command", () => {
+			// `$$'plain'` is PID + a plain single-quoted string; no dangerous head.
+			expect(isForbiddenCommand("echo $$'plain'")).toBeUndefined();
+			expect(isForbiddenCommand("echo pid=$$'suffix' done")).toBeUndefined();
+		});
+
+		// Finding T2: after an ANSI-C `$'...'` string, a following PLAIN
+		// `'...'` string must still be handled correctly — a chained dangerous
+		// command after it must not be hidden. (Conservative split guarantees
+		// this because ANSI-C presence forces an unmasked split.)
+		it("splits on an operator after a $'...' followed by a plain quote", () => {
+			expect(isForbiddenCommand("git log $'a\\'b' 'c' ; git push --force")).toBe("^git push.*(-f\\b|--force)");
+		});
+
+		// Finding T3: `\$'x'` is an escaped literal `$` followed by a PLAIN
+		// `'x'` string — NOT ANSI-C quoting — and must not trip the ANSI-C
+		// fallback or otherwise misbehave.
+		it("treats an escaped-dollar \\$'x' as a plain quote, not ANSI-C", () => {
+			expect(isForbiddenCommand("echo \\$'x' ; git push --force")).toBe("^git push.*(-f\\b|--force)");
+			expect(isForbiddenCommand("echo \\$'x'")).toBeUndefined();
 		});
 	});
 
@@ -1205,5 +1277,29 @@ describe("checkScriptContent", () => {
 		// Null bytes don't split lines, so this is one big line that starts with "echo"
 		// The rm -rf / is embedded mid-line, not at segment start
 		expect(checkScriptContent(content)).toBeUndefined();
+	});
+});
+
+describe("containsAnsiCQuoting", () => {
+	it("detects a bare ANSI-C $'...' opener", () => {
+		expect(containsAnsiCQuoting("echo $'a\\tb'")).toBe(true);
+		expect(containsAnsiCQuoting("git log $'a\\'b' ; rm x")).toBe(true);
+	});
+
+	it("detects $$'...' (PID expansion before a plain quote) too", () => {
+		// Over-detection is intentional: it only triggers the conservative split.
+		expect(containsAnsiCQuoting("echo $$'plain'")).toBe(true);
+	});
+
+	it("does not flag ordinary quoting or an escaped dollar", () => {
+		expect(containsAnsiCQuoting("echo 'plain single'")).toBe(false);
+		expect(containsAnsiCQuoting('echo "double $VAR"')).toBe(false);
+		expect(containsAnsiCQuoting("echo hello world")).toBe(false);
+		// `\$'x'` is a literal `$` followed by a plain quote — not ANSI-C.
+		expect(containsAnsiCQuoting("echo \\$'x'")).toBe(false);
+	});
+
+	it("does not flag $' inside a double-quoted string", () => {
+		expect(containsAnsiCQuoting('echo "a $\'b"')).toBe(false);
 	});
 });

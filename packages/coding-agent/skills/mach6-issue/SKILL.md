@@ -2,6 +2,7 @@
 name: mach6-issue
 description: "Assess an existing GitHub issue (explore codebase, identify scope/risks/ambiguities, post assessment) or create a new structured issue. Usage: mach6-issue 42 (assess) or mach6-issue (create) or mach6-issue <description> (create with context)"
 argument-hint: "[issue-number | description]"
+requires-write: true
 ---
 
 # mach6-issue — Assess or Create Issue

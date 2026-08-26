@@ -73,7 +73,7 @@ import { DefaultPackageManager } from "../../core/package-manager.js";
 import type { ResourceDiagnostic } from "../../core/resource-loader.js";
 import { type SessionContext, SessionManager } from "../../core/session-manager.js";
 import type { SubagentArbiterSettings } from "../../core/settings-manager.js";
-import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
+import { askArgumentCompletions, BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
 import type { SourceInfo } from "../../core/source-info.js";
 import { restoreStderr, type StderrCallback, takeOverStderr } from "../../core/stderr-guard.js";
 import { TabTitleGenerator } from "../../core/tab-title.js";
@@ -355,6 +355,7 @@ export class InteractiveMode {
 		this.footerDataProvider = new FooterDataProvider();
 		this.footer = new FooterComponent(session, this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(session.autoCompactionEnabled);
+		this.footer.setAskModeEnabled(session.askModeEnabled);
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -478,6 +479,12 @@ export class InteractiveMode {
 				const filtered = prefix ? subcommands.filter((s) => s.value.startsWith(prefix.toLowerCase())) : subcommands;
 				return filtered.length > 0 ? filtered : null;
 			};
+		}
+
+		const askCommand = slashCommands.find((command) => command.name === "ask");
+		if (askCommand) {
+			askCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
+				askArgumentCompletions(prefix);
 		}
 
 		// Convert prompt templates to SlashCommand format for autocomplete
@@ -2449,6 +2456,12 @@ export class InteractiveMode {
 				const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
 				this.editor.setText("");
 				await this.handleCompactCommand(customInstructions);
+				return;
+			}
+			if (text === "/ask" || text.startsWith("/ask ")) {
+				const arg = text.startsWith("/ask ") ? text.slice(5).trim().toLowerCase() : "";
+				this.editor.setText("");
+				this.handleAskCommand(arg);
 				return;
 			}
 			if (text === "/dream" || text.startsWith("/dream ")) {
@@ -5406,6 +5419,41 @@ ${cycleModelForward || cycleModelBackward ? `| \`${cycleModelForward}\` / \`${cy
 				cleanupDreamTmpDirs([dreamContext.globalMemoryDir, ...dreamContext.projectMemoryDirs]);
 			}
 		}
+	}
+
+	private handleAskCommand(arg: string): void {
+		let enable: boolean;
+		if (arg === "on") {
+			enable = true;
+		} else if (arg === "off") {
+			enable = false;
+		} else if (arg === "") {
+			// Bare `/ask` toggles the current state.
+			enable = !this.session.askModeEnabled;
+		} else if (arg === "status") {
+			// `/ask status` reports current state without changing it.
+			this.showWarning(`Read-only Ask mode is currently ${this.session.askModeEnabled ? "ON" : "OFF"}.`);
+			return;
+		} else {
+			this.showWarning(
+				`Usage: /ask [on | off | status] (bare /ask toggles; currently ${this.session.askModeEnabled ? "ON" : "OFF"}).`,
+			);
+			return;
+		}
+
+		if (enable === this.session.askModeEnabled) {
+			this.showWarning(`Read-only Ask mode is already ${enable ? "ON" : "OFF"}.`);
+			return;
+		}
+
+		const nowOn = this.session.setAskMode(enable);
+		this.footer.setAskModeEnabled(nowOn);
+		this.footer.invalidate();
+		this.showWarning(
+			nowOn
+				? "Read-only Ask mode ON — edits/writes disabled, no shell (use the typed read-only git tool), subagents limited to read-only agents. Use /ask off to exit."
+				: "Read-only Ask mode OFF — normal tools restored.",
+		);
 	}
 
 	private async handleCompactCommand(customInstructions?: string): Promise<void> {
