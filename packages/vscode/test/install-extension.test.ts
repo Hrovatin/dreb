@@ -159,7 +159,7 @@ describe("runInstall (side-effecting install core)", () => {
 		});
 		expect(codes).toEqual([1]);
 		expect(result).toMatchObject({ ok: false, reason: "missing-build" });
-		expect(result.ok === false && result.missing).toEqual([
+		expect(result.ok === false && result.reason === "missing-build" && result.missing).toEqual([
 			"/repo/packages/vscode/dist/host/extension.js",
 			"/repo/packages/coding-agent/dist/cli.js",
 		]);

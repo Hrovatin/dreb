@@ -24,7 +24,7 @@ import { ResponseView, RetryBanner } from "../src/webview/app.js";
 const erroredGroup = (): ResponseGroup => ({
 	kind: "response",
 	id: 1,
-	activity: [],
+	segments: [],
 	answer: "",
 	streaming: false,
 	collapsed: true,
