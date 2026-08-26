@@ -15,6 +15,8 @@ describe("renderMarkdown — LaTeX math", () => {
 		const html = renderMarkdown("$$A + B \\rightleftharpoons AB$$");
 		const el = dom(html);
 		expect(el.querySelector(".katex")).not.toBeNull();
+		// `$$…$$` must render as *display* math (centered block), not inline.
+		expect(el.querySelector(".katex-display")).not.toBeNull();
 		// The literal delimiters must be gone.
 		expect(el.textContent).not.toContain("$$");
 	});
@@ -64,7 +66,11 @@ describe("renderMarkdown — LaTeX math", () => {
 		// throwOnError:false surfaces the source in a katex-error span rather than
 		// producing a blank message.
 		const el = dom(html);
-		expect(el.textContent).toContain("frac");
+		// The *visible* render must show the source (in a katex-error span), not
+		// merely the inert x-tex <annotation> that always preserves the raw TeX.
+		const visible = el.querySelector(".katex-error") ?? el.querySelector(".katex-html");
+		expect(visible).not.toBeNull();
+		expect(visible?.textContent ?? "").toContain("frac");
 	});
 
 	it("preserves KaTeX/MathML through sanitization", () => {
