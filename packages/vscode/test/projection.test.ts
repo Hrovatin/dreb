@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
-	activitySummary,
+	type ActivityItem,
+	activityItemsSummary,
 	alignCheckpoints,
 	applyEvent,
 	createTranscriptState,
 	foldMessagesIntoState,
 	type ResponseGroup,
 	retryableResponseId,
+	runActivity,
 	type TranscriptState,
 } from "../src/shared/projection.js";
 
@@ -47,9 +49,9 @@ describe("projection", () => {
 		expect(state.items[0]).toEqual({ kind: "user", text: "hello" });
 		const group = onlyResponse(state);
 		expect(group.answer).toBe("Here is the answer.");
-		expect(group.activity).toHaveLength(2);
-		expect(group.activity[0]).toEqual({ kind: "thinking", text: "pondering done" });
-		expect(group.activity[1]).toMatchObject({
+		expect(runActivity(group)).toHaveLength(2);
+		expect(runActivity(group)[0]).toEqual({ kind: "thinking", text: "pondering done" });
+		expect(runActivity(group)[1]).toMatchObject({
 			kind: "tool",
 			toolCallId: "t1",
 			toolName: "read",
@@ -71,6 +73,108 @@ describe("projection", () => {
 		]);
 		// Deltas within one block stay joined; a new block after the tool gets a blank line.
 		expect(onlyResponse(state).answer).toBe("Let me look. First the config.\n\nNow the answer.");
+	});
+
+	it("interleaves activity boxes and answer blocks in true streaming order (segments)", () => {
+		const state = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			// Box 1: think + tool
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_start" } },
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "planning" } },
+			{ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: { path: "a.ts" } },
+			{ type: "tool_execution_end", toolCallId: "t1", result: "body", isError: false },
+			// Answer 1
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "First result." } },
+			// Box 2: tool + think (arrives AFTER answer 1 — must open a new box, not join box 1)
+			{ type: "tool_execution_start", toolCallId: "t2", toolName: "grep", args: { pattern: "x" } },
+			{ type: "tool_execution_end", toolCallId: "t2", result: "hit", isError: false },
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_start" } },
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "more" } },
+			// Answer 2
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Second result." } },
+			{ type: "agent_end" },
+		]);
+
+		const group = onlyResponse(state);
+		expect(group.segments.map((s) => s.kind)).toEqual(["activity", "answer", "activity", "answer"]);
+		const [box1, ans1, box2, ans2] = group.segments;
+		expect(box1.kind === "activity" && box1.items.map((i) => i.kind)).toEqual(["thinking", "tool"]);
+		expect(ans1).toEqual({ kind: "answer", text: "First result." });
+		expect(box2.kind === "activity" && box2.items.map((i) => i.kind)).toEqual(["tool", "thinking"]);
+		expect(ans2).toEqual({ kind: "answer", text: "Second result." });
+		// The aggregate views still hold the whole run.
+		expect(runActivity(group)).toHaveLength(4);
+		expect(group.answer).toBe("First result.\n\nSecond result.");
+	});
+
+	it("delivers a post-snapshot tool result to the rendered segment item (regression: mid-stream reload)", () => {
+		// A run streaming a still-running tool inside an activity box.
+		const state = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: { path: "a.ts" } },
+		]);
+
+		// Simulate the host→webview snapshot boundary: VS Code's postMessage
+		// JSON-serializes the transcript, dropping any shared object references.
+		// Before the single-source-of-truth fix, the flat `activity` aggregate and
+		// the rendered `segments[].items` became two distinct copies here, so a
+		// later tool_execution_end mutated only the aggregate (walked by findTool)
+		// while the box kept rendering a stuck "running" spinner. Reproduce that
+		// boundary and assert the item the box actually renders reflects completion.
+		const rehydrated: TranscriptState = JSON.parse(JSON.stringify(state));
+		applyEvent(rehydrated, { type: "tool_execution_end", toolCallId: "t1", result: "file body", isError: false });
+
+		const box = onlyResponse(rehydrated).segments.find((s) => s.kind === "activity");
+		const tool = box?.kind === "activity" ? box.items.find((i) => i.kind === "tool") : undefined;
+		expect(tool).toMatchObject({ status: "done", resultText: "file body" });
+		// The derived aggregate reflects it too (single source of truth).
+		expect(runActivity(onlyResponse(rehydrated))[0]).toMatchObject({ status: "done", resultText: "file body" });
+	});
+
+	it("delivers post-snapshot thinking deltas to the rendered segment item (regression: mid-stream reload)", () => {
+		const state = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_start" } },
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "first" } },
+		]);
+		const rehydrated: TranscriptState = JSON.parse(JSON.stringify(state));
+		applyEvent(rehydrated, {
+			type: "message_update",
+			assistantMessageEvent: { type: "thinking_delta", delta: " second" },
+		});
+
+		const box = onlyResponse(rehydrated).segments.find((s) => s.kind === "activity");
+		const thought = box?.kind === "activity" ? box.items[0] : undefined;
+		expect(thought).toEqual({ kind: "thinking", text: "first second" });
+	});
+
+	it("coalesces consecutive thinking/tools into one box, and collapses finished boxes", () => {
+		const state = run([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant" } },
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_start" } },
+			{ type: "tool_execution_start", toolCallId: "t1", toolName: "read", args: {} },
+			{ type: "tool_execution_end", toolCallId: "t1", result: "b", isError: false },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "answer" } },
+		]);
+
+		const streaming = onlyResponse(state);
+		expect(streaming.segments).toHaveLength(2);
+		const box = streaming.segments[0];
+		expect(box.kind === "activity" && box.items).toHaveLength(2);
+		// The box is finished (an answer opened after it) → collapsed even while the run streams.
+		expect(box.kind === "activity" && box.collapsed).toBe(true);
+
+		// A trailing box (no answer after it) collapses only when the run ends.
+		applyEvent(state, { type: "tool_execution_start", toolCallId: "t2", toolName: "grep", args: {} });
+		const trailing = onlyResponse(state).segments[2];
+		expect(trailing.kind === "activity" && trailing.collapsed).toBe(false);
+		applyEvent(state, { type: "agent_end" });
+		const closed = onlyResponse(state).segments[2];
+		expect(closed.kind === "activity" && closed.collapsed).toBe(true);
 	});
 
 	it("marks the run streaming, then collapses activity at agent_end", () => {
@@ -293,7 +397,7 @@ describe("projection", () => {
 			{ type: "agent_end" },
 		]);
 
-		const tools = onlyResponse(state).activity.filter((a) => a.kind === "tool");
+		const tools = runActivity(onlyResponse(state)).filter((a) => a.kind === "tool");
 		expect(tools).toHaveLength(2);
 		expect(tools[0]).toMatchObject({ toolCallId: "t1", toolName: "read", status: "error", resultText: "t1 output" });
 		expect(tools[1]).toMatchObject({ toolCallId: "t2", toolName: "bash", status: "done", resultText: "t2 output" });
@@ -323,21 +427,14 @@ describe("projection", () => {
 		expect(state.statusText).toBeUndefined();
 	});
 
-	it("summarizes activity for the collapsed header", () => {
-		const group: ResponseGroup = {
-			kind: "response",
-			id: 1,
-			activity: [
-				{ kind: "thinking", text: "x" },
-				{ kind: "tool", toolCallId: "t1", toolName: "read", args: {}, status: "done", resultText: "" },
-				{ kind: "tool", toolCallId: "t2", toolName: "bash", args: {}, status: "done", resultText: "" },
-			],
-			answer: "",
-			streaming: false,
-			collapsed: true,
-		};
-		expect(activitySummary(group)).toBe("1 thought · 2 tool calls");
-		expect(activitySummary({ ...group, activity: [] })).toBe("no activity");
+	it("summarizes a box's activity items for the collapsed header", () => {
+		const items: ActivityItem[] = [
+			{ kind: "thinking", text: "x" },
+			{ kind: "tool", toolCallId: "t1", toolName: "read", args: {}, status: "done", resultText: "" },
+			{ kind: "tool", toolCallId: "t2", toolName: "bash", args: {}, status: "done", resultText: "" },
+		];
+		expect(activityItemsSummary(items)).toBe("1 thought · 2 tool calls");
+		expect(activityItemsSummary([])).toBe("no activity");
 	});
 
 	describe("background agents", () => {
@@ -437,9 +534,76 @@ describe("foldMessagesIntoState (Phase 6 full-content rebuild)", () => {
 		expect(groups).toHaveLength(1);
 		const g = groups[0];
 		expect(g.answer).toBe("here is the answer");
-		expect(activitySummary(g)).toBe("1 thought · 1 tool call");
-		const tool = g.activity.find((a) => a.kind === "tool");
+		expect(activityItemsSummary(runActivity(g))).toBe("1 thought · 1 tool call");
+		const tool = runActivity(g).find((a) => a.kind === "tool");
 		expect(tool).toMatchObject({ toolCallId: "t1", toolName: "read", status: "done", resultText: "file body" });
+	});
+
+	it("coalesces a rebuilt burst of back-to-back tool calls (separate messages) into ONE box", () => {
+		// Two tool calls arriving as SEPARATE assistant+toolResult message pairs with
+		// no intervening answer text must fold into a single activity box — identical
+		// to how the live stream coalesces consecutive tools (AC 2 / AC 3). Guards the
+		// rebuild path's across-message coalescing, which shares pushActivity with live.
+		const state = createTranscriptState();
+		foldMessagesIntoState(state, [
+			{ role: "user", content: "do both" },
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a.txt" } }],
+				stopReason: "toolUse",
+			},
+			{ role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "body a" }] },
+			// A SECOND tool call in its own assistant turn, with NO answer text between.
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "t2", name: "grep", arguments: { pattern: "x" } }],
+				stopReason: "toolUse",
+			},
+			{ role: "toolResult", toolCallId: "t2", toolName: "grep", content: [{ type: "text", text: "body b" }] },
+			{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" },
+		]);
+
+		const g = state.items.find((i): i is ResponseGroup => i.kind === "response");
+		if (!g) throw new Error("no response group");
+		// Exactly ONE activity box (not two stacked boxes), holding both tools in order.
+		const activityBoxes = g.segments.filter((s) => s.kind === "activity");
+		expect(activityBoxes).toHaveLength(1);
+		const box = activityBoxes[0];
+		expect(box.kind === "activity" && box.items.map((i) => i.kind)).toEqual(["tool", "tool"]);
+		expect(box.kind === "activity" && box.items.map((i) => (i.kind === "tool" ? i.toolCallId : null))).toEqual([
+			"t1",
+			"t2",
+		]);
+		// Whole run: one box, then the final answer.
+		expect(g.segments.map((s) => s.kind)).toEqual(["activity", "answer"]);
+		expect(g.answer).toBe("done");
+	});
+
+	it("rebuilds interleaved answer/activity into ordered segments matching the live stream", () => {
+		const state = createTranscriptState();
+		foldMessagesIntoState(state, [
+			{ role: "user", content: "go" },
+			// One run: text, then a tool call, then more text — content parts in order.
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "First." },
+					{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a.txt" } },
+				],
+				stopReason: "toolUse",
+			},
+			{ role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "body" }] },
+			{ role: "assistant", content: [{ type: "text", text: "Second." }], stopReason: "stop" },
+		]);
+
+		const g = state.items.find((i): i is ResponseGroup => i.kind === "response");
+		if (!g) throw new Error("no response group");
+		expect(g.segments.map((s) => s.kind)).toEqual(["answer", "activity", "answer"]);
+		expect(g.segments[0]).toEqual({ kind: "answer", text: "First." });
+		expect(g.segments[2]).toEqual({ kind: "answer", text: "Second." });
+		// Every rebuilt (historical) box is collapsed.
+		const box = g.segments[1];
+		expect(box.kind === "activity" && box.collapsed).toBe(true);
 	});
 
 	it("marks a tool as error when its result is an error, and leaves an unmatched tool running", () => {
@@ -464,8 +628,8 @@ describe("foldMessagesIntoState (Phase 6 full-content rebuild)", () => {
 			{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" },
 		]);
 		const g = state.items.find((i): i is ResponseGroup => i.kind === "response");
-		const ok = g?.activity.find((a) => a.kind === "tool" && a.toolCallId === "ok");
-		const pending = g?.activity.find((a) => a.kind === "tool" && a.toolCallId === "pending");
+		const ok = g && runActivity(g).find((a) => a.kind === "tool" && a.toolCallId === "ok");
+		const pending = g && runActivity(g).find((a) => a.kind === "tool" && a.toolCallId === "pending");
 		expect(ok).toMatchObject({ status: "error", resultText: "boom" });
 		expect(pending).toMatchObject({ status: "running", resultText: "" });
 	});
@@ -485,7 +649,7 @@ describe("foldMessagesIntoState (Phase 6 full-content rebuild)", () => {
 		// Aborted/empty turn: an empty group, not a "(aborted)" placeholder.
 		expect(groups[1].error).toBeUndefined();
 		expect(groups[1].answer).toBe("");
-		expect(groups[1].activity).toEqual([]);
+		expect(runActivity(groups[1])).toEqual([]);
 	});
 
 	it("resets transient state (streaming, uiRequests, errors)", () => {
@@ -507,8 +671,8 @@ describe("alignCheckpoints (Phase 6)", () => {
 		for (let i = 0; i < count; i++) {
 			state.items.push({
 				kind: "response",
+				segments: [],
 				id: i + 1,
-				activity: [],
 				answer: `a${i}`,
 				streaming: false,
 				collapsed: true,
@@ -527,8 +691,22 @@ describe("alignCheckpoints (Phase 6)", () => {
 
 	it("skips only actively-streaming groups (the in-flight turn has no persisted entry yet)", () => {
 		const state = createTranscriptState();
-		state.items.push({ kind: "response", id: 1, activity: [], answer: "ok", streaming: false, collapsed: true });
-		state.items.push({ kind: "response", id: 2, activity: [], answer: "", streaming: true, collapsed: false });
+		state.items.push({
+			kind: "response",
+			segments: [],
+			id: 1,
+			answer: "ok",
+			streaming: false,
+			collapsed: true,
+		});
+		state.items.push({
+			kind: "response",
+			segments: [],
+			id: 2,
+			answer: "",
+			streaming: true,
+			collapsed: false,
+		});
 		expect(alignCheckpoints(state, ["e1"], new Set(["e1"]))).toEqual([
 			{ responseId: 1, entryId: "e1", canRestore: false, canFork: true },
 		]);
@@ -541,17 +719,31 @@ describe("alignCheckpoints (Phase 6)", () => {
 		// Fork is offered only where the backend allows it: the errored turn B is
 		// NOT in the forkable set, so its canFork is false.
 		const state = createTranscriptState();
-		state.items.push({ kind: "response", id: 1, activity: [], answer: "a", streaming: false, collapsed: true });
 		state.items.push({
 			kind: "response",
+			segments: [],
+			id: 1,
+			answer: "a",
+			streaming: false,
+			collapsed: true,
+		});
+		state.items.push({
+			kind: "response",
+			segments: [],
 			id: 2,
-			activity: [],
 			answer: "",
 			streaming: false,
 			collapsed: true,
 			error: "rate limited",
 		});
-		state.items.push({ kind: "response", id: 3, activity: [], answer: "c", streaming: false, collapsed: true });
+		state.items.push({
+			kind: "response",
+			segments: [],
+			id: 3,
+			answer: "c",
+			streaming: false,
+			collapsed: true,
+		});
 		expect(alignCheckpoints(state, ["a", "b", "c"], new Set(["a", "c"]))).toEqual([
 			{ responseId: 1, entryId: "a", canRestore: true, canFork: true },
 			{ responseId: 2, entryId: "b", canRestore: true, canFork: false },
