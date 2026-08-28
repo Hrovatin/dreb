@@ -18,8 +18,9 @@
 		"verify-git-hooks": "node scripts/verify-git-hooks.js",
 		"verify-workspace-links": "node scripts/verify-workspace-links.js",
 		"verify-engines": "node scripts/verify-engines.js",
+		"verify-deps": "node scripts/verify-deps.js",
 		"test": "npm run test --workspaces --if-present",
-		"install-vscode": "npm run build && node packages/vscode/scripts/install-extension.mjs",
+		"install-vscode": "node scripts/verify-deps.js && npm run build && node packages/vscode/scripts/install-extension.mjs",
 		"uninstall-vscode": "node packages/vscode/scripts/uninstall-extension.mjs",
 		"coverage": "vitest --run --coverage --coverage.reporter=json-summary --coverage.reporter=text-summary",
 		"prepare": "husky"
