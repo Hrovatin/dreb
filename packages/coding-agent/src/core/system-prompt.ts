@@ -302,7 +302,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 	} else if (hasBash && (hasGrep || hasFind || hasLs)) {
 		if (hasSearch) {
 			addGuideline(
-				"Start with `search` to explore and understand the codebase. Use grep/find/ls for exact text matches and specific file lookups. Prefer all of these over bash.",
+				"Prefer grep/find/ls over bash for file exploration (faster, respects .gitignore). When you know the symbol or exact text, reach for a grep/find needle lookup first; `search` is available for semantic/natural-language lookup when you don't yet know what to grep for.",
 			);
 		} else {
 			addGuideline("Prefer grep/find/ls tools over bash for file exploration (faster, respects .gitignore)");
@@ -316,7 +316,22 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 		}
 	}
 
-	// Always include these
+	// Always include these — focus/scope discipline plus baseline conventions
+	addGuideline(
+		"Stay within the scope of the request; don't take significant actions beyond what was asked without checking in with one short question first",
+	);
+	addGuideline(
+		"Prefer the smallest correct change and the most direct path; don't broaden into tangential or \"while I'm here\" work",
+	);
+	addGuideline(
+		"Build context by examining what the task needs, not by exploring broadly; prefer a targeted needle lookup before any broad search",
+	);
+	addGuideline("Decide and act on the most reasonable interpretation; don't over-enumerate options or over-analyze");
+	addGuideline(
+		"Prioritize accuracy over confirming assumptions; when unsure, investigate to verify rather than running with a guess",
+	);
+	addGuideline("Prefer editing existing files over creating new ones");
+	addGuideline("Match response length to task complexity, and lead with the result");
 	addGuideline("Be concise in your responses");
 	addGuideline("Show file paths clearly when working with files");
 

@@ -148,7 +148,7 @@ export function createSearchToolDefinition(cwd: string): ToolDefinition<typeof s
 			"Search the codebase using natural language queries. Returns ranked code/doc results using semantic similarity and keyword matching. First query builds the index (may take a moment); subsequent queries are fast. Supports identifier queries (e.g. 'AuthMiddleware'), natural language (e.g. 'where is rate limiting handled'), and path queries (e.g. 'src/auth/').",
 		promptSnippet: "Semantic codebase search — natural language queries over code and docs",
 		promptGuidelines: [
-			"Use `search` as your default exploration tool — for understanding code, finding where things are, and answering questions about the codebase. Use `grep` when you already know the exact text or pattern you're looking for.",
+			"`search` is available for semantic/natural-language lookup over code and docs — use it when you don't yet know the exact symbol or text. When you already know what you're looking for, prefer `grep`/`find`.",
 			"The first search query builds an index (may take 10-60s). Subsequent queries are fast.",
 		],
 		parameters: searchSchema,

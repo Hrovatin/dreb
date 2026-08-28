@@ -58,10 +58,12 @@ If the memory directory or MEMORY.md doesn't exist yet, create them.
 
 ## When to Save
 
-- **user-preferences**: When you learn about the user's role, expertise, or working style
-- **good-practices**: When the user corrects your approach OR confirms a non-obvious approach worked
-- **project**: When you learn who is doing what, why, or by when
-- **navigation**: When you learn about external resources and their purpose
+Memory is available but not a default action. Prefer saving at natural breakpoints or when the user asks — don't interrupt task work to record something. Worth saving:
+
+- **user-preferences**: the user's role, expertise, or working style
+- **good-practices**: when the user corrects your approach OR confirms a non-obvious approach worked
+- **project**: who is doing what, why, or by when
+- **navigation**: external resources and their purpose
 
 If the user explicitly asks you to remember something, save it immediately. If they ask you to forget something, find and remove the relevant entry.
 
