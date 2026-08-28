@@ -1,0 +1,383 @@
+/**
+ * git-snapshot — host-side git operations backing the change-review feature.
+ *
+ * The dreb agent runs out-of-process and writes edits straight to disk, so the
+ * extension cannot hold changes in an unsaved overlay the way an in-process
+ * editor (e.g. Copilot) can. Instead we snapshot a **baseline tree** *before*
+ * the agent's turn and diff/revert the working tree against it:
+ *
+ *   captureTree()  → a git tree object of the current working tree, taken via a
+ *                    throwaway temp index so neither the user's index nor their
+ *                    working tree is touched. Because it snapshots the working
+ *                    tree *as-is* (including the user's own uncommitted edits),
+ *                    later diffs isolate only what the agent changed.
+ *   changedFiles() → baseline-tree → current-tree name-status.
+ *   fileDiff()     → unified diff for one path (real `a/… b/…` headers so the
+ *                    reverse patch applies to the working file).
+ *   revertHunk()   → `git apply --reverse` of exactly one hunk (the
+ *                    non-interactive equivalent of `git restore -p`).
+ *   revertFile()   → restore a path to its baseline content (or delete it).
+ *
+ * No `vscode` import — pure node + git, exercised against real temp repos in
+ * `test/git-snapshot.test.ts`. Mirrors the `spawnSync("git", …, { env: gitEnv })`
+ * pattern used by `@dreb/coding-agent`'s `git-repo-state.ts`.
+ */
+
+import { spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdtempSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { parseFileDiff, sliceHunkPatch } from "./diff-hunks.js";
+import type { ChangedFile } from "./review-model.js";
+
+/** Strip inherited GIT_* env so a hook-set GIT_DIR/GIT_INDEX_FILE can't redirect
+ * us to the wrong repo (mirrors `@dreb/coding-agent`'s `gitEnv`). */
+function gitEnv(): NodeJS.ProcessEnv {
+	const { GIT_DIR: _d, GIT_INDEX_FILE: _i, GIT_WORK_TREE: _w, ...env } = process.env;
+	return env;
+}
+
+/** Walk upward for a `.git` dir/file; returns the repo root or null. */
+export function findGitRoot(cwd: string): string | null {
+	let current = resolve(cwd);
+	while (true) {
+		const gitPath = join(current, ".git");
+		if (existsSync(gitPath)) {
+			try {
+				const st = statSync(gitPath);
+				if (st.isDirectory() || st.isFile()) return current;
+			} catch {
+				// keep walking
+			}
+		}
+		const parent = resolve(current, "..");
+		if (parent === current) return null;
+		current = parent;
+	}
+}
+
+/** Whether `cwd` is inside a git working tree. */
+export function isGitRepo(cwd: string): boolean {
+	return findGitRoot(cwd) !== null;
+}
+
+interface GitResult {
+	status: number | null;
+	stdout: string;
+	stderr: string;
+}
+
+function runGit(cwd: string, args: string[], opts?: { indexFile?: string; input?: string }): GitResult {
+	const env = gitEnv();
+	if (opts?.indexFile) env.GIT_INDEX_FILE = opts.indexFile;
+	const result = spawnSync("git", args, {
+		cwd,
+		encoding: "utf8",
+		timeout: 15000,
+		input: opts?.input,
+		env,
+	});
+	return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+/**
+ * The outcome of reading a path's baseline content, distinguishing the three
+ * cases that `revertFile` must NOT conflate (a naive "null means absent" read
+ * would delete the working file on any git error):
+ *   content — the path is a blob in the baseline; `buf` is its full bytes.
+ *   absent  — the path genuinely did not exist in the baseline (agent created
+ *             it); reverting means deleting the working file.
+ *   error   — git failed, the object isn't a plain blob, or the read was
+ *             truncated; the caller must leave the working file untouched.
+ */
+type BlobRead = { kind: "content"; buf: Buffer } | { kind: "absent" } | { kind: "error" };
+
+/**
+ * Read a path's baseline bytes, cleanly separating genuine absence from a git
+ * failure or a short/truncated read. Presence and the exact blob size come from
+ * `ls-tree` (empty output = absent, non-zero exit = error); the bytes then come
+ * from `cat-file blob`, and we require the byte count to match the advertised
+ * size so a `maxBuffer`/pipe truncation surfaces as an error rather than
+ * silently corrupting the file on restore.
+ */
+function readBaselineBlob(root: string, tree: string, path: string): BlobRead {
+	const meta = spawnSync("git", ["ls-tree", "-l", "-z", tree, "--", path], {
+		cwd: root,
+		encoding: "utf8",
+		timeout: 15000,
+		env: gitEnv(),
+	});
+	if (meta.error || meta.status !== 0) return { kind: "error" };
+	const line = meta.stdout ?? "";
+	if (line.length === 0) return { kind: "absent" };
+	// `-l -z` line: "<mode> <type> <sha> <size>\t<path>\0" (size right-aligned;
+	// a non-blob subtree reports size "-").
+	const match = /^\S+ +\S+ +\S+ +(\d+)\t/.exec(line);
+	if (!match) return { kind: "error" };
+	const size = Number(match[1]);
+	const res = spawnSync("git", ["cat-file", "blob", `${tree}:${path}`], {
+		cwd: root,
+		timeout: 15000,
+		env: gitEnv(),
+		maxBuffer: 512 * 1024 * 1024,
+	});
+	if (res.error || res.status !== 0) return { kind: "error" };
+	const buf = res.stdout as Buffer;
+	if (buf.length !== size) return { kind: "error" };
+	return { kind: "content", buf };
+}
+
+/**
+ * Replace every regular-file blob staged in `indexFile` with a hash of its
+ * **raw working-tree bytes**, bypassing git's clean/EOL/attribute filters.
+ *
+ * `git add` applies `.gitattributes` (`text`/`text=auto`/`eol=…`) and
+ * `core.autocrlf` normalization when staging, so the stored blob can differ from
+ * the on-disk file (classically CRLF→LF). The change-review surface serves this
+ * blob as the diff's left side and quick-diff reference while the right side is
+ * the untouched working file, so a normalized baseline mismatches the working
+ * file on *every* line — rendering a one-line edit as a whole-file rewrite
+ * (issue 57). Snapshotting raw bytes keeps the baseline byte-identical to disk,
+ * so unchanged lines read as unchanged and the tree-to-tree diff/hunk/revert
+ * paths stay consistent with what the editor shows.
+ *
+ * Only regular files (mode 100644/100755) are re-hashed; symlinks (120000) and
+ * gitlinks (160000) have no filterable on-disk text and are left as staged.
+ * Best-effort: any git failure or output desync leaves the (normalized) index
+ * untouched rather than aborting the snapshot — a normalized baseline is still
+ * functional, just subject to the original mismatch.
+ */
+function rehashRawBytes(root: string, indexFile: string): void {
+	const listed = runGit(root, ["ls-files", "-s", "-z"], { indexFile });
+	if (listed.status !== 0 || listed.stdout.length === 0) return;
+	// `-s -z` entry: "<mode> <sha> <stage>\t<path>" (NUL-terminated). The path may
+	// contain any byte except NUL — including tabs/spaces — so split on the FIRST
+	// tab only (mode/sha/stage never contain a tab).
+	const files: { mode: string; path: string }[] = [];
+	for (const entry of listed.stdout.split("\0")) {
+		if (entry.length === 0) continue;
+		const tab = entry.indexOf("\t");
+		if (tab < 0) continue;
+		const mode = entry.split(" ")[0];
+		if (mode === "100644" || mode === "100755") files.push({ mode, path: entry.slice(tab + 1) });
+	}
+	if (files.length === 0) return;
+	// Hash raw bytes in path-argument chunks (robust to any path characters; kept
+	// well under ARG_MAX). One sha per path is emitted in order.
+	const CHUNK = 256;
+	const info: string[] = [];
+	for (let i = 0; i < files.length; i += CHUNK) {
+		const chunk = files.slice(i, i + CHUNK);
+		const hashed = runGit(root, ["hash-object", "-w", "--no-filters", "--", ...chunk.map((f) => f.path)]);
+		if (hashed.status !== 0) return;
+		const shas = hashed.stdout.split("\n").filter((s) => s.length > 0);
+		if (shas.length !== chunk.length) return;
+		for (let j = 0; j < chunk.length; j++) info.push(`${chunk[j].mode} ${shas[j]}\t${chunk[j].path}`);
+	}
+	// `-z --index-info`: NUL-terminated "<mode> <sha>\t<path>" records overwrite
+	// the normalized blobs with the raw ones in a single pass.
+	runGit(root, ["update-index", "-z", "--index-info"], { indexFile, input: info.map((l) => `${l}\0`).join("") });
+}
+
+/**
+ * Snapshot the current working tree into a git tree object via a throwaway index
+ * (so the user's real index/working tree are untouched). Returns the tree SHA,
+ * or null if the snapshot could not be taken (e.g. not a git repo).
+ *
+ * The staged blobs are re-hashed from raw working-tree bytes (see
+ * {@link rehashRawBytes}) so the tree mirrors on-disk content exactly, rather
+ * than git's clean/EOL-normalized form.
+ *
+ * All git operations run from the repository root (resolved via `findGitRoot`),
+ * so the resulting tree — and every path derived from diffing it — is
+ * repo-root-relative, regardless of whether the VS Code workspace is the repo
+ * root or a subdirectory of it.
+ */
+export function captureTree(cwd: string): string | null {
+	const root = findGitRoot(cwd);
+	if (root === null) return null;
+	const dir = mkdtempSync(join(tmpdir(), "dreb-review-"));
+	const indexFile = join(dir, "index");
+	try {
+		const add = runGit(root, ["add", "-A"], { indexFile });
+		if (add.status !== 0) return null;
+		rehashRawBytes(root, indexFile);
+		const write = runGit(root, ["write-tree"], { indexFile });
+		if (write.status !== 0) return null;
+		const tree = write.stdout.trim();
+		return tree.length > 0 ? tree : null;
+	} finally {
+		try {
+			rmSync(dir, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
+	}
+}
+
+function mapStatus(code: string): ChangedFile["status"] {
+	if (code.startsWith("A")) return "added";
+	if (code.startsWith("D")) return "deleted";
+	return "modified";
+}
+
+/**
+ * Files that differ between the baseline tree and the current working tree.
+ * Builds a fresh current-tree snapshot so newly created (untracked) files are
+ * included, then diffs tree-to-tree. Hunk counts come from each file's diff;
+ * binary files report a hunk count of 0 and status "binary".
+ */
+export function changedFiles(cwd: string, baselineTree: string): ChangedFile[] {
+	const root = findGitRoot(cwd);
+	if (root === null) return [];
+	const currentTree = captureTree(root);
+	if (currentTree === null) return [];
+	// `--no-renames` keeps the `-z` stream to clean STATUS\0PATH pairs. Without
+	// it, git's default rename detection (diff.renames, on since 2.9) emits a
+	// three-token `R###\0old\0new` record that would desync the pair-wise parse
+	// below and garble every subsequent entry.
+	const res = runGit(root, ["diff", "--no-renames", "--name-status", "-z", baselineTree, currentTree]);
+	if (res.status !== 0 || res.stdout.length === 0) return [];
+	// `-z` output: STATUS\0PATH\0STATUS\0PATH\0…
+	const parts = res.stdout.split("\0").filter((p) => p.length > 0);
+	const files: ChangedFile[] = [];
+	for (let i = 0; i + 1 < parts.length; i += 2) {
+		const code = parts[i];
+		const path = parts[i + 1];
+		const status = mapStatus(code);
+		const { hunks, binary } = fileDiffAgainst(root, baselineTree, currentTree, path);
+		files.push({
+			path,
+			status: binary ? "binary" : status,
+			hunkCount: hunks,
+		});
+	}
+	return files;
+}
+
+/** Internal: parsed diff summary for a path between two known trees. `root` must
+ * be the repository root so the repo-root-relative `path` pathspec resolves. */
+function fileDiffAgainst(
+	root: string,
+	baselineTree: string,
+	currentTree: string,
+	path: string,
+): { diff: string; hunks: number; binary: boolean } {
+	const res = runGit(root, ["diff", "--no-renames", baselineTree, currentTree, "--", path]);
+	const diff = res.stdout;
+	const parsed = parseFileDiff(diff);
+	return { diff, hunks: parsed.hunks.length, binary: parsed.binary };
+}
+
+/**
+ * Unified diff (baseline → current) for a single path, with real `a/… b/…`
+ * headers suitable for `git apply`. Returns the diff text and whether git
+ * reported it binary.
+ */
+export function fileDiff(cwd: string, baselineTree: string, path: string): { diff: string; binary: boolean } {
+	const root = findGitRoot(cwd);
+	if (root === null) return { diff: "", binary: false };
+	const currentTree = captureTree(root);
+	if (currentTree === null) return { diff: "", binary: false };
+	const { diff, binary } = fileDiffAgainst(root, baselineTree, currentTree, path);
+	return { diff, binary };
+}
+
+/** The baseline content of a path (for the diff viewer's left side), or null
+ * when the path did not exist in the baseline (a file the agent created) or
+ * could not be read. */
+export function baselineContent(cwd: string, baselineTree: string, path: string): string | null {
+	const root = findGitRoot(cwd);
+	if (root === null) return null;
+	const read = readBaselineBlob(root, baselineTree, path);
+	return read.kind === "content" ? read.buf.toString("utf8") : null;
+}
+
+/**
+ * Reverse exactly one hunk of a file's baseline→current diff, undoing that hunk
+ * in the working file while leaving the others intact. Returns true on success.
+ */
+export function revertHunk(cwd: string, baselineTree: string, path: string, hunkIndex: number): boolean {
+	const root = findGitRoot(cwd);
+	if (root === null) return false;
+	const { diff, binary } = fileDiff(root, baselineTree, path);
+	if (binary || diff.length === 0) return false;
+	const parsed = parseFileDiff(diff);
+	const patch = sliceHunkPatch(parsed, hunkIndex);
+	if (patch === undefined) return false;
+	const res = runGit(root, ["apply", "--reverse", "--recount", "-p1", "-"], { input: patch });
+	return res.status === 0;
+}
+
+/** `lstatSync` that returns undefined instead of throwing on a missing entry.
+ * Uses `lstat` (not `stat`) so a symlink — including a broken/dangling one — is
+ * reported as a present entry rather than being followed or mistaken for absent. */
+function lstatSafe(p: string): ReturnType<typeof lstatSync> | undefined {
+	try {
+		return lstatSync(p);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Restore a path to its baseline content: rewrite the file with the baseline
+ * bytes, or delete it when it did not exist in the baseline. Returns true on
+ * success, false without touching the working file when the baseline read fails
+ * (git error, non-blob, or truncated read) — a failed read must never be
+ * mistaken for "absent from baseline" and trigger a destructive delete/truncate.
+ *
+ * The working-tree entry is inspected with `lstat` (never following symlinks).
+ * When leaving the entry in place would be unsafe — a symlink (whose `'w'` write
+ * would follow the link and clobber its target, possibly outside the repository)
+ * or a hard link (`nlink > 1`, whose in-place `'w'` truncate would corrupt every
+ * other name sharing that inode) — we write the baseline bytes to a sibling temp
+ * file and atomically `rename` it over the path. The rename replaces the entry
+ * without following it, and (unlike unlink-then-write) never leaves the path
+ * deleted if the write fails: the original survives until the rename succeeds.
+ * An ordinary, singly-linked regular file is overwritten in place so its mode
+ * bits (e.g. the exec bit) are preserved. In the "absent" branch we remove any
+ * lingering entry (including a broken symlink, which `existsSync` would have
+ * mis-reported as already gone).
+ */
+export function revertFile(cwd: string, baselineTree: string, path: string): boolean {
+	const root = findGitRoot(cwd);
+	if (root === null) return false;
+	const read = readBaselineBlob(root, baselineTree, path);
+	if (read.kind === "error") return false;
+	const abs = join(root, path);
+	try {
+		const entry = lstatSafe(abs);
+		if (read.kind === "absent") {
+			if (entry) unlinkSync(abs);
+			return true;
+		}
+		// When an in-place write would be unsafe (symlink → followed; hard link →
+		// shared-inode truncate), stage the baseline bytes in a sibling temp file
+		// and atomically rename over the entry. The rename swaps the entry without
+		// following it and, unlike unlink-then-write, never leaves the path deleted
+		// on a mid-write failure (ENOSPC, EPERM, read-only remount): the original
+		// entry persists until the rename lands.
+		if (entry && (!entry.isFile() || entry.nlink > 1)) {
+			const tmp = `${abs}.dreb-revert-${process.pid}-${Date.now()}`;
+			try {
+				writeFileSync(tmp, read.buf);
+				renameSync(tmp, abs);
+			} catch (err) {
+				try {
+					if (lstatSafe(tmp)) unlinkSync(tmp);
+				} catch {
+					// best-effort temp cleanup
+				}
+				throw err;
+			}
+			return true;
+		}
+		// An ordinary single-link regular file is overwritten in place so its mode
+		// bits are preserved.
+		writeFileSync(abs, read.buf);
+		return true;
+	} catch {
+		return false;
+	}
+}

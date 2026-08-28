@@ -69,6 +69,9 @@ export type RpcCommand =
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
 	| { id?: string; type: "abort_compaction" }
 
+	// Ask mode (read-only)
+	| { id?: string; type: "set_ask_mode"; enabled: boolean }
+
 	// Retry
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
 	| { id?: string; type: "abort_retry" }
@@ -101,6 +104,8 @@ export type RpcCommand =
 
 	// Messages
 	| { id?: string; type: "get_messages" }
+	// Recover a host-buffered assistant reply that a crashed child never persisted
+	| { id?: string; type: "recover_inflight_reply"; text: string }
 
 	// Command discovery (resource commands plus client-handled built-ins)
 	| { id?: string; type: "get_commands" }
@@ -252,6 +257,8 @@ export interface RpcSessionState {
 	sessionId: string;
 	sessionName?: string;
 	autoCompactionEnabled: boolean;
+	/** Whether read-only Ask mode is currently active. */
+	askModeEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
 	/**
@@ -355,6 +362,9 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "set_auto_compaction"; success: true }
 	| { id?: string; type: "response"; command: "abort_compaction"; success: true }
 
+	// Ask mode (read-only)
+	| { id?: string; type: "response"; command: "set_ask_mode"; success: true; data: { enabled: boolean } }
+
 	// Retry
 	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }
 	| { id?: string; type: "response"; command: "abort_retry"; success: true }
@@ -409,6 +419,13 @@ export type RpcResponse =
 
 	// Messages
 	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }
+	| {
+			id?: string;
+			type: "response";
+			command: "recover_inflight_reply";
+			success: true;
+			data: { recovered: boolean };
+	  }
 
 	// Commands
 	| {

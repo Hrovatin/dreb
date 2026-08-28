@@ -50,6 +50,12 @@ function lastSpawnOptions(): Record<string, unknown> {
 	return calls[calls.length - 1][2] as Record<string, unknown>;
 }
 
+/** Executable (first argument) passed to spawn(). */
+function lastSpawnCommand(): string {
+	const calls = vi.mocked(spawn).mock.calls;
+	return calls[calls.length - 1][0] as string;
+}
+
 beforeEach(() => {
 	vi.mocked(spawn).mockReset();
 });
@@ -173,7 +179,7 @@ describe("RpcClient spawn failure handling", () => {
 		child.exitCode = 7;
 		child.emit("exit", 7, "SIGTERM");
 
-		expect(seen).toEqual([{ code: 7, signal: "SIGTERM" }]);
+		expect(seen).toEqual([{ code: 7, signal: "SIGTERM", stderr: "" }]);
 	});
 
 	test("onExit notifies subscribers when the child emits an 'error'", async () => {
@@ -188,6 +194,71 @@ describe("RpcClient spawn failure handling", () => {
 		const error = new Error("spawn boom");
 		child.emit("error", error);
 
-		expect(seen).toEqual([{ error }]);
+		expect(seen).toEqual([{ error, stderr: "" }]);
+	});
+
+	test("onExit includes captured stderr from the child", async () => {
+		const child = makeFakeChild();
+		vi.mocked(spawn).mockReturnValue(child);
+
+		const client = new RpcClient({ cliPath: "dist/cli.js" });
+		const seen: unknown[] = [];
+		client.onExit((info) => seen.push(info));
+		await client.start();
+
+		// Simulate the child writing diagnostic output to stderr before dying.
+		child.stderr.push("Fatal: something broke\n");
+		child.exitCode = 1;
+		child.emit("exit", 1, null);
+
+		expect(seen).toHaveLength(1);
+		expect((seen[0] as any).stderr).toBe("Fatal: something broke\n");
+		expect((seen[0] as any).code).toBe(1);
+	});
+});
+
+describe("RpcClient nodePath / env forwarding", () => {
+	test("defaults the executable to 'node' when nodePath is unset", async () => {
+		const child = makeFakeChild();
+		vi.mocked(spawn).mockReturnValue(child);
+
+		const client = new RpcClient({ cliPath: "dist/cli.js" });
+		await client.start();
+
+		expect(lastSpawnCommand()).toBe("node");
+
+		await client.stop();
+	});
+
+	test("spawns with the provided nodePath executable", async () => {
+		const child = makeFakeChild();
+		vi.mocked(spawn).mockReturnValue(child);
+
+		const client = new RpcClient({ cliPath: "dist/cli.js", nodePath: "/opt/node22/bin/node" });
+		await client.start();
+
+		expect(lastSpawnCommand()).toBe("/opt/node22/bin/node");
+
+		await client.stop();
+	});
+
+	test("merges injected env (e.g. ELECTRON_RUN_AS_NODE) over process.env", async () => {
+		const child = makeFakeChild();
+		vi.mocked(spawn).mockReturnValue(child);
+
+		const client = new RpcClient({
+			cliPath: "dist/cli.js",
+			nodePath: "/path/to/code",
+			env: { ELECTRON_RUN_AS_NODE: "1" },
+		});
+		await client.start();
+
+		const opts = lastSpawnOptions();
+		const env = opts.env as Record<string, string>;
+		expect(env.ELECTRON_RUN_AS_NODE).toBe("1");
+		// Existing process env is still present (merged, not replaced).
+		expect(env.PATH).toBe(process.env.PATH);
+
+		await client.stop();
 	});
 });

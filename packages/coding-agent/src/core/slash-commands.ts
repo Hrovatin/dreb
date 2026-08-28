@@ -32,6 +32,10 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "logout", description: "Logout from OAuth provider" },
 	{ name: "new", description: "Start a new session" },
 	{ name: "compact", description: "Manually compact the session context" },
+	{
+		name: "ask",
+		description: "Toggle read-only Ask mode (on/off) — no edits/writes, no shell (typed read-only git tool)",
+	},
 	{ name: "dream", description: "Consolidate and prune memories (backup, merge, scan sessions)" },
 	{ name: "resume", description: "Resume a different session" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" },
@@ -61,4 +65,29 @@ export function parseBuiltinSlashCommand(text: string): { command: BuiltinSlashC
 	const command = BUILTIN_BY_NAME.get(match[1]);
 	if (!command) return undefined;
 	return { command, args: (match[2] ?? "").trim() };
+}
+
+/** A single autocomplete suggestion for a slash-command argument. */
+export interface SlashCommandArgumentCompletion {
+	value: string;
+	label: string;
+	description: string;
+}
+
+/**
+ * Argument completions for `/ask` — the `on` / `off` subcommands.
+ *
+ * Returns the subcommands matching `prefix` (case-insensitive prefix match),
+ * or `null` when nothing matches so the autocomplete UI shows no menu. Shared
+ * between interactive-mode wiring and tests so the behavior is verifiable
+ * without constructing the full TUI.
+ */
+export function askArgumentCompletions(prefix: string): SlashCommandArgumentCompletion[] | null {
+	const subcommands: SlashCommandArgumentCompletion[] = [
+		{ value: "on", label: "on", description: "Enable read-only Ask mode" },
+		{ value: "off", label: "off", description: "Disable read-only Ask mode" },
+	];
+	const normalized = prefix.toLowerCase();
+	const filtered = normalized ? subcommands.filter((s) => s.value.startsWith(normalized)) : subcommands;
+	return filtered.length > 0 ? filtered : null;
 }

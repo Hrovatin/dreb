@@ -55,6 +55,14 @@ type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
 export interface RpcClientOptions {
 	/** Path to the CLI entry point (default: searches for dist/cli.js) */
 	cliPath?: string;
+	/**
+	 * Absolute path to the Node.js executable used to spawn the CLI child.
+	 * Defaults to `"node"` (resolved via `PATH`). Callers that cannot rely on
+	 * `PATH` — e.g. a GUI-launched editor whose extension host has no shell
+	 * `PATH` — pass a discovered absolute Node path (or the editor's own
+	 * runtime), so the spawn does not fail with `ENOENT`.
+	 */
+	nodePath?: string;
 	/** Working directory for the agent */
 	cwd?: string;
 	/** Environment variables */
@@ -96,8 +104,8 @@ export interface ModelInfo {
 export type RpcEventListener = (event: RpcEvent) => void;
 
 export type RpcExitInfo =
-	| { code: number | null; signal: NodeJS.Signals | null; error?: undefined }
-	| { code?: undefined; signal?: undefined; error: Error };
+	| { code: number | null; signal: NodeJS.Signals | null; error?: undefined; stderr?: string }
+	| { code?: undefined; signal?: undefined; error: Error; stderr?: string };
 
 export type RpcExitListener = (info: RpcExitInfo) => void;
 
@@ -176,7 +184,7 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		this.process = spawn("node", [cliPath, ...args], {
+		this.process = spawn(this.options.nodePath ?? "node", [cliPath, ...args], {
 			cwd: this.options.cwd,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
@@ -201,7 +209,9 @@ export class RpcClient {
 			// Guard: skip if this handler belongs to an old, already-stopped process
 			if (this.process !== procRef) return;
 			this.failPendingRequests(`RPC process exited with code ${code}, signal ${signal}`);
-			this.notifyExitListeners({ code, signal });
+			// Forward the collected stderr so a late (non-startup) crash surfaces its
+			// dying words to the parent for diagnosis, instead of discarding them.
+			this.notifyExitListeners({ code, signal, stderr: this.stderr });
 		});
 
 		// Spawn failures surface asynchronously as an 'error' event rather than a
@@ -215,7 +225,7 @@ export class RpcClient {
 			if (this.process !== procRef) return;
 			this.spawnError = err;
 			this.failPendingRequests(`RPC process failed to spawn: ${err.message}`);
-			this.notifyExitListeners({ error: err });
+			this.notifyExitListeners({ error: err, stderr: this.stderr });
 		});
 
 		// Set up strict JSONL reader for stdout.
@@ -556,6 +566,14 @@ export class RpcClient {
 	}
 
 	/**
+	 * Toggle read-only Ask mode. Returns the resulting state.
+	 */
+	async setAskMode(enabled: boolean): Promise<{ enabled: boolean }> {
+		const response = await this.send({ type: "set_ask_mode", enabled });
+		return this.getData(response);
+	}
+
+	/**
 	 * Set auto-retry enabled/disabled.
 	 */
 	async setAutoRetry(enabled: boolean): Promise<void> {
@@ -700,6 +718,17 @@ export class RpcClient {
 	async getMessages(): Promise<AgentMessage[]> {
 		const response = await this.send({ type: "get_messages" });
 		return this.getData<{ messages: AgentMessage[] }>(response).messages;
+	}
+
+	/**
+	 * Re-persist an assistant reply that a previous (crashed) child streamed to
+	 * the host but died before persisting. The fresh child appends it via the
+	 * normal session-manager path, marked interrupted/aborted. Returns whether an
+	 * entry was actually appended (empty/whitespace text is a no-op).
+	 */
+	async recoverInflightReply(text: string): Promise<boolean> {
+		const response = await this.send({ type: "recover_inflight_reply", text });
+		return this.getData<{ recovered: boolean }>(response).recovered;
 	}
 
 	/**

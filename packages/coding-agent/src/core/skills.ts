@@ -72,6 +72,7 @@ export interface SkillFrontmatter {
 	description?: string;
 	"argument-hint"?: string;
 	"disable-model-invocation"?: boolean;
+	"requires-write"?: boolean;
 	"user-invocable"?: boolean;
 	ui?: string;
 	[key: string]: unknown;
@@ -85,6 +86,8 @@ export interface Skill {
 	sourceInfo: SourceInfo;
 	argumentHint?: string;
 	disableModelInvocation: boolean;
+	/** When true, the skill is declared to require write access via `requires-write:` frontmatter. */
+	requiresWrite?: boolean;
 	userInvocable: boolean;
 	/** When set, skill only loads when uiType matches (e.g. "telegram") */
 	ui?: string;
@@ -342,6 +345,7 @@ function loadSkillFromFile(
 				sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
 				argumentHint: frontmatter["argument-hint"],
 				disableModelInvocation: frontmatter["disable-model-invocation"] === true,
+				requiresWrite: frontmatter["requires-write"] === true,
 				userInvocable: frontmatter["user-invocable"] !== false,
 				ui: typeof frontmatter.ui === "string" ? frontmatter.ui : undefined,
 			},

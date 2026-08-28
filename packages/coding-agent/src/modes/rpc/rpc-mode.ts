@@ -42,7 +42,7 @@ import type {
 import { getGitBranch } from "../../core/git-branch.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import { parseModelPattern, resolveModelScopePatterns } from "../../core/model-resolver.js";
-import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
+import { flushRawStdout, takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
 import type { SessionInfo, SessionTreeNode } from "../../core/session-manager.js";
 import { SessionManager } from "../../core/session-manager.js";
 import type { SettingsManager, TransportSetting } from "../../core/settings-manager.js";
@@ -60,7 +60,12 @@ import {
 } from "../../core/tools/subagent.js";
 import { type Theme, theme } from "../interactive/theme/theme.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
-import { projectDashboardRpcEvent } from "./rpc-event-projection.js";
+import { installRpcCrashGuards } from "./rpc-crash-guard.js";
+import {
+	projectDashboardRpcEvent,
+	shouldProjectRpcEvents,
+	warnIfProjectedFrameOversized,
+} from "./rpc-event-projection.js";
 import type {
 	RpcAgentTypeInfo,
 	RpcBackgroundAgentInfo,
@@ -298,6 +303,7 @@ export function getStateForRpc(session: AgentSession, modelFallbackMessage?: str
 		sessionId: session.sessionId,
 		sessionName: session.sessionName,
 		autoCompactionEnabled: session.autoCompactionEnabled,
+		askModeEnabled: session.askModeEnabled,
 		messageCount: session.messages.length,
 		pendingMessageCount: session.pendingMessageCount,
 		contextUsage: session.getContextUsage(),
@@ -1328,6 +1334,19 @@ export function getTreeForRpc(sessionManager: Pick<SessionManager, "getTree" | "
 	return { roots: toRpcTreeNodes(sessionManager.getTree()), leafId: sessionManager.getLeafId() };
 }
 
+/**
+ * Persist an assistant reply that a previous RPC child streamed to the host but
+ * died before it could reach `message_end` (crash, SIGKILL, backpressure exit).
+ *
+ * The host retains every streamed delta and, after auto-restart, hands the text
+ * back here so the fresh child re-persists it and re-syncs its context (see
+ * {@link AgentSession.recoverInflightReply}). Returns whether an entry was
+ * actually appended (empty/whitespace text is a no-op).
+ */
+export function recoverInflightReplyForRpc(session: Pick<AgentSession, "recoverInflightReply">, text: string): boolean {
+	return session.recoverInflightReply(text);
+}
+
 /** Navigate the active session tree, returning only the stable RPC result fields. */
 export async function navigateTreeForRpc(
 	session: Pick<AgentSession, "navigateTree">,
@@ -1727,6 +1746,28 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 		return { id, type: "response", command, success: false, error: message };
 	};
 
+	// Install process-level crash guards so an unhandled rejection no longer
+	// silently kills the child (issue 53). Recoverable rejections keep the
+	// process alive; a fatal uncaught exception logs + emits a diagnostic and
+	// exits (code 1) for the parent's supervised restart, after best-effort
+	// flushing the diagnostic frame down the stdout pipe.
+	installRpcCrashGuards({
+		emit: (frame) => output(frame),
+		log: (line) => console.error(line),
+		exit: (code) => {
+			let exited = false;
+			const done = (): void => {
+				if (exited) return;
+				exited = true;
+				process.exit(code);
+			};
+			// Bound the flush so a dead/blocked consumer can't wedge the exit.
+			const timer = setTimeout(done, 1_000);
+			timer.unref();
+			flushRawStdout().then(done, done);
+		},
+	});
+
 	if (session.sessionFile && session.messages.length > 0) {
 		const rehydratedCount = rehydrateBackgroundAgentsFromDisk(session.sessionFile);
 		if (rehydratedCount > 0) {
@@ -1827,14 +1868,18 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 				})
 			: undefined;
 
-	// Dashboard-launched runtimes (--ui dashboard) get message_update events
-	// projected before serialization: the cumulative `message` and
-	// `assistantMessageEvent.partial` fields are quadratic in response length on
-	// the JSONL pipe, and no dashboard consumer reads them (deltas, message_end,
-	// and get_dashboard_snapshot responses carry the authoritative data). Generic
-	// RPC consumers keep the full protocol unchanged. Only the event stream is
-	// projected — command responses (output() calls below) always stay complete.
-	const projectEvents = session.uiType === "dashboard";
+	// Runtimes whose consumers rebuild the transcript from delta fields plus
+	// message_end (dashboard via --ui dashboard, VSCode via --ui vscode) get
+	// message_update events projected before serialization: the cumulative
+	// `message` and `assistantMessageEvent.partial` fields are quadratic in
+	// response length on the JSONL pipe, and those consumers never read them
+	// (deltas, message_end, and get_dashboard_snapshot responses carry the
+	// authoritative data). For VSCode this bounding is what stops a long reply
+	// from overrunning the 16 MiB stdout queue and killing the child mid-reply
+	// (issue 84). Generic RPC consumers (uiType "rpc") keep the full protocol
+	// unchanged. Only the event stream is projected — command responses
+	// (output() calls below) always stay complete.
+	const projectEvents = shouldProjectRpcEvents(session.uiType);
 
 	// Output all agent events as JSON
 	session.subscribe((event) => {
@@ -1849,7 +1894,24 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 				tabTitleGenerator.onMessageEnd(event.message);
 			}
 		}
-		output(projectEvents ? projectDashboardRpcEvent(event as unknown as Record<string, unknown>) : event);
+		if (projectEvents) {
+			const projected = projectDashboardRpcEvent(event as unknown as Record<string, unknown>);
+			// Serialize once and reuse the line for both the size check and the
+			// actual write, so the defense-in-depth guard adds no extra
+			// serialization on the streaming hot path.
+			const line = serializeJsonLine(projected);
+			// Defense-in-depth (issue 84): projection strips a hardcoded set of
+			// cumulative fields. If a future protocol change adds a new cumulative
+			// field to message_update, projection would miss it and per-frame size
+			// would start growing with reply length again — silently reintroducing
+			// the quadratic stream that overruns the 16 MiB stdout queue. A single
+			// stderr warning (never stdout — that would corrupt the JSONL pipe)
+			// makes that regression observable instead of a silent crash.
+			warnIfProjectedFrameOversized(projected, line);
+			writeRawStdout(line);
+		} else {
+			output(event);
+		}
 	});
 
 	// Handle a single command
@@ -2107,6 +2169,15 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 			}
 
 			// =================================================================
+			// Ask mode (read-only)
+			// =================================================================
+
+			case "set_ask_mode": {
+				const enabled = session.setAskMode(command.enabled);
+				return success(id, "set_ask_mode", { enabled });
+			}
+
+			// =================================================================
 			// Retry
 			// =================================================================
 
@@ -2218,6 +2289,11 @@ export async function runRpcMode(session: AgentSession, modelFallbackMessage?: s
 
 			case "get_messages": {
 				return success(id, "get_messages", { messages: session.messages });
+			}
+
+			case "recover_inflight_reply": {
+				const recovered = recoverInflightReplyForRpc(session, command.text);
+				return success(id, "recover_inflight_reply", { recovered });
 			}
 
 			// =================================================================

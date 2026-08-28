@@ -1,0 +1,189 @@
+// @vitest-environment jsdom
+/**
+ * End-to-end click wiring for clickable code links (Phase 5b, finding 2).
+ *
+ * `code-links.ts` writes the `data-path/line/column/symbol` attributes; the
+ * chat's `ResponseView` wires `onClick={onCodeLinkClick}` on the rendered
+ * answer, and `onCodeLinkClick` reads exactly those keys and posts `open-source`
+ * to the host. Unit tests cover each side in isolation; this test renders the
+ * real `ResponseView` in jsdom, dispatches a real click on a *produced* link,
+ * and asserts the whole producer→delegation→postToHost contract holds together
+ * (a dataset-key rename, a dropped `preventDefault`, or broken `closest()`
+ * delegation would fail here while the isolated tests stayed green).
+ */
+
+import { render } from "solid-js/web/dist/web.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ActivityItem, ResponseGroup, ResponseSegment, ToolActivity } from "../src/shared/projection.js";
+
+const hoisted = vi.hoisted(() => ({ posted: [] as unknown[] }));
+
+vi.mock("../src/webview/vscode-api.js", () => ({
+	onHostMessage: () => () => {},
+	postToHost: (msg: unknown) => {
+		hoisted.posted.push(msg);
+	},
+}));
+
+import { ResponseView } from "../src/webview/app.js";
+
+function group(partial: Partial<ResponseGroup> & { activity?: ActivityItem[] }): ResponseGroup {
+	const { activity, ...rest } = partial;
+	const answer = rest.answer ?? "";
+	// Derive the ordered segments the renderer consumes from the convenience
+	// activity/answer inputs, so existing test cases keep their simple shape.
+	// `activity` is a factory-only input — the group stores items solely in
+	// `segments` now.
+	const segments: ResponseSegment[] = rest.segments ?? [
+		...(activity && activity.length > 0 ? [{ kind: "activity" as const, items: activity, collapsed: true }] : []),
+		...(answer.length > 0 ? [{ kind: "answer" as const, text: answer }] : []),
+	];
+	return {
+		kind: "response",
+		id: 1,
+		streaming: false,
+		collapsed: true,
+		...rest,
+		answer,
+		segments,
+	};
+}
+
+function searchTool(resultText: string): ToolActivity {
+	return { kind: "tool", toolCallId: "t1", toolName: "search", args: {}, status: "done", resultText };
+}
+
+let dispose: (() => void) | undefined;
+afterEach(() => {
+	dispose?.();
+	dispose = undefined;
+	hoisted.posted.length = 0;
+	document.body.innerHTML = "";
+});
+
+function mount(g: ResponseGroup): HTMLElement {
+	const host = document.createElement("div");
+	document.body.appendChild(host);
+	dispose = render(() => <ResponseView group={g} />, host);
+	return host;
+}
+
+describe("ResponseView code-link click wiring", () => {
+	it("posts open-source with path+line when a path:line link is clicked", () => {
+		const host = mount(group({ answer: "See src/a.ts:42 for details." }));
+		const link = host.querySelector("a.dreb-code-link") as HTMLAnchorElement;
+		expect(link).toBeTruthy();
+
+		link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+		expect(hoisted.posted).toEqual([{ type: "open-source", ref: { path: "src/a.ts", line: 42 } }]);
+	});
+
+	it("posts symbol + grounded location when a grounded symbol link is clicked", () => {
+		const g = group({
+			answer: "The Widget class handles it.",
+			activity: [searchTool("1. src/widget.ts:L7-20 (class Widget)")],
+		});
+		const host = mount(g);
+		// The answer's grounded-symbol link (not any link the activity box may render).
+		const answer = host.querySelector(".dreb-answer") as HTMLElement;
+		const link = answer.querySelector("a.dreb-code-link") as HTMLAnchorElement;
+		expect(link?.dataset.symbol).toBe("Widget");
+
+		link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+		expect(hoisted.posted).toEqual([
+			{ type: "open-source", ref: { symbol: "Widget", path: "src/widget.ts", line: 7 } },
+		]);
+	});
+
+	it("calls preventDefault so the href='#' anchor does not scroll-jump", () => {
+		const host = mount(group({ answer: "open src/a.ts:1 now" }));
+		const link = host.querySelector("a.dreb-code-link") as HTMLAnchorElement;
+		const evt = new MouseEvent("click", { bubbles: true, cancelable: true });
+		link.dispatchEvent(evt);
+		expect(evt.defaultPrevented).toBe(true);
+	});
+
+	it("posts nothing when plain (non-link) answer text is clicked", () => {
+		const host = mount(group({ answer: "just some prose with no references" }));
+		const answer = host.querySelector(".dreb-answer") as HTMLElement;
+		expect(answer.querySelector("a.dreb-code-link")).toBeNull();
+
+		answer.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+		expect(hoisted.posted).toEqual([]);
+	});
+
+	it("renders interleaved activity boxes and answer blocks in segment order", () => {
+		const host = mount(
+			group({
+				segments: [
+					{ kind: "activity", items: [{ kind: "thinking", text: "plan" }], collapsed: true },
+					{ kind: "answer", text: "First result." },
+					{ kind: "activity", items: [searchTool("1. src/x.ts:L1 (fn go)")], collapsed: true },
+					{ kind: "answer", text: "Second result." },
+				],
+			}),
+		);
+		// Two distinct activity boxes render (not one merged box hoisted to the top).
+		expect(host.querySelectorAll(".dreb-activity")).toHaveLength(2);
+		// The two answer blocks render in order, between/after the boxes.
+		const answers = [...host.querySelectorAll(".dreb-answer")].map((el) => el.textContent?.trim());
+		expect(answers).toEqual(["First result.", "Second result."]);
+		// Document order is box → answer → box → answer.
+		const kinds = [...host.querySelectorAll(".dreb-activity, .dreb-answer")].map((el) =>
+			el.classList.contains("dreb-activity") ? "box" : "answer",
+		);
+		expect(kinds).toEqual(["box", "answer", "box", "answer"]);
+	});
+
+	it("linkifies a later answer using a symbol grounded by a tool in an EARLIER box (whole-run refs)", () => {
+		// The grounding tool lives two segments before the answer that references
+		// it — proving ResponseView grounds each answer against the WHOLE run's
+		// activity (buildGroundedRefs(runActivity(group))), not just its own
+		// segment. A segment-local grounding would drop this cross-box link.
+		const host = mount(
+			group({
+				segments: [
+					{ kind: "activity", items: [searchTool("1. src/widget.ts:L7-20 (class Widget)")], collapsed: true },
+					{ kind: "answer", text: "Looking into it." },
+					{ kind: "activity", items: [{ kind: "thinking", text: "still thinking" }], collapsed: true },
+					{ kind: "answer", text: "The Widget class is the culprit." },
+				],
+			}),
+		);
+		const answers = [...host.querySelectorAll(".dreb-answer")] as HTMLElement[];
+		const laterAnswer = answers[answers.length - 1];
+		const link = laterAnswer.querySelector("a.dreb-code-link") as HTMLAnchorElement;
+		expect(link?.dataset.symbol).toBe("Widget");
+
+		link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+		expect(hoisted.posted).toEqual([
+			{ type: "open-source", ref: { symbol: "Widget", path: "src/widget.ts", line: 7 } },
+		]);
+	});
+
+	it("shows the working spinner only on the trailing activity box while streaming", () => {
+		const host = mount(
+			group({
+				streaming: true,
+				segments: [
+					// An earlier, finished box (an answer opened after it).
+					{ kind: "activity", items: [{ kind: "thinking", text: "first" }], collapsed: true },
+					{ kind: "answer", text: "Interim." },
+					// The trailing, in-flight box.
+					{ kind: "activity", items: [{ kind: "thinking", text: "second" }], collapsed: false },
+				],
+			}),
+		);
+		const boxes = [...host.querySelectorAll(".dreb-activity")] as HTMLElement[];
+		expect(boxes).toHaveLength(2);
+		// Exactly one spinner, on the last (in-flight) box.
+		expect(host.querySelectorAll(".dreb-spinner")).toHaveLength(1);
+		expect(boxes[0].querySelector(".dreb-spinner")).toBeNull();
+		expect(boxes[0].textContent).toContain("Worked");
+		expect(boxes[1].querySelector(".dreb-spinner")).toBeTruthy();
+		expect(boxes[1].textContent).toContain("Working");
+	});
+});

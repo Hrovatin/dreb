@@ -2,6 +2,7 @@
 name: independent-assessor
 description: Independently verifies review findings against actual source code — requires strongest available model
 tools: read, grep, find, ls, bash, search
+readonly: true
 model: zai/glm-5.1, anthropic/opus
 ---
 

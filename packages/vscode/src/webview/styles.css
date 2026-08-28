@@ -1,0 +1,821 @@
+:root {
+	color-scheme: light dark;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	padding: 0;
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size, 13px);
+	color: var(--vscode-foreground);
+	background: var(--vscode-editor-background);
+}
+
+.dreb-app {
+	display: flex;
+	flex-direction: column;
+	height: 100vh;
+}
+
+/* Header ------------------------------------------------------------------ */
+.dreb-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 12px;
+	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+
+.dreb-title {
+	font-weight: 600;
+}
+
+.dreb-cwd {
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.85em;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 1;
+}
+
+.dreb-chip {
+	font-size: 0.82em;
+	padding: 2px 8px;
+	border-radius: 10px;
+	max-width: 40%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--vscode-foreground);
+	background: var(--vscode-badge-background, rgba(128, 128, 128, 0.18));
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+.dreb-chip:hover:not(:disabled) {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.25));
+}
+.dreb-chip:disabled {
+	opacity: 0.55;
+	cursor: default;
+}
+
+.dreb-chip-static {
+	font-size: 0.82em;
+	color: var(--vscode-descriptionForeground);
+	white-space: nowrap;
+}
+
+.dreb-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--vscode-charts-red, #d33);
+}
+.dreb-dot.ok {
+	background: var(--vscode-charts-green, #2a2);
+}
+
+/* Transcript -------------------------------------------------------------- */
+.dreb-transcript {
+	flex: 1;
+	overflow-y: auto;
+	padding: 12px;
+}
+
+.dreb-transcript-inner {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.dreb-user {
+	align-self: flex-end;
+	max-width: 85%;
+	white-space: pre-wrap;
+	word-break: break-word;
+	padding: 8px 12px;
+	border-radius: 10px;
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, transparent);
+}
+
+.dreb-system {
+	margin: 0;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+	border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+	padding: 4px 0 4px 8px;
+}
+
+.dreb-response {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.dreb-answer {
+	white-space: normal;
+	word-break: break-word;
+	line-height: 1.5;
+}
+.dreb-answer :first-child {
+	margin-top: 0;
+}
+.dreb-answer :last-child {
+	margin-bottom: 0;
+}
+.dreb-answer pre {
+	background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+	padding: 10px;
+	border-radius: 6px;
+	overflow-x: auto;
+}
+.dreb-answer code {
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+/* Clickable code links (Phase 5b) — subtle, editor-native affordance. */
+.dreb-code-link {
+	color: var(--vscode-textLink-foreground, #3794ff);
+	text-decoration: none;
+	cursor: pointer;
+	border-radius: 3px;
+}
+.dreb-code-link:hover {
+	text-decoration: underline;
+	color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground, #3794ff));
+}
+.dreb-answer code .dreb-code-link {
+	color: inherit;
+	text-decoration: underline;
+	text-decoration-style: dotted;
+	text-underline-offset: 2px;
+}
+
+/* Activity box ------------------------------------------------------------ */
+.dreb-activity {
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	border-radius: 8px;
+	overflow: hidden;
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.06));
+}
+
+.dreb-activity-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	text-align: left;
+	padding: 6px 10px;
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	font-size: 0.9em;
+}
+
+.dreb-caret {
+	width: 1em;
+}
+
+.dreb-activity-body {
+	padding: 4px 10px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.dreb-thinking {
+	white-space: pre-wrap;
+	word-break: break-word;
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+	border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+	padding-left: 8px;
+}
+
+.dreb-tool {
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	border-radius: 6px;
+	padding: 6px 8px;
+	background: var(--vscode-editor-background);
+}
+.dreb-tool.running {
+	border-color: var(--vscode-charts-blue, #38f);
+}
+.dreb-tool.error {
+	border-color: var(--vscode-charts-red, #d33);
+}
+
+.dreb-tool-head {
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+	font-size: 0.9em;
+}
+.dreb-tool-name {
+	font-weight: 600;
+}
+.dreb-tool-status {
+	color: var(--vscode-descriptionForeground);
+}
+.dreb-tool-args {
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+	word-break: break-word;
+	margin-top: 4px;
+}
+.dreb-tool-result {
+	margin: 6px 0 0;
+	max-height: 200px;
+	overflow: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-size: 0.85em;
+}
+
+/* Banners / status -------------------------------------------------------- */
+.dreb-banner {
+	padding: 8px 12px;
+	border-radius: 6px;
+}
+.dreb-banner.error {
+	background: var(--vscode-inputValidation-errorBackground, rgba(220, 50, 50, 0.15));
+	border: 1px solid var(--vscode-inputValidation-errorBorder, #d33);
+	color: var(--vscode-foreground);
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.dreb-banner-text {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+.dreb-aborted {
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.85em;
+	font-style: italic;
+	margin-top: 4px;
+}
+.dreb-retry-btn {
+	flex: 0 0 auto;
+	font: inherit;
+	color: var(--vscode-button-foreground, #fff);
+	background: var(--vscode-button-background, #0e639c);
+	border: none;
+	border-radius: 4px;
+	padding: 2px 10px;
+	cursor: pointer;
+}
+.dreb-retry-btn:hover {
+	background: var(--vscode-button-hoverBackground, #1177bb);
+}
+
+/* Change-review bar ------------------------------------------------------- */
+.dreb-review-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 12px;
+	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+}
+.dreb-review-title {
+	font-size: 0.8em;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+	margin-right: 4px;
+}
+.dreb-review-file {
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 0.8em;
+	padding: 1px 6px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	background: var(--vscode-button-secondaryBackground, transparent);
+	color: var(--vscode-foreground);
+	cursor: pointer;
+}
+.dreb-review-file:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+.dreb-review-accept-all {
+	font-size: 0.8em;
+	padding: 1px 8px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-button-border, transparent);
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	cursor: pointer;
+	margin-right: 4px;
+}
+.dreb-review-accept-all:hover {
+	background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+.dreb-review-unavailable .dreb-review-title {
+	font-weight: 400;
+	font-style: italic;
+	margin-right: 0;
+}
+
+/* Queued (steer/follow-up) messages waiting to be delivered ---------------- */
+.dreb-pending-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 12px;
+	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+}
+.dreb-pending-title {
+	font-size: 0.8em;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+	margin-right: 4px;
+}
+.dreb-pending-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 0.8em;
+	padding: 1px 6px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	background: var(--vscode-button-secondaryBackground, transparent);
+	color: var(--vscode-foreground);
+}
+.dreb-pending-kind {
+	font-size: 0.85em;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--vscode-descriptionForeground);
+}
+
+/* Next-step suggestion bar (suggest_next) ---------------------------------- */
+.dreb-suggestion-bar {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 8px 12px;
+	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+}
+.dreb-suggestion-summary {
+	font-size: 0.9em;
+	color: var(--vscode-foreground);
+}
+.dreb-suggestion-summary > :first-child {
+	margin-top: 0;
+}
+.dreb-suggestion-summary > :last-child {
+	margin-bottom: 0;
+}
+.dreb-suggestion-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+.dreb-suggestion-label {
+	font-size: 0.8em;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--vscode-descriptionForeground);
+}
+.dreb-suggestion-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	max-width: 100%;
+	overflow: hidden;
+	font-size: 0.85em;
+	padding: 2px 10px;
+	border-radius: 12px;
+	border: 1px solid var(--vscode-focusBorder, rgba(56, 128, 255, 0.5));
+	background: var(--vscode-button-secondaryBackground, transparent);
+	color: var(--vscode-foreground);
+	cursor: pointer;
+}
+.dreb-suggestion-pill:hover {
+	background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15)));
+}
+.dreb-suggestion-arrow {
+	opacity: 0.7;
+}
+.dreb-suggestion-cmd {
+	font-family: var(--vscode-editor-font-family, monospace);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.dreb-suggestion-dismiss {
+	margin-left: auto;
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	padding: 0 2px;
+	font-size: 1.1em;
+	line-height: 1;
+}
+.dreb-suggestion-dismiss:hover {
+	color: var(--vscode-foreground);
+}
+
+
+.dreb-status-line {
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.85em;
+	font-style: italic;
+}
+
+/* Needs-input ------------------------------------------------------------- */
+.dreb-uireq {
+	border: 1px solid var(--vscode-focusBorder, #38f);
+	border-radius: 8px;
+	padding: 10px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.06));
+}
+.dreb-uireq-title {
+	font-weight: 600;
+}
+.dreb-uireq-message {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+.dreb-uireq-actions {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+.dreb-uireq-actions.column {
+	flex-direction: column;
+	align-items: stretch;
+}
+.dreb-option {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+/* One question block inside a multi-question ask wizard. */
+.dreb-ask-question {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding-bottom: 8px;
+}
+.dreb-ask-question + .dreb-ask-question {
+	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+	padding-top: 10px;
+}
+.dreb-ask-question-title {
+	font-weight: 600;
+}
+.dreb-ask-question-body {
+	word-break: break-word;
+}
+
+/* Composer ---------------------------------------------------------------- */
+.dreb-composer {
+	position: relative;
+	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+	padding: 8px 12px;
+}
+
+/* Top-edge drag handle: the composer is docked at the bottom of the panel, so a
+   grip on its top edge lets the user pull the input up over the chat area (and
+   double-click to reset). Spans the full width and overlays the border-top. */
+.dreb-resize-handle {
+	position: absolute;
+	top: -3px;
+	left: 0;
+	right: 0;
+	height: 9px;
+	margin: 0;
+	border: none;
+	background: transparent;
+	cursor: ns-resize;
+	touch-action: none;
+	z-index: 1;
+}
+.dreb-resize-handle:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder, #007fd4);
+	outline-offset: -1px;
+}
+.dreb-resize-handle::before {
+	content: "";
+	position: absolute;
+	top: 3px;
+	left: 50%;
+	transform: translateX(-50%);
+	width: 32px;
+	height: 3px;
+	border-radius: 3px;
+	background: var(--vscode-panel-border, rgba(128, 128, 128, 0.5));
+	opacity: 0;
+	transition: opacity 0.1s ease-in-out;
+}
+.dreb-resize-handle:hover::before {
+	opacity: 1;
+	background: var(--vscode-focusBorder, rgba(128, 128, 128, 0.8));
+}
+
+.dreb-composer-row {
+	display: flex;
+	gap: 8px;
+	align-items: flex-end;
+}
+
+.dreb-attachments {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-bottom: 8px;
+}
+.dreb-attachment {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 100%;
+	padding: 1px 4px 1px 8px;
+	font-size: 0.8em;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+	background: var(--vscode-badge-background, rgba(128, 128, 128, 0.18));
+	color: var(--vscode-foreground);
+}
+.dreb-attachment-icon {
+	font-family: var(--vscode-editor-font-family, monospace);
+	opacity: 0.7;
+}
+.dreb-attachment-label {
+	font-family: var(--vscode-editor-font-family, monospace);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.dreb-attachment-remove {
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	padding: 0 2px;
+	font-size: 1.1em;
+	line-height: 1;
+}
+.dreb-attachment-remove:hover {
+	color: var(--vscode-foreground);
+}
+
+/* Pasted-image chips: a small thumbnail preview with a remove button, reusing
+   the attachment-chip frame but sized for imagery. */
+.dreb-image-attachment {
+	padding: 2px 4px 2px 2px;
+}
+.dreb-image-thumb {
+	display: block;
+	width: 40px;
+	height: 40px;
+	object-fit: cover;
+	border-radius: 3px;
+}
+
+.dreb-input {
+	flex: 1;
+	/* Height is driven by the top drag handle (see `.dreb-resize-handle` and
+	   `clampComposerHeight`), so the native corner grip is disabled to avoid two
+	   competing affordances. `min-height` is the compact ~2-row floor. */
+	resize: none;
+	min-height: 44px;
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--vscode-input-foreground);
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.4));
+	border-radius: 6px;
+	padding: 6px 8px;
+}
+
+.dreb-menu {
+	position: absolute;
+	bottom: 100%;
+	left: 12px;
+	right: 12px;
+	margin-bottom: 4px;
+	max-height: 240px;
+	overflow-y: auto;
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+	border-radius: 6px;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.dreb-menu-item {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 2px;
+	width: 100%;
+	text-align: left;
+	border: none;
+	background: transparent;
+	color: var(--vscode-foreground);
+	padding: 6px 10px;
+	cursor: pointer;
+}
+.dreb-menu-item:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+.dreb-menu-name {
+	font-weight: 600;
+}
+.dreb-menu-desc {
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.85em;
+}
+
+button {
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+	border: 1px solid var(--vscode-button-border, transparent);
+	border-radius: 6px;
+	padding: 6px 12px;
+	cursor: pointer;
+}
+button:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+button.ghost {
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	background: var(--vscode-button-secondaryBackground, transparent);
+	border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+}
+.dreb-send.stop {
+	background: var(--vscode-charts-red, #d33);
+}
+
+input[type="text"],
+textarea {
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--vscode-input-foreground);
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.4));
+	border-radius: 6px;
+	padding: 6px 8px;
+}
+
+/* Spinner ----------------------------------------------------------------- */
+.dreb-spinner {
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+	border: 2px solid var(--vscode-descriptionForeground);
+	border-top-color: transparent;
+	border-radius: 50%;
+	animation: dreb-spin 0.8s linear infinite;
+	vertical-align: middle;
+}
+@keyframes dreb-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* Inline restore/fork checkpoint controls (Phase 6) ----------------------- */
+.dreb-checkpoint {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 2px 0 10px;
+	padding: 0 2px;
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+}
+.dreb-checkpoint::before,
+.dreb-checkpoint::after {
+	content: "";
+	flex: 1 1 auto;
+	height: 1px;
+	background: var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+}
+.dreb-checkpoint-btn {
+	flex: 0 0 auto;
+	font: inherit;
+	color: var(--vscode-descriptionForeground);
+	background: transparent;
+	border: none;
+	padding: 0 2px;
+	cursor: pointer;
+}
+.dreb-checkpoint-btn:hover {
+	color: var(--vscode-textLink-foreground, #3794ff);
+	text-decoration: underline;
+}
+.dreb-checkpoint-sep {
+	flex: 0 0 auto;
+	opacity: 0.6;
+}
+
+/* Branch-tree overlay (Phase 6) ------------------------------------------- */
+.dreb-tree-overlay {
+	position: fixed;
+	inset: 0;
+	background: rgba(0, 0, 0, 0.45);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 20;
+}
+.dreb-tree-panel {
+	width: min(560px, 90vw);
+	max-height: 80vh;
+	display: flex;
+	flex-direction: column;
+	background: var(--vscode-editor-background);
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+	border-radius: 8px;
+	overflow: hidden;
+}
+.dreb-tree-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 8px 12px;
+	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+.dreb-tree-title {
+	font-weight: 600;
+}
+.dreb-tree-close {
+	font: inherit;
+	font-size: 1.2em;
+	line-height: 1;
+	color: var(--vscode-foreground);
+	background: transparent;
+	border: none;
+	cursor: pointer;
+}
+.dreb-tree-body {
+	overflow-y: auto;
+	padding: 4px 0;
+}
+.dreb-tree-empty {
+	padding: 12px;
+	color: var(--vscode-descriptionForeground);
+}
+.dreb-tree-node {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	width: 100%;
+	text-align: left;
+	font: inherit;
+	color: var(--vscode-foreground);
+	background: transparent;
+	border: none;
+	padding: 5px 12px;
+	cursor: pointer;
+}
+.dreb-tree-node:hover:not(:disabled) {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+.dreb-tree-node:disabled {
+	cursor: default;
+	opacity: 0.75;
+}
+.dreb-tree-role {
+	flex: 0 0 auto;
+	font-size: 0.8em;
+	color: var(--vscode-descriptionForeground);
+}
+.dreb-tree-preview {
+	flex: 1 1 auto;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.dreb-tree-current {
+	flex: 0 0 auto;
+	font-size: 0.8em;
+	color: var(--vscode-charts-green, #2a2);
+}

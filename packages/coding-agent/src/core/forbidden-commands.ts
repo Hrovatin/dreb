@@ -98,6 +98,11 @@ const QUOTED_CONTENT_PATTERNS: string[] = [
  * Handles escaped quotes (\", \') within strings. Correctly counts
  * consecutive backslashes before a quote — an even count means the quote
  * is real (e.g. `\\"` is escaped-backslash + closing quote).
+ *
+ * This masker models plain `'...'` and `"..."` strings only. It deliberately
+ * does NOT try to model bash ANSI-C `$'...'` quoting (whose backslash-escape
+ * rules differ); callers detect that construct via `containsAnsiCQuoting` and
+ * fall back to a conservative unmasked split instead — see `maskForSplitting`.
  */
 function maskQuotedContent(command: string): string {
 	let result = "";
@@ -108,9 +113,16 @@ function maskQuotedContent(command: string): string {
 		const ch = command[i];
 
 		if (ch === "'" && !inDouble) {
-			// In bash, single-quoted strings are completely literal — backslashes
-			// have no escape function inside single quotes. Always toggle.
-			inSingle = !inSingle;
+			// In bash, backslash cannot escape anything INSIDE a plain single-
+			// quoted string, so a `'` there always closes. OUTSIDE any quote, a
+			// backslash-escaped `\'` is a literal character and must NOT open a
+			// single-quoted region — otherwise a real operator after it (`;`,
+			// `&&`) would be masked and hidden from segment splitting.
+			if (inSingle) {
+				inSingle = false;
+			} else if (!isEscaped(command, i)) {
+				inSingle = true;
+			}
 			result += ch;
 		} else if (ch === '"' && !inSingle) {
 			if (!isEscaped(command, i)) {
@@ -137,7 +149,7 @@ function maskQuotedContent(command: string): string {
  * e.g. `\\"` → 2 backslashes → even → `"` is NOT escaped (real quote)
  *      `\\\"` → 3 backslashes → odd → `"` IS escaped (literal quote)
  */
-function isEscaped(str: string, i: number): boolean {
+export function isEscaped(str: string, i: number): boolean {
 	let count = 0;
 	let j = i - 1;
 	while (j >= 0 && str[j] === "\\") {
@@ -145,6 +157,64 @@ function isEscaped(str: string, i: number): boolean {
 		j--;
 	}
 	return count % 2 === 1;
+}
+
+/**
+ * Detect bash ANSI-C `$'...'` quoting anywhere in `command`.
+ *
+ * `$'...'` is NOT a plain single-quoted string: inside it a backslash IS an
+ * escape (`\'` is a literal apostrophe, `\n` a newline, `\x27` a byte), so its
+ * tokenization differs from anything `maskQuotedContent` models. Rather than
+ * attempt to parse those escape rules (a repeatedly-bypassed approach), callers
+ * treat the whole command conservatively when this returns true.
+ *
+ * Fires on any unescaped `$'` that would OPEN a quote — including the second
+ * `$` of a `$$'` sequence (bash PID expansion followed by a plain `'...'`).
+ * Over-detecting is intentional and safe: the conservative fallback it triggers
+ * only ever exposes MORE shell operators, never hides one. `$'` that is inside
+ * a double-quoted region, or whose `$` is backslash-escaped, is ordinary text
+ * and is not flagged.
+ */
+export function containsAnsiCQuoting(command: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (ch === "'" && !inDouble) {
+			if (inSingle) {
+				inSingle = false;
+			} else if (!isEscaped(command, i)) {
+				// An unescaped `$` immediately before an opening `'` is `$'`.
+				if (i > 0 && command[i - 1] === "$" && !isEscaped(command, i - 1)) {
+					return true;
+				}
+				inSingle = true;
+			}
+		} else if (ch === '"' && !inSingle) {
+			if (!isEscaped(command, i)) inDouble = !inDouble;
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Produce the string used for operator-splitting and full-command pattern
+ * matching. Normally quoted content is masked so operators inside strings do
+ * not cause false splits. But when the command contains bash ANSI-C `$'...'`
+ * quoting (see `containsAnsiCQuoting`), whose escaping our masker cannot
+ * reliably model, we DO NOT mask at all and return the raw command.
+ *
+ * This is a deliberate fail-safe (default-deny) posture: operating on the raw
+ * text can only expose MORE operators/patterns, never hide one, so a dangerous
+ * command cannot be smuggled past the denylist inside a mis-parsed `$'...'`
+ * region. It may over-split operators that were genuinely inside a quote, but
+ * benign fragments do not match the forbidden-command patterns, so legitimate
+ * commands (e.g. `git commit -m $'a\\nb'`) are not over-blocked.
+ */
+function maskForSplitting(command: string): string {
+	return containsAnsiCQuoting(command) ? command : maskQuotedContent(command);
 }
 
 /**
@@ -186,9 +256,12 @@ function extractQuotedContent(text: string): string[] {
  * operators inside quoted strings don't cause false splits.
  * Each segment is trimmed of leading whitespace.
  */
-function splitCommandSegments(command: string): string[] {
-	// Mask quoted content to avoid splitting on operators inside strings
-	const masked = maskQuotedContent(command);
+export function splitCommandSegments(command: string): string[] {
+	// Mask quoted content to avoid splitting on operators inside strings.
+	// When ANSI-C `$'...'` quoting is present, `maskForSplitting` returns the
+	// raw command instead so no operator can be hidden inside a mis-parsed
+	// ANSI-C region (conservative fail-safe — see `maskForSplitting`).
+	const masked = maskForSplitting(command);
 
 	// Split on shell operators: &&, ||, ;, |, &, and newlines
 	const splits = masked.split(/\s*(?:&&|\|\||[;&|]|\n)\s*/);
@@ -229,7 +302,7 @@ function splitCommandSegments(command: string): string[] {
  *
  * Strips iteratively to handle stacking (e.g., `env command sudo`).
  */
-function stripShellPrefixes(segment: string): string {
+export function stripShellPrefixes(segment: string): string {
 	let result = segment;
 
 	// Strip leading backslash (alias escape)
@@ -278,7 +351,7 @@ function stripShellPrefixes(segment: string): string {
  * Handles both full-segment wrappers ($(cmd)) and inline substitutions
  * (result=$(cmd)) by extracting inner commands.
  */
-function stripSubshellWrapper(segment: string): string {
+export function stripSubshellWrapper(segment: string): string {
 	// Strip $(...) wrapper when it's the whole segment
 	if (/^\$\(/.test(segment) && segment.endsWith(")")) {
 		return segment.slice(2, -1).trim();
@@ -325,7 +398,9 @@ export function isForbiddenCommand(command: string, extraPatterns?: string[]): s
 	// Pre-split check: match full-command patterns against the quote-masked
 	// string to catch constructs that span shell operators (e.g., fork bombs).
 	// Using the masked string prevents false positives from quoted content.
-	const masked = maskQuotedContent(command);
+	// (When ANSI-C `$'...'` quoting is present, `maskForSplitting` returns the
+	// raw command so nothing is hidden from these patterns — see its doc.)
+	const masked = maskForSplitting(command);
 	for (const pattern of FULL_COMMAND_PATTERNS) {
 		try {
 			const re = new RegExp(pattern);

@@ -2,6 +2,7 @@
 name: error-auditor
 description: Audits code changes for silent runtime failures, missing error handling, and unsafe fallbacks
 tools: read, grep, find, ls, bash, search
+readonly: true
 model: zai/glm-5-turbo, anthropic/sonnet
 ---
 

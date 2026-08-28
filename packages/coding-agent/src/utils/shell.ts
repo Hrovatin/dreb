@@ -126,10 +126,17 @@ export function getShellEnv(): NodeJS.ProcessEnv {
 	const hasBinDir = pathEntries.includes(binDir);
 	const updatedPath = hasBinDir ? currentPath : [binDir, currentPath].filter(Boolean).join(delimiter);
 
-	return {
+	const env: NodeJS.ProcessEnv = {
 		...process.env,
 		[pathKey]: updatedPath,
 	};
+	// When dreb itself is running under the editor's Electron runtime as Node
+	// (ELECTRON_RUN_AS_NODE=1, the VS Code extension's last-resort spawn), that
+	// flag must not leak into shell tool commands: a command like `code .` would
+	// otherwise run the Electron binary headless as Node instead of opening a
+	// window. Subagent/CLI re-spawns pass process.env directly and keep the flag.
+	delete env.ELECTRON_RUN_AS_NODE;
+	return env;
 }
 
 /**

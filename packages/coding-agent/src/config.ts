@@ -162,6 +162,11 @@ export function getExamplesPath(): string {
 	return resolve(join(getPackageDir(), "examples"));
 }
 
+/** Get path to the VSCode extension's README (sibling `packages/vscode/` package). */
+export function getVscodeReadmePath(): string {
+	return resolve(join(getPackageDir(), "..", "vscode", "README.md"));
+}
+
 // =============================================================================
 // App Config (from package.json drebConfig)
 // =============================================================================

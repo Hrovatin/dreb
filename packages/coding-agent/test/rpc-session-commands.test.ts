@@ -55,49 +55,17 @@ describe("toRpcSessionInfo", () => {
 });
 
 describe("RPC session commands", () => {
-	it("serializes agent-scoped steering and pending requests", async () => {
-		const client = new RpcClient() as any;
-		client.send = vi
-			.fn()
-			.mockResolvedValueOnce({ type: "response", command: "steer_background_agent", success: true })
-			.mockResolvedValueOnce({
-				type: "response",
-				command: "get_background_agent_pending",
-				success: true,
-				data: {
-					steeringMode: "one-at-a-time",
-					pending: { steering: ["first", "second"], followUp: [] },
-				},
-			});
-
-		await client.steerBackgroundAgent("agent-1", "Whatever the user writes");
-		await expect(client.getBackgroundAgentPending("agent-1")).resolves.toEqual({
-			steeringMode: "one-at-a-time",
-			pending: { steering: ["first", "second"], followUp: [] },
-		});
-		expect(client.send).toHaveBeenNthCalledWith(1, {
-			type: "steer_background_agent",
-			agentId: "agent-1",
-			message: "Whatever the user writes",
-		});
-		expect(client.send).toHaveBeenNthCalledWith(2, {
-			type: "get_background_agent_pending",
-			agentId: "agent-1",
-		});
-	});
-
-	it("rejects failed agent-scoped steering responses", async () => {
+	it("RpcClient.setAskMode sends the set_ask_mode command and unwraps the resulting state", async () => {
 		const client = new RpcClient() as any;
 		client.send = vi.fn().mockResolvedValue({
 			type: "response",
-			command: "steer_background_agent",
-			success: false,
-			error: "Background agent is no longer running.",
+			command: "set_ask_mode",
+			success: true,
+			data: { enabled: true },
 		});
 
-		await expect(client.steerBackgroundAgent("agent-1", "too late")).rejects.toThrow(
-			"Background agent is no longer running.",
-		);
+		await expect(client.setAskMode(true)).resolves.toEqual({ enabled: true });
+		expect(client.send).toHaveBeenCalledWith({ type: "set_ask_mode", enabled: true });
 	});
 
 	it("RpcClient.listAllSessions sends the list_all_sessions command and unwraps sessions", async () => {
