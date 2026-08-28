@@ -92,6 +92,14 @@ The initial startup scan still walks upward from the main or subagent launch cwd
 
 **Lists of live/long-lived UI cards (fleet sessions, agent strips, etc.) must sort deterministically, not by dynamic activity.** Order by a stable key (e.g. project path alphabetical, then session start time as tiebreak) so cards keep a fixed position. Sorting by `lastActivity` or other constantly-changing signals makes cards jump around on every event — consistency is better UX than dynamic reordering. When a new ordering dimension is needed, add a stable field (like `createdAt`) rather than reusing a mutable one.
 
+## Review Findings — Explain the Impact
+
+**Every review finding MUST include a short, intuitive explanation of what it means for the user.** Don't just state that something is wrong or point at a line — spell out, in plain language, the practical consequence: what breaks, who is affected, and why it matters in real use. A finding without this context forces the reader to reverse-engineer its significance.
+
+- State the issue, then add a brief "what this means" note framed around user impact (e.g. "→ users on slow connections will see the app hang with no feedback").
+- Keep the explanation short and jargon-light — one or two sentences is usually enough.
+- This applies to all review output (mach6-review, ad-hoc code review, PR comments). The exact phrasing can be adjusted, but the user-impact explanation is required.
+
 ## Testing
 
 ```bash
