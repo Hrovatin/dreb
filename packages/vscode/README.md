@@ -200,6 +200,8 @@ This extension is distributed as part of the dreb repo, not as a published `.vsi
 npm run install-vscode        # builds the repo, then links packages/vscode into ~/.vscode/extensions
 ```
 
+> **After pulling an update**, run `npm install` first if it added new dependencies — `install-vscode` preflights this and stops with a clear "run `npm install`" message rather than a cryptic bundler error.
+
 Then reload the editor (**Developer: Reload Window**) and run **dreb: Open Chat**.
 
 - VS Code Insiders: `node packages/vscode/scripts/install-extension.mjs --insiders`
